@@ -73,7 +73,7 @@ out = {
                 "UNRESOLVED: both ISA specs say bit 74, Cesar's SM120 file sets "
                 "bit 72. Do not run either close variant until confirmed."),
     "close_bit": {"spec": CLOSE_BIT_SPEC, "cesar_sm120": CLOSE_BIT_CESAR,
-                  "status": "unresolved: ask Cesar, or read an SM89 OptiX dump (Setup_4)"},
+                  "status": "resolved: bit 74. Read from SM89 OptiX pipeline code in device memory (Setup_4, driver 580.178.04): the last TTULD of each sequence sets bit 74, bit 72 is never set. Also bit 74 in the sm75 gpuWarmup kernel in libnvoptix."},
     "sequences": {"canonical_traversal": {
         "description": "TTUOPEN -> TTUMACROFUSE(8) -> TTUST x4 -> TTUGO -> TTULD x2 -> TTULD.CLOSE. All operands R0/P0 as placeholders.",
         "instructions": seq}},
