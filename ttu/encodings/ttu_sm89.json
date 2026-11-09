@@ -1,0 +1,169 @@
+{
+  "schema": "eoss.encodings/v1",
+  "sm": "89",
+  "generated_by": "ttu/encodings/gen_ttu_sm89.py",
+  "comment": "SM89 rebuild of the SM120 canonical traversal. Opcodes, field positions and control bits are identical to SM120. Two real differences: (1) TTUST second source and TTULD second destination (bits 71:64) are a GPR pair Rc on SM89 vs uniform Ra_URc on SM120, same bits, different register file; (2) the close bit is UNRESOLVED: both ISA specs say bit 74, Cesar's SM120 file sets bit 72. Do not run either close variant until confirmed.",
+  "close_bit": {
+    "spec": 74,
+    "cesar_sm120": 72,
+    "status": "unresolved: ask Cesar, or read an SM89 OptiX dump (Setup_4)"
+  },
+  "sequences": {
+    "canonical_traversal": {
+      "description": "TTUOPEN -> TTUMACROFUSE(8) -> TTUST x4 -> TTUGO -> TTULD x2 -> TTULD.CLOSE. All operands R0/P0 as placeholders.",
+      "instructions": [
+        {
+          "name": "TTUOPEN",
+          "class": "ttuopen_",
+          "fields": {},
+          "opex": 22,
+          "lo": "0x00000000000073d0",
+          "hi": "0x000fec0000000000",
+          "matches_sm120": true
+        },
+        {
+          "name": "TTUMACROFUSE(8)",
+          "class": "ttumacrofuse_",
+          "fields": {
+            "Sb": 8
+          },
+          "opex": 4,
+          "lo": "0x00000800000079d4",
+          "hi": "0x000fc80000000000",
+          "matches_sm120": true
+        },
+        {
+          "name": "TTUST [0x000]",
+          "class": "ttust_",
+          "fields": {
+            "ImmU16": 0,
+            "Rb": "R0",
+            "Rc": "R0"
+          },
+          "opex": 17,
+          "lo": "0x00000000000073d1",
+          "hi": "0x000fe20000000000",
+          "matches_sm120": true
+        },
+        {
+          "name": "TTUST [0x040]",
+          "class": "ttust_",
+          "fields": {
+            "ImmU16": 64,
+            "Rb": "R0",
+            "Rc": "R0"
+          },
+          "opex": 17,
+          "lo": "0x00004000000073d1",
+          "hi": "0x000fe20000000000",
+          "matches_sm120": true
+        },
+        {
+          "name": "TTUST [0x050]",
+          "class": "ttust_",
+          "fields": {
+            "ImmU16": 80,
+            "Rb": "R0",
+            "Rc": "R0"
+          },
+          "opex": 17,
+          "lo": "0x00005000000073d1",
+          "hi": "0x000fe20000000000",
+          "matches_sm120": true
+        },
+        {
+          "name": "TTUST [0x080]",
+          "class": "ttust_",
+          "fields": {
+            "ImmU16": 128,
+            "Rb": "R0",
+            "Rc": "R0"
+          },
+          "opex": 17,
+          "lo": "0x00008000000073d1",
+          "hi": "0x000fe20000000000",
+          "matches_sm120": true
+        },
+        {
+          "name": "TTUGO",
+          "class": "ttugo_",
+          "fields": {},
+          "opex": 17,
+          "lo": "0x00000000000073d3",
+          "hi": "0x000fe20000000000",
+          "matches_sm120": true
+        },
+        {
+          "name": "TTULD",
+          "class": "ttuld__no_close",
+          "fields": {
+            "Pu": "P0",
+            "Rd": "R0",
+            "Rd2": "R0",
+            "ImmU16": 0
+          },
+          "opex": 17,
+          "lo": "0x00000000000073d2",
+          "hi": "0x000fe20000000000",
+          "matches_sm120": true
+        },
+        {
+          "name": "TTULD",
+          "class": "ttuld__no_close",
+          "fields": {
+            "Pu": "P0",
+            "Rd": "R0",
+            "Rd2": "R0",
+            "ImmU16": 0
+          },
+          "opex": 17,
+          "lo": "0x00000000000073d2",
+          "hi": "0x000fe20000000000",
+          "matches_sm120": true
+        },
+        {
+          "name": "TTULD.CLOSE",
+          "class": "ttuld__close",
+          "fields": {
+            "Pu": "P0",
+            "Rd": "R0",
+            "Rd2": "R0",
+            "ImmU16": 0
+          },
+          "opex": 17,
+          "lo": "0x00000000000073d2",
+          "hi": "0x000fe20000000400",
+          "matches_sm120": false
+        }
+      ]
+    }
+  },
+  "alternatives": {
+    "ttuld_close_bit72": {
+      "name": "TTULD.CLOSE (Cesar bit 72 variant)",
+      "class": "ttuld__close",
+      "fields": {
+        "Pu": "P0",
+        "Rd": "R0",
+        "Rd2": "R0",
+        "ImmU16": 0
+      },
+      "opex": 17,
+      "lo": "0x00000000000073d2",
+      "hi": "0x000fe20000000100"
+    }
+  },
+  "diff_vs_sm120": [
+    {
+      "name": "TTULD.CLOSE",
+      "sm89_spec": [
+        "0x00000000000073d2",
+        "0x000fe20000000400"
+      ],
+      "sm120_cesar": [
+        "0x00000000000073d2",
+        "0x000fe20000000100"
+      ]
+    }
+  ]
+}
