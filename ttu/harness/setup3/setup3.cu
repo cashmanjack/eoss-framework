@@ -56,6 +56,7 @@
 //     --smem BYTES   ttu_one launches reserve BYTES of dynamic shared memory (unused), which shrinks L1
 //                    (Memory_1; measured with chase.cu: any reservation gives L1 about 16..24 KB, none about 90 KB)
 //     --optix-repeat K  time K more OptiX reference launches with CUDA events (Throughput_7), after one untimed
+//     --blockrays    (file:F rays) every block gets its own rays: F holds G x 32 W rays, block b lane i = ray b 32 W + i
 //     --no-ttu       stop after the OptiX reference
 //
 // ttu_one as compiled here only loads 96 words into registers and stores them
@@ -206,7 +207,7 @@ int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
-    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int blockrays = 0; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
@@ -214,6 +215,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--passes") && a + 1 < argc) passes = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--smem") && a + 1 < argc) smem = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--optix-repeat") && a + 1 < argc) optix_repeat = atoi(argv[++a]);
+        else if (!strcmp(argv[a], "--blockrays")) blockrays = 1;
         else if (!strcmp(argv[a], "--active") && a + 1 < argc) active = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--sched") && a + 1 < argc) sched = argv[++a];
         else if (!strcmp(argv[a], "--idle") && a + 1 < argc) idle = argv[++a];
@@ -342,10 +344,10 @@ int main(int argc, char **argv)
     if (!strncmp(argv[3], "file:", 5)) {
         FILE *rf = fopen(argv[3] + 5, "rb"); if (!rf) { fprintf(stderr, "cannot read %s\n", argv[3] + 5); return 2; }
         std::vector<Ray8> fr; Ray8 y; while (fread(&y, sizeof y, 1, rf) == 1) fr.push_back(y); fclose(rf);
-        if (fr.empty() || fr.size() % LANES || fr.size() > (1u << 20)) { fprintf(stderr, "file: ray count %zu is not a multiple of %u\n", fr.size(), LANES); return 2; }
+        if (fr.empty() || fr.size() % (blockrays ? (size_t)blocks * LANES : (size_t)LANES) || fr.size() > (1u << 20)) { fprintf(stderr, "file: ray count %zu is not a multiple of %u\n", fr.size(), LANES); return 2; }
         rays = fr;
     }
-    const unsigned NR = (unsigned)rays.size(), nchunks = NR / LANES;
+    const unsigned CH = blockrays ? blocks * LANES : LANES, NR = (unsigned)rays.size(), nchunks = NR / CH;
     for (unsigned i = 0; i < LANES && (rnd || rnd1 || rndz); ++i) {
         std::mt19937 g(777 + (rnd1 ? 0 : i)); std::uniform_real_distribution<float> U(-1.f, 1.f);
         float3 o{U(g), U(g), U(g)}, d;
@@ -584,7 +586,7 @@ int main(int argc, char **argv)
     cudaError_t e_all = cudaSuccess;
     for (int pc = 0; pc < passes * (int)nchunks && e_all == cudaSuccess; ++pc) {
     const int pass = pc / (int)nchunks, chunk = pc % (int)nchunks;
-    const Ray8 *crays = &rays[(size_t)chunk * LANES];
+    const Ray8 *crays = &rays[(size_t)chunk * CH];
     if (pc > 0) {   // next chunk file
         const std::string cn = std::string(argv[5]) + ".p" + std::to_string(pass) + "c" + std::to_string(chunk);
         jf = fopen(cn.c_str(), "w"); fprintf(jf, "{\"pass\": %d, \"chunk\": %d", pass, chunk);
@@ -594,7 +596,7 @@ int main(int argc, char **argv)
     std::vector<unsigned> in(TOTAL * N, 0), out(TOTAL * N, 0x77777777u);
     for (size_t i = 0; i < TOTAL; ++i) {
         unsigned *R = &in[i * N];
-        const Ray8 &y = crays[i % LANES];
+        const Ray8 &y = blockrays ? crays[i] : crays[i % LANES];
         R[12] = fbits(y.o[2]); R[13] = fbits(y.tmin); R[82] = fbits(y.o[0]); R[83] = fbits(y.o[1]);   // 0x40
         R[16] = fbits(y.d[2]); R[17] = fbits(y.tmax); R[14] = fbits(y.d[0]); R[15] = fbits(y.d[1]);   // 0x50
         R[52] = R[12]; R[53] = R[13]; R[56] = R[82]; R[57] = R[83];                                   // 0xC0
