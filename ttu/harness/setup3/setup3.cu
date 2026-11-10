@@ -55,6 +55,7 @@
 //                    at. Padding lanes are masked. --passes P repeats the whole schedule; the last is reported.
 //     --smem BYTES   ttu_one launches reserve BYTES of dynamic shared memory (unused), which shrinks L1
 //                    (Memory_1; measured with chase.cu: any reservation gives L1 about 16..24 KB, none about 90 KB)
+//     --optix-repeat K  time K more OptiX reference launches with CUDA events (Throughput_7), after one untimed
 //     --no-ttu       stop after the OptiX reference
 //
 // ttu_one as compiled here only loads 96 words into registers and stores them
@@ -196,13 +197,14 @@ int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
-    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int smem = 0; int passes = 1; std::string sched; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
         else if (!strcmp(argv[a], "--repeat") && a + 1 < argc) repeat = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--passes") && a + 1 < argc) passes = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--smem") && a + 1 < argc) smem = atoi(argv[++a]);
+        else if (!strcmp(argv[a], "--optix-repeat") && a + 1 < argc) optix_repeat = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--active") && a + 1 < argc) active = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--sched") && a + 1 < argc) sched = argv[++a];
         else if (!strcmp(argv[a], "--idle") && a + 1 < argc) idle = argv[++a];
@@ -365,6 +367,14 @@ int main(int argc, char **argv)
     CUdeviceptr dprm; CK(cudaMalloc((void **)&dprm, sizeof prm)); CK(cudaMemcpy((void *)dprm, &prm, sizeof prm, cudaMemcpyHostToDevice));
     OX(optixLaunch(pipe, 0, dprm, sizeof prm, &sbt, NR, 1, 1));
     CK(cudaDeviceSynchronize());
+    std::vector<float> optix_ms;
+    if (optix_repeat > 0) {   // Throughput_7: the same launch again, timed (the first launch above warms caches and JIT)
+        cudaEvent_t a0, a1; CK(cudaEventCreate(&a0)); CK(cudaEventCreate(&a1));
+        for (int k = 0; k < optix_repeat; ++k) {
+            CK(cudaEventRecord(a0)); OX(optixLaunch(pipe, 0, dprm, sizeof prm, &sbt, NR, 1, 1)); CK(cudaEventRecord(a1));
+            CK(cudaEventSynchronize(a1)); float ms; CK(cudaEventElapsedTime(&ms, a0, a1)); optix_ms.push_back(ms);
+        }
+    }
     std::vector<RefOut> ref(NR); unsigned long long inst[18];
     CK(cudaMemcpy(ref.data(), prm.out, NR * sizeof(RefOut), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(inst, prm.inst, sizeof inst, cudaMemcpyDeviceToHost));
@@ -426,6 +436,9 @@ int main(int argc, char **argv)
             (unsigned long long)gas, (size_t)bs.outputSizeInBytes, (unsigned long long)h, off, root);
     fprintf(jf, " \"inst\": \"0x%llx\", \"inst_ok\": %s, \"c3_34\": \"0x%08x\", \"handle_ok\": %s, \"align_ok\": %s,\n", A,
             inst_ok ? "true" : "false", c3_34, handle_ok ? "true" : "false", align_ok ? "true" : "false");
+    fprintf(jf, " \"optix_ms\": [");
+    for (size_t k = 0; k < optix_ms.size(); ++k) fprintf(jf, "%s%.6f", k ? "," : "", optix_ms[k]);
+    fprintf(jf, "],\n");
     fprintf(jf, " \"start_file\": \"%s\", \"rays_not_from_root\": %zu,", start_file ? start_file : "", n_nonroot);
     fprintf(jf, " \"start_path\": \"%s\",", use_path ? (start_path.empty() ? "root" : start_path.c_str()) : "");
     fprintf(jf, " \"start_off\": \"0x%llx\", \"start\": \"0x%llx\", \"start_flags\": \"0x%x\", \"start_ok\": %s,\n",
