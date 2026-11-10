@@ -44,6 +44,13 @@
 //                    before any TTU instruction (run with --sms of the block's SM, 0 for one block);
 //                    tmax0: they run the group with tmax 0 (riding along like finished resume lanes);
 //                    tneg: tmax -1; empty: tmin 1, tmax 0
+//     --sched M      run the whole ray set with a scheduler instead of chunks (needs an --smfilter build,
+//                    --sms 0,0): round 0 = every ray from its start node in file order; then rounds of
+//                    resumed queries (tmax = best t, 0x180/0x190 from the returned pending entries) until no
+//                    ray has pending entries (at most --resume K rounds). M = inplace: rays keep their lane,
+//                    finished lanes are masked; compact: the rays still running are packed into full warps in
+//                    their previous order; regroup: packed after sorting by the pending node pointer they resume
+//                    at. Padding lanes are masked. --passes P repeats the whole schedule; the last is reported.
 //     --no-ttu       stop after the OptiX reference
 //
 // ttu_one as compiled here only loads 96 words into registers and stores them
@@ -60,6 +67,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <set>
 #include <random>
 #include <sstream>
 #include <string>
@@ -169,13 +177,14 @@ int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
-    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int passes = 1; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int passes = 1; std::string sched; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
         else if (!strcmp(argv[a], "--repeat") && a + 1 < argc) repeat = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--passes") && a + 1 < argc) passes = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--active") && a + 1 < argc) active = atoi(argv[++a]);
+        else if (!strcmp(argv[a], "--sched") && a + 1 < argc) sched = argv[++a];
         else if (!strcmp(argv[a], "--idle") && a + 1 < argc) idle = argv[++a];
         else if (!strcmp(argv[a], "--warps") && a + 1 < argc) warps = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--blocks") && a + 1 < argc) blocks = atoi(argv[++a]);
@@ -199,7 +208,7 @@ int main(int argc, char **argv)
         }
         else { fprintf(stderr, "unknown option %s\n", argv[a]); return 2; }
     }
-    if (active < 1 || active > 32 || (idle != "mask" && idle != "tmax0" && idle != "tneg" && idle != "empty") || passes < 1 || passes > 8 || repeat < 1 || repeat > 100 || warps < 1 || warps > MAXW || blocks < 1 || blocks > 1024 || flush_mb < 0 || flush_mb > 4096) {
+    if ((!sched.empty() && sched != "inplace" && sched != "compact" && sched != "regroup") || active < 1 || active > 32 || (idle != "mask" && idle != "tmax0" && idle != "tneg" && idle != "empty") || passes < 1 || passes > 8 || repeat < 1 || repeat > 100 || warps < 1 || warps > MAXW || blocks < 1 || blocks > 1024 || flush_mb < 0 || flush_mb > 4096) {
         fprintf(stderr, "bad option value\n"); return 2;
     }
     unsigned words[8];
@@ -418,6 +427,105 @@ int main(int argc, char **argv)
     }
     if (!run_ttu) { fprintf(jf, "\n}\n"); fclose(jf); return 0; }
 
+    if (!sched.empty()) {   // ---- scheduler over the whole ray set (Memory_4a) ----
+        auto init_regs = [&](unsigned *R, const Ray8 &y, unsigned long long st0) {   // same image as the chunk loop
+            std::fill(R, R + N, 0u);
+            R[12] = fbits(y.o[2]); R[13] = fbits(y.tmin); R[82] = fbits(y.o[0]); R[83] = fbits(y.o[1]);
+            R[16] = fbits(y.d[2]); R[17] = fbits(y.tmax); R[14] = fbits(y.d[0]); R[15] = fbits(y.d[1]);
+            R[52] = R[12]; R[53] = R[13]; R[56] = R[82]; R[57] = R[83];
+            R[30] = R[16]; R[31] = R[17]; R[46] = R[14]; R[47] = R[15];
+            R[34] = (unsigned)(A >> 6); R[35] = ((((unsigned)(A >> 32) >> 6) | 0x402800u) & 0x1ffffffu) | 0x2000000u;
+            R[70] = (unsigned)(st0 >> 7); R[71] = ((unsigned)(st0 >> 32) >> 7) | start_flags;
+            R[68] = words[0]; R[69] = words[1]; R[62] = words[2]; R[63] = words[3];
+            R[60] = words[4]; R[61] = words[5]; R[58] = words[6]; R[59] = words[7];
+            R[18] = sm_a; R[19] = sm_b;
+        };
+        auto pend = [](const unsigned *R) { return (R[56] | R[57] | R[58] | R[59] | R[60] | R[61] | R[70] | R[71]) != 0; };
+        auto absf = [](unsigned u) { u &= 0x7fffffffu; float f; memcpy(&f, &u, 4); return f; };
+        unsigned *din, *dout, *sink; uint4 *fbuf = nullptr; const size_t fn = (size_t)(flush_mb * 1048576.0) / sizeof(uint4);
+        CK(cudaMalloc((void **)&din, (size_t)LANES * N * 4)); CK(cudaMalloc((void **)&dout, (size_t)LANES * N * 4)); CK(cudaMalloc((void **)&sink, 4));
+        if (fn) { CK(cudaMalloc((void **)&fbuf, fn * sizeof(uint4))); CK(cudaMemset(fbuf, 1, fn * sizeof(uint4))); }
+        cudaError_t e = cudaSuccess;
+        std::vector<unsigned> img((size_t)NR * N); std::vector<int> nq, done; std::vector<float> best_t; std::vector<unsigned> best_p;
+        std::vector<double> lat; std::string rounds_json; int round = 0; long long launches = 0;
+        for (int pass = 0; pass < passes && e == cudaSuccess; ++pass) {
+            for (unsigned r = 0; r < NR; ++r) init_regs(&img[(size_t)r * N], rays[r], ray_start[r]);
+            nq.assign(NR, 0); done.assign(NR, 0); best_t.assign(NR, -1.f); best_p.assign(NR, 0); lat.assign(NR, 0.0);
+            std::vector<unsigned long long> key(NR, 0); rounds_json.clear(); launches = 0;
+            for (round = 0; round <= resume && e == cudaSuccess; ++round) {
+                std::vector<long long> slots;   // ray per lane, -1 = masked
+                if (round == 0 || sched == "inplace") {
+                    for (unsigned c = 0; c < nchunks; ++c) {
+                        bool any = false; for (unsigned i = 0; i < LANES; ++i) any |= !done[c * LANES + i];
+                        if (any) for (unsigned i = 0; i < LANES; ++i) slots.push_back(done[c * LANES + i] ? -1 : (long long)(c * LANES + i));
+                    }
+                } else {
+                    std::vector<unsigned> act; for (unsigned r = 0; r < NR; ++r) if (!done[r]) act.push_back(r);
+                    if (sched == "regroup") std::stable_sort(act.begin(), act.end(), [&](unsigned a, unsigned b) { return key[a] < key[b]; });
+                    for (unsigned r : act) slots.push_back(r);
+                    while (slots.size() % LANES) slots.push_back(-1);
+                }
+                if (slots.empty()) break;
+                double kpw = 0; int nw = 0; std::set<unsigned long long> allk;   // distinct resume nodes per warp (rounds >= 1)
+                for (size_t w0 = 0; w0 < slots.size(); w0 += 32) {
+                    std::set<unsigned long long> ks; for (size_t l = w0; l < w0 + 32; ++l) if (slots[l] >= 0) { ks.insert(key[slots[l]]); allk.insert(key[slots[l]]); }
+                    if (!ks.empty()) { kpw += ks.size(); ++nw; }
+                }
+                char hb[192]; snprintf(hb, sizeof hb, "%s{\"round\": %d, \"nodes_per_warp\": %.2f, \"distinct_nodes\": %zu, \"launches\": [", round ? ", " : "", round, round ? kpw / nw : 1.0, round ? allk.size() : (size_t)1); rounds_json += hb;
+                std::vector<unsigned> hin((size_t)LANES * N), hout((size_t)LANES * N);
+                for (size_t L0 = 0; L0 < slots.size() && e == cudaSuccess; L0 += LANES) {
+                    int nact = 0;
+                    for (unsigned i = 0; i < LANES; ++i) {
+                        const long long r = slots[L0 + i]; unsigned *R = &hin[(size_t)i * N];
+                        if (r >= 0) { memcpy(R, &img[(size_t)r * N], N * 4); ++nact; }
+                        else { memcpy(R, &img[0], N * 4); R[18] = R[19] = 0xffffffffu; }   // masked: exits before TTUOPEN
+                    }
+                    CK(cudaMemcpy(din, hin.data(), hin.size() * 4, cudaMemcpyHostToDevice));
+                    std::fill(hout.begin(), hout.end(), 0x77777777u);
+                    CK(cudaMemcpy(dout, hout.data(), hout.size() * 4, cudaMemcpyHostToDevice));
+                    if (fn) { flush_read<<<142 * 8, 256>>>(fbuf, fn, sink); CK(cudaGetLastError()); }
+                    ttu_one<<<1, LANES>>>(din, dout); ++launches;
+                    e = cudaGetLastError(); if (e == cudaSuccess) e = cudaDeviceSynchronize();
+                    if (e != cudaSuccess) break;
+                    CK(cudaMemcpy(hout.data(), dout, hout.size() * 4, cudaMemcpyDeviceToHost));
+                    std::string wj;
+                    for (int w = 0; w < warps; ++w) {
+                        int l0 = -1; for (int l = 0; l < 32 && l0 < 0; ++l) if (slots[L0 + 32 * w + l] >= 0) l0 = l;
+                        if (l0 < 0) continue;
+                        const unsigned *O = &hout[(size_t)(32 * w + l0) * N];
+                        const unsigned long long s0 = ((unsigned long long)O[85] << 32) | O[84], s1 = ((unsigned long long)O[87] << 32) | O[86];
+                        char b[64]; snprintf(b, sizeof b, "%s[%llu,%llu]", wj.empty() ? "" : ",", s0, s1); wj += b;
+                        for (int l = 0; l < 32; ++l) { const long long r = slots[L0 + 32 * w + l]; if (r >= 0) lat[r] += (double)(s1 - s0); }
+                    }
+                    char lb[64]; snprintf(lb, sizeof lb, "%s{\"active\": %d, \"warp_clk\": [", L0 ? ", " : "", nact); rounds_json += lb; rounds_json += wj + "]}";
+                    for (unsigned i = 0; i < LANES; ++i) {
+                        const long long r = slots[L0 + i]; if (r < 0) continue;
+                        const unsigned *O = &hout[(size_t)i * N]; unsigned *R = &img[(size_t)r * N];
+                        if (O[12] == 0x77777777u && O[84] == 0x77777777u) { fprintf(stderr, "ray %lld: lane did not store\n", r); e = cudaErrorUnknown; break; }
+                        ++nq[r];
+                        if (O[3]) { const float t = absf(O[45]); if (best_t[r] < 0 || t < best_t[r]) { best_t[r] = t; best_p[r] = O[44] & 0x1fffffffu; } }
+                        if (!pend(O)) { done[r] = 1; continue; }
+                        key[r] = ((unsigned long long)(O[57] & 0xffu) << 32) | O[56];   // node the resume starts at (address >> 7)
+                        R[17] = R[31] = fbits(best_t[r] >= 0.f ? best_t[r] : rays[r].tmax);
+                        R[70] = O[56]; R[71] = O[57]; R[32] = O[58]; R[33] = O[59];
+                        R[44] = O[60]; R[45] = O[61]; R[2] = O[70]; R[3] = O[71];
+                    }
+                }
+                rounds_json += "]}";
+            }
+        }
+        size_t ndone = 0; int maxq = 0; for (unsigned r = 0; r < NR; ++r) { ndone += done[r]; maxq = std::max(maxq, nq[r]); }
+        fprintf(jf, ",\n \"sched\": \"%s\", \"passes\": %d, \"launches_total\": %lld, \"rounds_used\": %d, \"status\": \"%s\",\n \"rounds\": [%s],\n \"ray_queries\": [",
+                sched.c_str(), passes, launches, round, cudaGetErrorString(e), rounds_json.c_str());
+        for (unsigned r = 0; r < NR; ++r) fprintf(jf, "%s%d", r ? "," : "", done[r] ? nq[r] : -nq[r]);
+        fprintf(jf, "],\n \"ray_lat\": [");
+        for (unsigned r = 0; r < NR; ++r) fprintf(jf, "%s%.0f", r ? "," : "", lat[r]);
+        fprintf(jf, "],\n \"ray_best\": [");
+        for (unsigned r = 0; r < NR; ++r) fprintf(jf, "%s[\"0x%08x\", %u]", r ? "," : "", best_t[r] >= 0 ? fbits(best_t[r]) : 0xffffffffu, best_p[r]);
+        fprintf(jf, "]\n}\n"); fclose(jf);
+        printf("sched %s: %s, %d round(s), %lld launches (last pass), %zu of %u rays finished, max queries %d\n", sched.c_str(), cudaGetErrorString(e), round, launches, ndone, NR, maxq);
+        return e == cudaSuccess && ndone == NR ? 0 : 1;
+    }
     fprintf(jf, ",\n \"nchunks\": %u, \"passes\": %d, \"active\": %d, \"idle\": \"%s\"", nchunks, passes, active, idle.c_str());
     cudaError_t e_all = cudaSuccess;
     for (int pc = 0; pc < passes * (int)nchunks && e_all == cudaSuccess; ++pc) {
