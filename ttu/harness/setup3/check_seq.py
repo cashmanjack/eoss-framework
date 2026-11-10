@@ -98,8 +98,11 @@ def check(path):
     wt = lambda b: (W(b[8:]) >> 52) & 0x3f
     stall = lambda b: (W(b[8:]) >> 41) & 0xf
     nb = meta.get('barnops', 1) if meta.get('sync') else 0
-    c = (1 if meta.get('clock') else 0) + ((1 + nb) if meta.get('sync') else 0) + (1 if meta.get('preclk') else 0) + (1 if meta.get('gtime') else 0) + (1 if meta.get('sr133') else 0)
+    c = (1 if meta.get('clock') else 0) + ((1 + nb) if meta.get('sync') else 0) + (1 if meta.get('preclk') else 0) + (1 if meta.get('gtime') else 0) + (1 if meta.get('sr133') else 0) + (1 if meta.get('sleepb') else 0)
     GL = meta.get('group_len', 19)
+    if meta.get('sleepb'):   # @P1 NANOSLEEP right after the P0 stall NOP, before any clock read and the group
+        ns = [i for i, b in enumerate(body[:ex]) if low12(b) == 0x95d]
+        ok('sleepb: one @P1 NANOSLEEP, before the group', len(ns) == 1 and ns[0] < g and pred(body[ns[0]]) == (1, 0), ns)
     is_clk = lambda b, rd: low12(b) == 0x805 and (W(b) >> 16) & 0xff == rd and (W(b) >> 72) & 0xff == 0x50
     cs, ce = meta.get('clk', [84, 86])
     f4 = 4 if meta.get('smfilter') else 0   # S2R, 2 ISETP, @P0 EXIT sit between the wait and ISETP P0

@@ -60,6 +60,12 @@ def _instr(lo, hi_low, stall, yld, wr, rd, wt):
     return ctrl.write_control((lo | (hi_low << 64)).to_bytes(16, 'little'), stall=stall, yield_=yld, wr_bar=wr, rd_bar=rd, wt_bar=wt)
 
 
+def nanosleep_p1(ns):
+    """@P1 NANOSLEEP ns (nvcc 12.8: opcode 0x95d, sleep time in bits 63:32, control word 0x000fe40003800000)."""
+    lo = 0x195d | (ns << 32)                       # predicate field (bits 14:12) = P1, not negated
+    return (lo | (0x000fe40003800000 << 64)).to_bytes(16, 'little')
+
+
 def s2r_sr(rd, sr):
     """S2R Rd, SR_<sr> (same encoding as s2r_virtualsmid with another SR id; writes scoreboard 2)."""
     return _instr(0x7919 | (rd << 16), sr << 8, 2, 1, 2, 7, 0)
@@ -162,7 +168,7 @@ def set_regcount(data, secname, regs):
 
 
 def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out=95, preclk=False, barnops=1,
-          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False):
+          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0):
     d = open(dump, 'rb').read()
     at = lambda o: d[DUMP_BASE + o:DUMP_BASE + o + 16]
     group = [at(GROUP_AT + 16 * k) for k in range(GROUP_LEN)]
@@ -244,6 +250,9 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         body.append(exit_if(0, 1))
     body.append(isetp)
     body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=15))               # P0 ready
+    if sleepb:   # Memory_5 timing: the block on SM B (P1 = SM is not A, from the SM filter) sleeps before its trace
+        assert smfilter and 0 < sleepb < 1000000, '--sleepb needs --smfilter, 0 < ns < 1 ms'
+        body.append(nanosleep_p1(sleepb))
     if preclk:
         body.append(cs2r_clock(88))               # diagnostic: arrival at the barrier, R88:R89
     if sync:
@@ -317,7 +326,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     p.save(out)
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
     top_reg = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5])
-    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0,
+    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0,
             'inputs': INPUTS, 'outputs': outputs, 'in_ptr': in_ptr}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
     used = g0 + GROUP_LEN + 1 + int(clock) + len(outputs) + 2
@@ -339,6 +348,7 @@ if __name__ == '__main__':
     a.add_argument('--compact-out', action='store_true', help='store only input and clock registers')
     a.add_argument('--smfilter', action='store_true', help='blocks not on SM A or B (words 18, 19) exit before any TTU code')
     a.add_argument('--thrash', type=int, default=0, help='with --twice --remap: N L1 allocating loads per lane between the two sessions (N x 4 KB per warp)')
+    a.add_argument('--sleepb', type=int, default=0, help='with --smfilter: @P1 NANOSLEEP NS before the start clock (the block on SM B waits)')
     a.add_argument('--sr133', action='store_true', help='Interface_5: S2R SR_TTU_TICKET_INFO into R88 before TTUOPEN and R89 after the group')
     a.add_argument('--dualgo', action='store_true', help='Interface_5: OPEN, FUSE 28, 10 ST, GO, 10 ST, GO, 6 LD (same ray twice)')
     a.add_argument('--remap', action='store_true', help='move the group to R8..R43 and our registers below R50')
@@ -346,5 +356,5 @@ if __name__ == '__main__':
     a.add_argument('--preclk', action='store_true', help='diagnostic clock read into R88:R89 before the barrier')
     a.add_argument('--barnops', type=int, default=8, help='NOPs after the barrier: a warp issues a few instructions past BAR.SYNC before it stalls (8 measured enough at 20 warps)')
     x = a.parse_args()
-    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else ''),
-          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo)
+    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else ''),
+          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb)
