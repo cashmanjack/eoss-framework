@@ -3,7 +3,8 @@ import csv, io
 
 KEYS = ['l1tex__t_sectors.sum', 'l1tex__t_sectors_lookup_hit.sum', 'l1tex__t_sectors_pipe_lsu.sum', 'l1tex__t_sectors_pipe_lsu_lookup_hit.sum', 'l1tex__t_sectors_pipe_tex.sum',
         'l1tex__m_xbar2l1tex_read_sectors.sum', 'lts__t_sectors_srcunit_tex_op_read.sum', 'lts__t_sectors_srcunit_tex_op_read_lookup_hit.sum',
-        'dram__bytes_read.sum', 'sm__cycles_elapsed.max', 'profiler__replayer_passes']
+        'dram__bytes_read.sum', 'sm__cycles_elapsed.max', 'profiler__replayer_passes', 'gpu__time_duration.sum',
+        'lts__throughput.avg.pct_of_peak_sustained_elapsed', 'dram__throughput.avg.pct_of_peak_sustained_elapsed', 'lts__t_sectors.sum', 'dram__bytes_write.sum']
 
 
 def rows(path):

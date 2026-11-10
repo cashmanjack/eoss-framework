@@ -57,6 +57,9 @@
 //                    (Memory_1; measured with chase.cu: any reservation gives L1 about 16..24 KB, none about 90 KB)
 //     --optix-repeat K  time K more OptiX reference launches with CUDA events (Throughput_7), after one untimed
 //     --blockrays    (file:F rays) every block gets its own rays: F holds G x 32 W rays, block b lane i = ray b 32 W + i
+//     --slim         for a build_patch --slim binary: the lane's 8 ray words go to slots 8..15 of its record, the
+//                    13 stored result words (slots 0..12 of its out record) are mapped back to the standard
+//                    register layout after every launch; per launch GPU time (CUDA events) is in "ms"
 //     --no-ttu       stop after the OptiX reference
 //
 // ttu_one as compiled here only loads 96 words into registers and stores them
@@ -207,7 +210,7 @@ int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
-    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int blockrays = 0; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int blockrays = 0; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
@@ -216,6 +219,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--smem") && a + 1 < argc) smem = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--optix-repeat") && a + 1 < argc) optix_repeat = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--blockrays")) blockrays = 1;
+        else if (!strcmp(argv[a], "--slim")) slim = 1;
         else if (!strcmp(argv[a], "--active") && a + 1 < argc) active = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--sched") && a + 1 < argc) sched = argv[++a];
         else if (!strcmp(argv[a], "--idle") && a + 1 < argc) idle = argv[++a];
@@ -611,6 +615,10 @@ int main(int argc, char **argv)
         R[68] = words[0]; R[69] = words[1]; R[62] = words[2]; R[63] = words[3];                        // 0
         R[60] = words[4]; R[61] = words[5]; R[58] = words[6]; R[59] = words[7];                        // 0x80
         R[90] = 0;   // (R37 & 0xC0000) for flags NONE: P0 true
+        if (slim) {   // ray words to slots 8..15 (one 32 byte sector); the other slots stay lane invariant
+            const unsigned tmp[8] = {R[12], R[13], R[14], R[15], R[16], R[17], R[82], R[83]};
+            for (int k = 0; k < 8; ++k) R[8 + k] = tmp[k];
+        }
         R[18] = sm_a; R[19] = sm_b;   // used only by --smfilter builds
         if ((int)(i % 32) >= active) {
             if (idle == "mask") R[18] = R[19] = 0xffffffffu;   // no SM has this id: the lane exits before TTUOPEN
@@ -635,9 +643,10 @@ int main(int argc, char **argv)
     // Each launch: one group per lane. Clock words R84:R85 (before TTUOPEN) and R86:R87
     // (after all results), global timer R22:R23 / R24:R25, SM id R20, if patched in.
     // A block ran if its lane 0 stored anything (the output is filled with 0x77777777 first).
-    auto ran = [&](const std::vector<unsigned> &o, int b) { return o[(size_t)b * LANES * N + 84] != 0x77777777u || o[(size_t)b * LANES * N + 12] != 0x77777777u; };
+    auto ran = [&](const std::vector<unsigned> &o, int b) { return slim ? o[(size_t)b * LANES * N + 3] != 0x77777777u : (o[(size_t)b * LANES * N + 84] != 0x77777777u || o[(size_t)b * LANES * N + 12] != 0x77777777u); };
     auto u64 = [](const unsigned *R, int r) { return ((unsigned long long)R[r + 1] << 32) | R[r]; };
     cudaError_t e = cudaSuccess;
+    cudaEvent_t ev_a, ev_b; CK(cudaEventCreate(&ev_a)); CK(cudaEventCreate(&ev_b));
     std::vector<unsigned> first;
     std::vector<int> ran_blocks;
     fprintf(jf, ",\n \"blocks\": %d, \"sms\": [%u, %u],\n \"launches\": [", blocks, sm_a, sm_b);
@@ -646,12 +655,23 @@ int main(int argc, char **argv)
         CK(cudaMemcpy(dout, out.data(), out.size() * 4, cudaMemcpyHostToDevice));
         if (fn) { flush_read<<<142 * 8, 256>>>(fbuf, fn, sink); CK(cudaGetLastError()); }
         if (smem && it == 0) CK(cudaFuncSetAttribute(ttu_one, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+        CK(cudaEventRecord(ev_a));
         ttu_one<<<blocks, LANES, smem>>>(din, dout);
+        CK(cudaEventRecord(ev_b));
         e = cudaGetLastError();                     // launch errors (e.g. too many resources)
         if (e == cudaSuccess) e = cudaDeviceSynchronize();
         if (e != cudaSuccess) break;
+        float launch_ms = 0; CK(cudaEventElapsedTime(&launch_ms, ev_a, ev_b));
         std::vector<unsigned> o(out.size());
         CK(cudaMemcpy(o.data(), dout, o.size() * 4, cudaMemcpyDeviceToHost));
+        if (slim) {   // 13 result words in slots 0..12 -> standard register slots (3, 32, 33, 44, 45, 56..61, 70, 71)
+            static const int SO[13] = {3, 32, 33, 44, 45, 56, 57, 58, 59, 60, 61, 70, 71};
+            for (size_t i = 0; i < TOTAL; ++i) {
+                unsigned *Q = &o[i * N]; unsigned w[13]; memcpy(w, Q, sizeof w);
+                for (int k = 0; k < N; ++k) Q[k] = 0x77777777u;
+                for (int k = 0; k < 13; ++k) Q[SO[k]] = w[k];
+            }
+        }
         if (it == 0) first = o;
         std::vector<int> rb;
         for (int b = 0; b < blocks; ++b) if (ran(o, b)) rb.push_back(b);
@@ -663,7 +683,7 @@ int main(int argc, char **argv)
                     same &= o[((size_t)b * LANES + i) * N + r] == first[((size_t)b * LANES + i) * N + r];
         same_all &= same;
         bool lanes_eq = true;
-        fprintf(jf, "%s{\"same_as_first\": %s, \"ran\": %zu, \"per_block\": [", it ? ", " : "", same ? "true" : "false", rb.size());
+        fprintf(jf, "%s{\"same_as_first\": %s, \"ran\": %zu, \"ms\": %.6f, \"per_block\": [", it ? ", " : "", same ? "true" : "false", rb.size(), launch_ms);
         std::string wc0;
         for (size_t bi = 0; bi < rb.size(); ++bi) {
             const int b = rb[bi];
