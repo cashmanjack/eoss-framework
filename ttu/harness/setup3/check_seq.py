@@ -100,6 +100,11 @@ def check(path):
     nb = meta.get('barnops', 1) if meta.get('sync') else 0
     c = (1 if meta.get('clock') else 0) + ((1 + nb) if meta.get('sync') else 0) + (1 if meta.get('preclk') else 0) + (1 if meta.get('gtime') else 0) + (1 if meta.get('sr133') else 0) + (1 if meta.get('sleepb') else 0)
     GL = meta.get('group_len', 19)
+    NA = meta.get('alu', 0)
+    if NA:   # Throughput_4: exactly NA IADD3 right after the group, none of them TTU, then the wait NOP
+        ok('alu: %d IADD3 right after the group, before the wait NOP' % NA,
+           all(low12(body[g + GL + k]) == 0x810 for k in range(NA)) and low12(body[g + GL + NA]) == 0x918)
+    GL += NA
     if meta.get('sleepb'):   # @P1 NANOSLEEP right after the P0 stall NOP, before any clock read and the group
         ns = [i for i, b in enumerate(body[:ex]) if low12(b) == 0x95d]
         ok('sleepb: one @P1 NANOSLEEP, before the group', len(ns) == 1 and ns[0] < g and pred(body[ns[0]]) == (1, 0), ns)
