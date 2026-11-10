@@ -18,15 +18,32 @@ f = lambda u: struct.unpack('<f', struct.pack('<I', u))[0]
 
 def main(path, stage):
     j = json.load(open(path)); ok = True
-    o, d = RAYS[j['ray']]
-    hit, t, u, v = intersect(o, d)
+    if 'ray' in j:
+        o, d = j['ray']
+    else:
+        o, d = RAYS[j['ray']]
+    tris = j.get('tris') or None
+    if tris or 'tris' not in j:
+        best = (False, None, None, None, None)
+        for k, tri in enumerate(tris or [None]):
+            r = intersect(o, d, tri=tri) if tri else intersect(o, d)
+            if r[0] and (not best[0] or r[1] < best[1]):
+                best = r + (k,)
+        hit, t, u, v, prim = best
+    else:
+        hit = t = u = v = prim = None    # too many triangles stored: OptiX only
     r0 = j['ref'][0]
     same = all(r == r0 for r in j['ref'])
     t_ox = f(int(r0['t'], 16))
-    agree = (r0['hit'] == 1) == hit and (not hit or abs(t_ox - t) < 1e-6)
-    print('cpu: hit %s t %s | optix lane0: hit %d t %r | all 32 lanes same %s | agree %s' % (hit, t, r0['hit'], t_ox, same, agree))
+    if hit is None:
+        agree = True
+        print('cpu: skipped (%s triangles) | optix lane0: hit %d t %r prim %d | all lanes same %s' % (j.get('ntris'), r0['hit'], t_ox, r0['prim'], same))
+    else:
+        agree = (r0['hit'] == 1) == hit and (not hit or (abs(t_ox - t) < 1e-6 and r0['prim'] == prim))
+        print('cpu: hit %s t %s prim %s | optix lane0: hit %d t %r prim %d front %s gas_index %s | all lanes same %s | agree %s'
+              % (hit, t, prim, r0['hit'], t_ox, r0['prim'], r0.get('front'), r0.get('gas_index'), same, agree))
     ok &= same and agree
-    print('gas %s root %s inst %s inst_ok %s' % (j['gas'], j['root'], j['inst'], j['inst_ok']))
+    print('scene %s gas %s size %s root %s inst %s inst_ok %s c3_34 %s' % (j.get('scene'), j['gas'], j.get('gas_size'), j['root'], j['inst'], j['inst_ok'], j.get('c3_34')))
     if 'out' not in j:
         return ok
     print('ttu_one status:', j['ttu_status']); ok &= j['ttu_status'] == 'no error'

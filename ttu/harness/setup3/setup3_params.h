@@ -6,12 +6,12 @@
 #define PARAMS_C3_OFFSET 0x140
 
 struct Ray8 { float o[3], tmin, d[3], tmax; };
-struct RefOut { unsigned hit; float t; unsigned prim; float u, v; unsigned pad[3]; };
+struct RefOut { unsigned hit; float t; unsigned prim; float u, v; unsigned front, gas_index, pad; };
 
 struct Params {
     const Ray8 *rays;
     RefOut *out;
     OptixTraversableHandle handle;
-    unsigned long long *inst;   // [0] = node address, [1..16] = its first 16 words
+    unsigned long long *inst;   // [0] node address, [1..16] its first 16 words, [17] c[3][0x34]
     unsigned n;
 };
