@@ -286,7 +286,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     body.append(wide[1])
     CP = 60 if remap else 94                     # --slim: pointer pair to the shared record (R94:R95 plain, R60:R61 remapped)
     if slim:
-        assert not (clock or gtime or preclk or sr133 or twice or thrash or dualgo or sleepb), '--slim: no timing and no second session'
+        assert not (clock or gtime or preclk or sr133 or twice or thrash or dualgo or sleepb), '--slim: no timing and no second session (SM filter allowed)'
         body.append(imov_cbank(CP, 0x160, 11))
         body.append(imov_cbank(CP + 1, 0x164, 11))
     # --loop K (Throughput_7 fair comparison): the group runs again, from a loop branch, for every lane whose query returned
@@ -295,7 +295,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     LB3, LB32, LB33, LB44, LB45, LCNT, LTMP = 62, 63, 64, 65, 66, 67, 68
     RELOAD = [30, 31, 34, 35, 56, 57, 58, 59, 60, 61, 62, 63, 68, 69]    # input words the TTULDs overwrite (and R56..R61 reused as pending)
     if loop:
-        assert slim and remap and not (clock or gtime or preclk or sr133 or twice or thrash or dualgo or sleepb or smfilter or alu), '--loop: slim + remap only, no timing, no SM filter'
+        assert slim and remap and not (clock or gtime or preclk or sr133 or twice or thrash or dualgo or sleepb or alu), '--loop: slim + remap only, no timing (SM filter allowed)'
         assert 1 <= loop <= 64
     def reload_ld(r):
         if r in RAYSLOT:
