@@ -78,20 +78,30 @@ def check(path):
                 ok(tag + 'no TTU instruction between this CLOSE and the next OPEN',
                    not any(low12(b) in TTU for b in body[gi + 2 + n:groups[si + 1]]))
         ok('A6 no other TTU anywhere in the binary', len(hits) == total, (len(hits), total))
+        if meta.get('remap') and len(sys.argv) > 2:   # A10 with remap: only register fields may differ
+            d = open(sys.argv[2], 'rb').read()
+            dump = [d[0x14000 - 0xfb50 + 16 * k:0x14000 - 0xfb50 + 16 * k + 16] for k in range(19)]
+            regmask = lambda b: W(b) & ~((0xff << 16) | (0xff << 32) | (0xff << 64)) if low12(b) in (ST, LD) else W(b)
+            for gi in groups:
+                same = all(regmask(a) == regmask(b) for a, b in zip(body[gi:gi + 19], dump))
+                ok('A10 remapped group equals the OptiX group except register fields (session at %d)' % gi, same)
+            pm = {int(k): v for k, v in meta['regmap'].items()}
+            ok('A10 register map is a pair aligned one to one map', len(set(pm.values())) == len(pm) and all(pm[k] % 2 == k % 2 for k in pm))
         ok('B15 no branch anywhere before EXIT', not any(low12(b) in (0x947, 0x949, 0x943) for b in body[:ex]))
     wt = lambda b: (W(b[8:]) >> 52) & 0x3f
     stall = lambda b: (W(b[8:]) >> 41) & 0xf
     nb = meta.get('barnops', 1) if meta.get('sync') else 0
     c = (1 if meta.get('clock') else 0) + ((1 + nb) if meta.get('sync') else 0) + (1 if meta.get('preclk') else 0) + (1 if meta.get('gtime') else 0)
     is_clk = lambda b, rd: low12(b) == 0x805 and (W(b) >> 16) & 0xff == rd and (W(b) >> 72) & 0xff == 0x50
+    cs, ce = meta.get('clk', [84, 86])
     f4 = 4 if meta.get('smfilter') else 0   # S2R, 2 ISETP, @P0 EXIT sit between the wait and ISETP P0
     ok('B12 loads waited on before ISETP P0 (and before the SM filter)', low12(body[g - 3 - c - f4]) == 0x918 and wt(body[g - 3 - c - f4]) == 0x3f)
     ok('B12 ISETP P0 then a NOP with stall 15 before the group',
        low12(body[g - 2 - c]) == 0x80c and low12(body[g - 1 - c]) == 0x918 and stall(body[g - 1 - c]) == 15)
     ok('B13 NOP after the group waits on all scoreboards', low12(body[g + 19]) == 0x918 and wt(body[g + 19]) == 0x3f)
     if meta.get('clock'):
-        ok('clock: CS2R R84 SR_CLOCKLO right before TTUOPEN', is_clk(body[g - 1], 84))
-        ok('clock: CS2R R86 SR_CLOCKLO right after the wait NOP', is_clk(body[g + 20], 86))
+        ok('clock: CS2R SR_CLOCKLO right before TTUOPEN', is_clk(body[g - 1], cs), cs)
+        ok('clock: CS2R SR_CLOCKLO right after the wait NOP', is_clk(body[g + 20], ce), ce)
     pexits = [i for i, b in enumerate(body[:ex]) if low12(b) == 0x94d]
     if meta.get('smfilter'):
         first_ttu = min([i for i, b in enumerate(body) if low12(b) in TTU] or [ex])
@@ -106,7 +116,8 @@ def check(path):
     if meta.get('gtime'):
         gt = lambda b, rd: low12(b) == 0x805 and (W(b) >> 16) & 0xff == rd and (W(b) >> 72) & 0xff == 0x52
         k = 1 if meta.get('clock') else 0
-        ok('gtime: global timer reads around the clock reads', gt(body[g - 1 - k], 22) and gt(body[g + 20 + k], 24))
+        g0r, g1r = meta.get('gt', [22, 24])
+        ok('gtime: global timer reads around the clock reads', gt(body[g - 1 - k], g0r) and gt(body[g + 20 + k], g1r), (g0r, g1r))
     if meta.get('sync'):
         k = (1 if meta.get('clock') else 0) + (1 if meta.get('gtime') else 0)
         b = body[g - 1 - k - nb]
@@ -114,7 +125,8 @@ def check(path):
         ok('sync: blocking BAR.SYNC 0 (bit 80 clear) before the clock read / group',
            low12(b) == 0xb1d and ((W(b) >> 80) & 1) == 0 and ((W(b) >> 77) & 7) == 0)
     regs = int(next(l for l in os.popen('cuobjdump --dump-resource-usage %s' % path).read().split('Function ttu_one:')[1].split('\n') if 'REG:' in l).split('REG:')[1].split()[0])
-    ok('B14 register count above highest register used (95)', regs > 95, regs)
+    top = meta.get('top_reg', 95)
+    ok('B14 declared registers >= highest register used + 3 (R%d)' % top, regs >= top + 3, regs)
     if meta.get('regs'):
         from build_patch import regcount_fields
         f = regcount_fields(bytes(p.data), meta['section'])

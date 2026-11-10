@@ -82,6 +82,14 @@ def cs2r_globaltimer(rd):
     return ctrl.write_control(instr, stall=2, yield_=1, wr_bar=7, rd_bar=7, wt_bar=0)
 
 
+def ldg_ca(rd, ra, imm):
+    """LDG.E.STRONG.SM Rd, [Ra.64 + imm] (L1 allocating, as nvcc 12.8 encodes ld.global.ca):
+    opcode 0x981, writes scoreboard 2."""
+    assert 0 <= imm < (1 << 23)
+    return _instr(0x7981 | (rd << 16) | (ra << 24) | (imm << 40), 0xc1eb900, 1, 1, 2, 7, 0)
+
+
+THRASH_PTR = 26                  # --thrash: logical slots 26, 27 = this lane's thrash buffer address
 SM_A, SM_B, SM_ID = 18, 19, 20   # --smfilter: run only on SM A or SM B (VIRTUALSMID into R20)
 GT_START, GT_END = 22, 24       # --gtime: global timer before the start clock and after the end clock
 CLK_START, CLK_END = 84, 86   # R84:R85 before TTUOPEN, R86:R87 after the group's results
@@ -149,7 +157,7 @@ def set_regcount(data, secname, regs):
 
 
 def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out=95, preclk=False, barnops=1,
-          twice=False, compact_out=False, smfilter=False, gtime=False):
+          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0):
     d = open(dump, 'rb').read()
     at = lambda o: d[DUMP_BASE + o:DUMP_BASE + o + 16]
     group = [at(GROUP_AT + 16 * k) for k in range(GROUP_LEN)]
@@ -157,6 +165,45 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     assert low12(group[0]) == 0x3d0 and low12(group[1]) == 0x9d4, 'group not at expected place'
     assert low12(isetp) == 0x80c and (W(isetp) >> 24) & 0xff == 46
     isetp = field(isetp, 24, 90)                      # compare R90 instead of R46
+
+    # --remap: move the group's 18 register pairs to R8..R43 (pair aligned, in order of first
+    # use), P0's operand to R44, clocks to R46..R49, input pointer to R6:R7. Loads and stores
+    # keep their logical slots (slot k = logical register k), so the host does not change.
+    P = {}
+    if remap:
+        assert not preclk, 'remap: preclk not supported'
+        assert compact_out, 'remap needs --compact-out (only remapped registers are stored)'
+        pairs = []
+        for b in group:
+            op = low12(b)
+            if op == 0x3d1:   used = [(W(b) >> 32) & 0xff, (W(b) >> 64) & 0xff]   # TTUST Rb, Rc
+            elif op == 0x3d2: used = [(W(b) >> 16) & 0xff, (W(b) >> 64) & 0xff]   # TTULD Rd, Rc (Rd2)
+            else:             used = []
+            for r in used:
+                if r != 255 and r not in pairs:
+                    assert r % 2 == 0, 'pair base must be even: R%d' % r
+                    pairs.append(r)
+        nxt = 8
+        for r in pairs:
+            P[r], P[r + 1] = nxt, nxt + 1; nxt += 2
+        assert nxt <= 44, nxt
+        P[90] = 44
+        P[84], P[85], P[86], P[87] = 46, 47, 48, 49
+        P[SM_A], P[SM_B], P[SM_ID] = 50, 51, 52                       # --smfilter
+        if thrash: P[THRASH_PTR], P[THRASH_PTR + 1] = 58, 59                # --thrash buffer pointer
+        P[GT_START], P[GT_START + 1], P[GT_END], P[GT_END + 1] = 54, 55, 56, 57   # --gtime
+        def remap_ttu(b):
+            op = low12(b)
+            m = lambda r: 255 if r == 255 else P[r]          # RZ stays RZ
+            if op == 0x3d1:
+                b = field(field(b, 32, m((W(b) >> 32) & 0xff)), 64, m((W(b) >> 64) & 0xff))
+            elif op == 0x3d2:
+                b = field(field(b, 16, m((W(b) >> 16) & 0xff)), 64, m((W(b) >> 64) & 0xff))
+            return b
+        group = [remap_ttu(b) for b in group]
+        isetp = field(isetp, 24, P[90])
+    phys = lambda r: P.get(r, r)
+    in_ptr = 6 if remap else IN_PTR
 
     p = BinaryPatcher(binpath)
     sec = [s for s in p.sections if s[2].endswith('.ttu_one')]
@@ -172,22 +219,23 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     first_wide = orig.index(wide[0])
     prologue = orig[:first_wide]
     assert all(low12(b) != 0x981 for b in prologue)
-    ex = [i for i, b in enumerate(orig) if low12(b) == 0x94d]
+    pt = lambda b: ((W(b) >> 12) & 7) == 7 and ((W(b) >> 15) & 1) == 0
+    ex = [i for i, b in enumerate(orig) if low12(b) == 0x94d and pt(b)]        # unpredicated EXIT only
     assert ex
 
     body = list(prologue)
-    body.append(field(wide[0], 16, IN_PTR))
+    body.append(field(wide[0], 16, in_ptr))
     body.append(wide[1])
     for r in INPUTS:
-        body.append(field(field(ldg[r], 16, r), 24, IN_PTR))
+        body.append(field(field(ldg[r], 16, phys(r)), 24, in_ptr))
     if smfilter:
         for r in (SM_A, SM_B):
-            body.append(field(field(ldg[r], 16, r), 24, IN_PTR))
+            body.append(field(field(ldg[r], 16, phys(r)), 24, in_ptr))
     body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))   # all loads done
     if smfilter:   # leave unless this block's SM is A or B; before any TTU instruction or barrier
-        body.append(s2r_virtualsmid(SM_ID))
-        body.append(isetp_ne(1, SM_ID, SM_A, 2, 0x4))
-        body.append(isetp_ne(0, SM_ID, SM_B, 13, 0x4))
+        body.append(s2r_virtualsmid(phys(SM_ID)))
+        body.append(isetp_ne(1, phys(SM_ID), phys(SM_A), 2, 0x4))
+        body.append(isetp_ne(0, phys(SM_ID), phys(SM_B), 13, 0x4))
         body.append(exit_if(0, 1))
     body.append(isetp)
     body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=15))               # P0 ready
@@ -203,24 +251,33 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         groups.append(len(body))
         body += group if stage == 1 else [ctrl.NOP_BYTES] * GROUP_LEN
         body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))   # CLOSE done
+        if thrash:   # same warp, same SM: N L1 allocating loads per lane, N x 4 KB of lines per warp
+            assert remap, '--thrash needs --remap'
+            for r in (THRASH_PTR, THRASH_PTR + 1):
+                body.append(field(field(ldg[r], 16, phys(r)), 24, in_ptr))
+            body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
+            for k in range(thrash):
+                body.append(ldg_ca(8 + (k % 32), phys(THRASH_PTR), 4096 * k))   # junk into group regs (reloaded below)
+                if k % 32 == 31 or k == thrash - 1:
+                    body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
         # its TTULDs overwrite input registers: load the inputs again, same ray
         for r in INPUTS:
-            body.append(field(field(ldg[r], 16, r), 24, IN_PTR))
+            body.append(field(field(ldg[r], 16, phys(r)), 24, in_ptr))
         body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))   # all loads done
         body.append(isetp)
         body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=15))               # P0 ready
     if gtime:
-        body.append(cs2r_globaltimer(GT_START))
+        body.append(cs2r_globaltimer(phys(GT_START)))
     if clock:
-        body.append(cs2r_clock(CLK_START))
+        body.append(cs2r_clock(phys(CLK_START)))
     g0 = len(body)
     groups.append(g0)
     body += group if stage == 1 else [ctrl.NOP_BYTES] * GROUP_LEN
     body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
     if clock:
-        body.append(cs2r_clock(CLK_END))
+        body.append(cs2r_clock(phys(CLK_END)))
     if gtime:
-        body.append(cs2r_globaltimer(GT_END))
+        body.append(cs2r_globaltimer(phys(GT_END)))
     if compact_out:   # only what the checks need: inputs (incl. TTULD destinations) and the clock
         outputs = sorted(set(INPUTS) | ({CLK_START, CLK_START + 1, CLK_END, CLK_END + 1} if clock else set())
                          | ({SM_A, SM_B, SM_ID} if smfilter else set())
@@ -228,21 +285,24 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     else:
         outputs = [r for r in OUTPUTS if r <= max_out]
     for r in outputs:
-        body.append(field(stg[r], 32, r))
+        body.append(field(stg[r], 32, phys(r)))
+    assert low12(orig[ex[0] + 1]) == 0x947, 'expected BRA self after EXIT'
     body += [orig[ex[0]], orig[ex[0] + 1]]            # EXIT, BRA self
     assert len(body) <= len(orig), (len(body), len(orig))
     body += [ctrl.NOP_BYTES] * (len(orig) - len(body))
     for (off, _), b in zip(ins, body):
         p.data[off:off + 16] = b
     if regs:
-        assert regs % 8 == 0 and 96 <= regs <= 255, 'body uses up to R95'
+        top = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5])
+        assert regs % 8 == 0 and regs >= top + 3 and regs <= 255, 'declared count must be >= highest register + 3 (R%d)' % top
         old = set_regcount(p.data, sec[0][2], regs)
         assert old, 'register count field not found'
         print('register count %s -> %d' % (sorted(set(old)), regs))
     p.save(out)
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
-    meta = {'stage': stage, 'twice': twice, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0,
-            'inputs': INPUTS, 'outputs': outputs, 'in_ptr': IN_PTR}
+    top_reg = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5])
+    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0,
+            'inputs': INPUTS, 'outputs': outputs, 'in_ptr': in_ptr}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
     used = g0 + GROUP_LEN + 1 + int(clock) + len(outputs) + 2
     print('built %s stage %d: %d of %d slots used, group at index %d, sha256 %s' % (out, stage, used, len(orig), g0, sha))
@@ -262,9 +322,11 @@ if __name__ == '__main__':
     a.add_argument('--twice', action='store_true', help='two full sessions with the same ray; time the second')
     a.add_argument('--compact-out', action='store_true', help='store only input and clock registers')
     a.add_argument('--smfilter', action='store_true', help='blocks not on SM A or B (words 18, 19) exit before any TTU code')
+    a.add_argument('--thrash', type=int, default=0, help='with --twice --remap: N L1 allocating loads per lane between the two sessions (N x 4 KB per warp)')
+    a.add_argument('--remap', action='store_true', help='move the group to R8..R43 and our registers below R50')
     a.add_argument('--gtime', action='store_true', help='global timer reads around the timed group (R22:R23, R24:R25)')
     a.add_argument('--preclk', action='store_true', help='diagnostic clock read into R88:R89 before the barrier')
     a.add_argument('--barnops', type=int, default=8, help='NOPs after the barrier: a warp issues a few instructions past BAR.SYNC before it stalls (8 measured enough at 20 warps)')
     x = a.parse_args()
-    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else ''),
-          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime)
+    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else ''),
+          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash)

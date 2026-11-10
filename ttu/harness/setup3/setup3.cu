@@ -7,15 +7,19 @@
 //            tri:I = straight down (+z) onto the centroid of triangle I
 //            perlane = lane i onto the centroid of triangle (7919 i + 13) mod N (different paths)
 //            jitter  = lane i onto a different point of triangle 0 (same path, different hit data)
+//            random  = lane i: its own random origin in [-1,1]^3 and random direction
+//            random1 = every lane traces lane 0's random ray (coherent control)
 //     FILL   zero | random   (value of the words OptiX leaves uninitialized: 0x180 high, 0x190)
 //   options
 //     --scene S      tri1 (default) | tri2 (2 triangles, 1 build input) | tri2g (2 build inputs) | grid:N
+//                    | soup:N (N random small triangles in the cube [-1,1]^3)
 //     --warps W      warps in the single block, 1..21 (default 1); build_patch.py --regs 96 sets the register count
 //     --repeat N     timed launches in this process, 1..100 (default 1)
 //     --blocks G     blocks of W warps (default 1); with an --smfilter build only blocks on SM A or B run
 //     --sms A,B      the SMs allowed to run (VIRTUALSMID; words 18, 19), default 0,0
 //     --flush MB     before every ttu_one launch, a plain kernel reads MB megabytes (L2 eviction)
 //     --dump-gas F   write the GAS bytes to F
+//     --thrash       allocate a 4 MB buffer; words 26, 27 = buffer + 128 x lane (for build_patch --thrash)
 //     --no-ttu       stop after the OptiX reference
 //
 // ttu_one as compiled here only loads 96 words into registers and stores them
@@ -37,7 +41,7 @@
 #include "setup3_params.h"
 
 #define N 96
-#define MAXW 21   // 21 x 32 x 96 registers fit the 65536 register file
+#define MAXW 32   // one block; the register count build_patch declares sets the real limit
 #define CK(x) do { cudaError_t e_ = (x); if (e_ != cudaSuccess) { \
     fprintf(stderr, "%s:%d %s: %s\n", __FILE__, __LINE__, #x, cudaGetErrorString(e_)); exit(2); } } while (0)
 #define OX(x) do { OptixResult r_ = (x); if (r_ != OPTIX_SUCCESS) { \
@@ -56,6 +60,10 @@ extern "C" __global__ void ttu_one(const unsigned *in, unsigned *out)
     volatile unsigned *q = out + t * N;
 #pragma unroll
     for (int k = 0; k < N; ++k) q[k] = r[k];
+    if (t == 0xffffffffu) {   // never true: only adds instruction slots for build_patch.py
+#pragma unroll
+        for (int k = 0; k < 160; ++k) asm volatile("nanosleep.u32 0;");
+    }
 }
 
 // Plain kernel: read a large buffer so the L2 (96 MB) holds none of the BVH.
@@ -86,13 +94,26 @@ static std::vector<std::vector<Tri>> make_scene(const std::string &s)
     if (s == "tri2g") return {{t0}, {t1}};
     if (s.rfind("grid:", 0) == 0) {
         const int n = atoi(s.c_str() + 5);
-        if (n < 1 || n > 1 << 20) { fprintf(stderr, "grid:N with 1 <= N <= 2^20\n"); exit(2); }
+        if (n < 1 || n > 1 << 23) { fprintf(stderr, "grid:N with 1 <= N <= 2^23\n"); exit(2); }
         const int k = (int)std::ceil(std::sqrt((double)n));
         const float c = 2.f / k;
         std::vector<Tri> v;
         for (int i = 0; i < n; ++i) {
             const float x = -1.f + (i % k) * c, y = -1.f + (i / k) * c;
             v.push_back({{x + 0.1f * c, y + 0.1f * c, 0.f}, {x + 0.9f * c, y + 0.1f * c, 0.f}, {x + 0.5f * c, y + 0.9f * c, 0.f}});
+        }
+        return {v};
+    }
+    if (s.rfind("soup:", 0) == 0) {
+        const int n = atoi(s.c_str() + 5);
+        if (n < 1 || n > 1 << 23) { fprintf(stderr, "soup:N with 1 <= N <= 2^23\n"); exit(2); }
+        const float e = 3.f / std::cbrt((float)n);          // edge length: rays hit something
+        std::mt19937 g(1234); std::uniform_real_distribution<float> U(-1.f, 1.f);
+        std::vector<Tri> v; v.reserve(n);
+        for (int i = 0; i < n; ++i) {
+            const float3 c{U(g), U(g), U(g)};
+            auto pt = [&]() { return float3{c.x + 0.5f * e * U(g), c.y + 0.5f * e * U(g), c.z + 0.5f * e * U(g)}; };
+            v.push_back({pt(), pt(), pt()});
         }
         return {v};
     }
@@ -103,9 +124,10 @@ int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
-    bool run_ttu = true; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool run_ttu = true, thrash = false; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
+        else if (!strcmp(argv[a], "--thrash")) thrash = true;
         else if (!strcmp(argv[a], "--repeat") && a + 1 < argc) repeat = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--warps") && a + 1 < argc) warps = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--blocks") && a + 1 < argc) blocks = atoi(argv[++a]);
@@ -190,7 +212,8 @@ int main(int argc, char **argv)
     };
     Ray8 ray{};
     const bool perlane = !strcmp(argv[3], "perlane"), jitter = !strcmp(argv[3], "jitter");
-    if (perlane || jitter) {
+    const bool rnd = !strcmp(argv[3], "random"), rnd1 = !strcmp(argv[3], "random1");
+    if (perlane || jitter || rnd || rnd1) {
         ray = {{0.f, 0.f, -1.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f};   // replaced per lane below
     } else if (!strncmp(argv[3], "tri:", 4)) {
         const int i = atoi(argv[3] + 4);
@@ -204,6 +227,13 @@ int main(int argc, char **argv)
         ray = *pick;
     }
     std::vector<Ray8> rays(LANES, ray);
+    for (unsigned i = 0; i < LANES && (rnd || rnd1); ++i) {
+        std::mt19937 g(777 + (rnd ? i : 0)); std::uniform_real_distribution<float> U(-1.f, 1.f);
+        float3 o{U(g), U(g), U(g)}, d;
+        do { d = {U(g), U(g), U(g)}; } while (d.x * d.x + d.y * d.y + d.z * d.z < 0.01f || d.x * d.x + d.y * d.y + d.z * d.z > 1.f);
+        const float l = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        rays[i] = {{o.x, o.y, o.z}, 0.f, {d.x / l, d.y / l, d.z / l}, 1e16f};
+    }
     for (unsigned i = 0; i < LANES && (perlane || jitter); ++i) {
         const Tri &t = all[perlane ? (size_t)((7919ull * i + 13) % all.size()) : 0];
         float u = 1.f / 3, v = 1.f / 3;
@@ -249,7 +279,7 @@ int main(int argc, char **argv)
             inst_ok ? "true" : "false", c3_34, handle_ok ? "true" : "false", align_ok ? "true" : "false");
     fprintf(jf, " \"lane_rays\": [");
     for (unsigned i = 0; i < LANES && i < 32; ++i)
-        fprintf(jf, "%s[%.9g,%.9g,%.9g]", i ? "," : "", rays[i].o[0], rays[i].o[1], rays[i].o[2]);
+        fprintf(jf, "%s[%.9g,%.9g,%.9g,%.9g,%.9g,%.9g]", i ? "," : "", rays[i].o[0], rays[i].o[1], rays[i].o[2], rays[i].d[0], rays[i].d[1], rays[i].d[2]);
     fprintf(jf, "],\n");
     fprintf(jf, " \"warps\": %d, \"flush_mb\": %g, \"fill\": \"%s\",\n \"ref\": [", warps, flush_mb, argv[4]);
     for (unsigned i = 0; i < LANES; ++i)
@@ -284,6 +314,14 @@ int main(int argc, char **argv)
         R[60] = words[4]; R[61] = words[5]; R[58] = words[6]; R[59] = words[7];                        // 0x80
         R[90] = 0;   // (R37 & 0xC0000) for flags NONE: P0 true
         R[18] = sm_a; R[19] = sm_b;   // used only by --smfilter builds
+    }
+    unsigned char *tbuf = nullptr;
+    if (thrash) {
+        CK(cudaMalloc((void **)&tbuf, 4u << 20)); CK(cudaMemset(tbuf, 0, 4u << 20));
+        for (size_t i = 0; i < TOTAL; ++i) {
+            const unsigned long long a = (unsigned long long)tbuf + 128ull * (i % 32);
+            in[i * N + 26] = (unsigned)a; in[i * N + 27] = (unsigned)(a >> 32);
+        }
     }
     unsigned *din, *dout, *sink; uint4 *fbuf = nullptr; size_t fn = (size_t)(flush_mb * 1048576.0) / sizeof(uint4);
     CK(cudaMalloc((void **)&din, in.size() * 4)); CK(cudaMalloc((void **)&dout, out.size() * 4)); CK(cudaMalloc((void **)&sink, 4));
