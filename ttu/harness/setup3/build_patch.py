@@ -61,9 +61,9 @@ def _instr(lo, hi_low, stall, yld, wr, rd, wt):
 
 
 def nanosleep_p1(ns):
-    """@P1 NANOSLEEP ns (nvcc 12.8: opcode 0x95d, sleep time in bits 63:32, control word 0x000fe40003800000)."""
-    lo = 0x195d | (ns << 32)                       # predicate field (bits 14:12) = P1, not negated
-    return (lo | (0x000fe40003800000 << 64)).to_bytes(16, 'little')
+    """@P1 NANOSLEEP ns, as nvcc 12.8 encodes nanosleep.u32: opcode 0x95d, sleep time in ns in bits 63:32,
+    PT in the predicate field at bits 89:87, stall 2, yield, no scoreboard."""
+    return _instr(0x095d | (1 << 12) | (ns << 32), 7 << 23, 2, 1, 7, 7, 0)   # guard predicate (bits 14:12) = P1
 
 
 def s2r_sr(rd, sr):
