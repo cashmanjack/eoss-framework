@@ -1,6 +1,9 @@
 """Run a patched setup3 binary on GPU 1, only if check_seq.py passed on this exact file.
 
-    run.py BIN RAYS FILL OUT.json [--no-ttu] [--repeat N]
+    run.py BIN RAYS FILL OUT.json [--no-ttu] [--repeat N] [--ncu METRICS --ncu-out CSV [--ncu-skip K]]
+
+--ncu: run the binary under Nsight Compute (same timeout), profiling only ttu_one, caches and
+clocks left alone (--cache-control none --clock-control none), one CSV row per ttu_one launch.
 
 Refuses if: BIN.checked is missing or holds another sha256, any process is on
 GPU 1, or the driver is not 580.178.04. Runs under `timeout -k 2 30` (one process, all repeats inside it).
@@ -18,6 +21,16 @@ def smi(*a):
 def main():
     binp, rays, fill, out = sys.argv[1:5]
     extra = sys.argv[5:]
+    ncu = []
+    if '--ncu' in extra:
+        i = extra.index('--ncu'); metrics = extra[i + 1]; del extra[i:i + 2]
+        j = extra.index('--ncu-out'); csv = extra[j + 1]; del extra[j:j + 2]
+        skip = []
+        if '--ncu-skip' in extra:   # profile only after the first K ttu_one launches (e.g. pass 0 of --passes 2)
+            k = extra.index('--ncu-skip'); skip = ['--launch-skip', str(int(extra[k + 1]))]; del extra[k:k + 2]
+        ncu = [os.path.expanduser('~/opt/cuda-12.8/bin/ncu'), '--target-processes', 'all', '-k', 'ttu_one',
+               '--cache-control', 'none', '--clock-control', 'none', '--metrics', metrics, '--csv', '--page', 'raw',
+               '--log-file', csv] + skip
     sha = hashlib.sha256(open(binp, 'rb').read()).hexdigest()
     chk = binp + '.checked'
     if not os.path.exists(chk) or open(chk).read().strip() != sha:
@@ -30,7 +43,7 @@ def main():
     env = dict(os.environ, CUDA_VISIBLE_DEVICES='1',
                LD_LIBRARY_PATH=OPTIX_LIB + ':' + os.environ.get('LD_LIBRARY_PATH', ''))
     ptx = os.path.join(os.path.dirname(binp), 'setup3_dev.ptx')
-    cmd = ['timeout', '-k', '2', '30', binp, ptx, os.path.join(os.path.dirname(binp), 'words.txt'), rays, fill, out] + extra
+    cmd = ['timeout', '-k', '2', '30'] + ncu + [binp, ptx, os.path.join(os.path.dirname(binp), 'words.txt'), rays, fill, out] + extra
     print('sha256', sha)
     r = subprocess.run(cmd, env=env)
     print('exit', r.returncode)

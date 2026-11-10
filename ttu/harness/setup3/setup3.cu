@@ -10,6 +10,8 @@
 //            random  = lane i: its own random origin in [-1,1]^3 and random direction
 //            random1 = every lane traces lane 0's random ray (coherent control)
 //            randomz = lane i: its own random origin, direction +z
+//            file:F  = rays from F (8 float32 each: origin, tmin, direction, tmax); the count must be a
+//                      multiple of 32 W; rays [32 W c, 32 W (c + 1)) run as chunk c, one chunk after another
 //            pairs:F = lane i reads line i (wrapping) of F, "src dst": origin above the centroid of
 //                      triangle src (z - 1), aimed at the centroid of triangle dst (src == dst: +z ray)
 //     FILL   zero | random   (value of the words OptiX leaves uninitialized: 0x180 high, 0x190)
@@ -30,9 +32,13 @@
 //     --start OFF[:FLAGS]  first query starts at the node at GAS + OFF (hex, 128 byte aligned) instead
 //                    of the GAS root: 0x180 low = node >> 7, high word (node_hi >> 7) | FLAGS (hex,
 //                    default 0x2484000 = the root word's flags). Resumed queries use the TTU's own words.
+//     --start-file F one slot path per ray (same order as the rays; "root" allowed), FLAGS as --start
 //     --start-path P[:FLAGS]  same, but the node is named by its slot path from the root (e.g. 3,5 = the
 //                    internal child in slot 3 of the root, then its slot 5; "root" = the root). OptiX
 //                    places nodes in a different memory order in each process; the slot path is stable.
+//     --passes P     run the whole chunk sequence P times (1..8, default 1); pass p chunk c > 0 writes
+//                    OUT.json.p<p>c<c> (pass 0 chunk 0 is OUT.json itself)
+//     --flush MB also flushes before every resume round
 //     --no-ttu       stop after the OptiX reference
 //
 // ttu_one as compiled here only loads 96 words into registers and stores them
@@ -48,6 +54,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <random>
 #include <sstream>
 #include <string>
@@ -157,11 +164,12 @@ int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
-    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int passes = 1; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
         else if (!strcmp(argv[a], "--repeat") && a + 1 < argc) repeat = atoi(argv[++a]);
+        else if (!strcmp(argv[a], "--passes") && a + 1 < argc) passes = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--warps") && a + 1 < argc) warps = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--blocks") && a + 1 < argc) blocks = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--sms") && a + 1 < argc) { if (sscanf(argv[++a], "%u,%u", &sm_a, &sm_b) != 2) { fprintf(stderr, "--sms A,B\n"); return 2; } }
@@ -170,6 +178,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--dump-gas") && a + 1 < argc) dump = argv[++a];
         else if (!strcmp(argv[a], "--resume") && a + 1 < argc) resume = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--dump-tris") && a + 1 < argc) dump_tris = argv[++a];
+        else if (!strcmp(argv[a], "--start-file") && a + 1 < argc) start_file = argv[++a];
         else if (!strcmp(argv[a], "--start-path") && a + 1 < argc) {
             std::string v = argv[++a]; const size_t c = v.find(':'); use_path = true;
             if (c != std::string::npos) { char *end; start_flags = (unsigned)strtoul(v.c_str() + c + 1, &end, 16); v = v.substr(0, c);
@@ -183,7 +192,7 @@ int main(int argc, char **argv)
         }
         else { fprintf(stderr, "unknown option %s\n", argv[a]); return 2; }
     }
-    if (repeat < 1 || repeat > 100 || warps < 1 || warps > MAXW || blocks < 1 || blocks > 1024 || flush_mb < 0 || flush_mb > 4096) {
+    if (passes < 1 || passes > 8 || repeat < 1 || repeat > 100 || warps < 1 || warps > MAXW || blocks < 1 || blocks > 1024 || flush_mb < 0 || flush_mb > 4096) {
         fprintf(stderr, "bad option value\n"); return 2;
     }
     unsigned words[8];
@@ -269,7 +278,7 @@ int main(int argc, char **argv)
         }
         if (pairs.empty()) { fprintf(stderr, "pairs: empty file\n"); return 2; }
     }
-    if (perlane || jitter || rnd || rnd1 || rndz || !pairs.empty()) {
+    if (perlane || jitter || rnd || rnd1 || rndz || !pairs.empty() || !strncmp(argv[3], "file:", 5)) {
         ray = {{0.f, 0.f, -1.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f};   // replaced per lane below
     } else if (!strncmp(argv[3], "tri:", 4)) {
         const int i = atoi(argv[3] + 4);
@@ -283,6 +292,13 @@ int main(int argc, char **argv)
         ray = *pick;
     }
     std::vector<Ray8> rays(LANES, ray);
+    if (!strncmp(argv[3], "file:", 5)) {
+        FILE *rf = fopen(argv[3] + 5, "rb"); if (!rf) { fprintf(stderr, "cannot read %s\n", argv[3] + 5); return 2; }
+        std::vector<Ray8> fr; Ray8 y; while (fread(&y, sizeof y, 1, rf) == 1) fr.push_back(y); fclose(rf);
+        if (fr.empty() || fr.size() % LANES || fr.size() > (1u << 20)) { fprintf(stderr, "file: ray count %zu is not a multiple of %u\n", fr.size(), LANES); return 2; }
+        rays = fr;
+    }
+    const unsigned NR = (unsigned)rays.size(), nchunks = NR / LANES;
     for (unsigned i = 0; i < LANES && (rnd || rnd1 || rndz); ++i) {
         std::mt19937 g(777 + (rnd1 ? 0 : i)); std::uniform_real_distribution<float> U(-1.f, 1.f);
         float3 o{U(g), U(g), U(g)}, d;
@@ -306,15 +322,15 @@ int main(int argc, char **argv)
         const float l = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
         rays[i] = {{o.x, o.y, o.z}, 0.f, {d.x / l, d.y / l, d.z / l}, 1e16f};
     }
-    Params prm{}; prm.handle = h; prm.n = LANES;
-    CK(cudaMalloc((void **)&prm.rays, LANES * sizeof(Ray8)));
-    CK(cudaMemcpy((void *)prm.rays, rays.data(), LANES * sizeof(Ray8), cudaMemcpyHostToDevice));
-    CK(cudaMalloc((void **)&prm.out, LANES * sizeof(RefOut))); CK(cudaMalloc((void **)&prm.inst, 18 * 8));
+    Params prm{}; prm.handle = h; prm.n = NR;
+    CK(cudaMalloc((void **)&prm.rays, NR * sizeof(Ray8)));
+    CK(cudaMemcpy((void *)prm.rays, rays.data(), NR * sizeof(Ray8), cudaMemcpyHostToDevice));
+    CK(cudaMalloc((void **)&prm.out, NR * sizeof(RefOut))); CK(cudaMalloc((void **)&prm.inst, 18 * 8));
     CUdeviceptr dprm; CK(cudaMalloc((void **)&dprm, sizeof prm)); CK(cudaMemcpy((void *)dprm, &prm, sizeof prm, cudaMemcpyHostToDevice));
-    OX(optixLaunch(pipe, 0, dprm, sizeof prm, &sbt, LANES, 1, 1));
+    OX(optixLaunch(pipe, 0, dprm, sizeof prm, &sbt, NR, 1, 1));
     CK(cudaDeviceSynchronize());
-    std::vector<RefOut> ref(LANES); unsigned long long inst[18];
-    CK(cudaMemcpy(ref.data(), prm.out, LANES * sizeof(RefOut), cudaMemcpyDeviceToHost));
+    std::vector<RefOut> ref(NR); unsigned long long inst[18];
+    CK(cudaMemcpy(ref.data(), prm.out, NR * sizeof(RefOut), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(inst, prm.inst, sizeof inst, cudaMemcpyDeviceToHost));
 
     // ---- checks before anything is handed to ttu_one -----------------------------
@@ -327,10 +343,10 @@ int main(int argc, char **argv)
     const unsigned long long root = (unsigned long long)gas + off;
     const bool handle_ok = (h & ~0x3fULL) == (unsigned long long)gas && (h & 0x3f) == 0xc && (gas & 0x7f) == 0;
     const bool align_ok = (A & 0x3f) == 0 && (root & 0x7f) == 0;
-    if (use_path) {   // walk the slot path in this process's GAS (format: see ttu/bench/BVH_5/gas.py)
-        std::vector<unsigned char> G(bs.outputSizeInBytes);
-        CK(cudaMemcpy(G.data(), (void *)gas, G.size(), cudaMemcpyDeviceToHost));
-        long long cur = (long long)off; std::istringstream ps(start_path); std::string tok;
+    std::vector<unsigned char> G;
+    auto walk_path = [&](const std::string &path) -> long long {   // slot path from the root -> byte offset, -1 if invalid
+        if (G.empty()) { G.resize(bs.outputSizeInBytes); CK(cudaMemcpy(G.data(), (void *)gas, G.size(), cudaMemcpyDeviceToHost)); }
+        long long cur = (long long)off; std::istringstream ps(path == "root" ? std::string() : path); std::string tok;
         while (std::getline(ps, tok, ',')) {
             const int want = atoi(tok.c_str()); int rel; memcpy(&rel, &G[cur + 0x1c], 4); int k = 0; bool found = false;
             for (int sl = 0; sl < 12 && !found; ++sl) {
@@ -338,12 +354,27 @@ int main(int argc, char **argv)
                 if (b[4] == 0xff && b[5] == 0 && b[6] == 0 && b[7] == 0) continue;   // empty slot
                 if (b[7] == 0) { if (sl == want) { cur += 0x80LL * (rel + k); found = true; } ++k; }
             }
-            if (!found || cur < 0 || cur + 0x80 > (long long)G.size()) { fprintf(stderr, "--start-path: slot %d is not an internal child\n", want); return 2; }
+            if (!found || cur < 0 || cur + 0x80 > (long long)G.size()) return -1;
         }
-        start_off = cur;
+        return cur;
+    };
+    if (use_path) {   // walk the slot path in this process's GAS (format: see ttu/bench/BVH_5/gas.py)
+        start_off = walk_path(start_path.empty() ? "root" : start_path);
+        if (start_off < 0) { fprintf(stderr, "--start-path: not a path of internal children\n"); return 2; }
     }
     const bool start_ok = start_off < 0 || (start_off >= (long long)off && start_off + 0x80 <= (long long)bs.outputSizeInBytes);
     const unsigned long long start = start_off < 0 ? root : (unsigned long long)gas + (unsigned long long)start_off;
+    std::vector<unsigned long long> ray_start(NR, start);   // --start-file: one slot path per ray
+    size_t n_nonroot = 0;
+    if (start_file) {
+        std::istringstream sf(read_file(start_file)); std::string line; size_t k = 0; std::map<std::string, long long> memo;
+        while (std::getline(sf, line) && k < NR) {
+            auto it = memo.find(line); long long o = it != memo.end() ? it->second : (memo[line] = walk_path(line));
+            if (o < 0) { fprintf(stderr, "--start-file: line %zu is not a path of internal children\n", k + 1); return 2; }
+            ray_start[k++] = (unsigned long long)gas + (unsigned long long)o; n_nonroot += o != (long long)off;
+        }
+        if (k != NR) { fprintf(stderr, "--start-file: %zu lines for %u rays\n", k, NR); return 2; }
+    }
 
     FILE *jf = fopen(argv[5], "w");
     fprintf(jf, "{\n \"scene\": \"%s\", \"geoms\": %u, \"tris\": [", scene.c_str(), ng);
@@ -359,15 +390,16 @@ int main(int argc, char **argv)
             (unsigned long long)gas, (size_t)bs.outputSizeInBytes, (unsigned long long)h, off, root);
     fprintf(jf, " \"inst\": \"0x%llx\", \"inst_ok\": %s, \"c3_34\": \"0x%08x\", \"handle_ok\": %s, \"align_ok\": %s,\n", A,
             inst_ok ? "true" : "false", c3_34, handle_ok ? "true" : "false", align_ok ? "true" : "false");
+    fprintf(jf, " \"start_file\": \"%s\", \"rays_not_from_root\": %zu,", start_file ? start_file : "", n_nonroot);
     fprintf(jf, " \"start_path\": \"%s\",", use_path ? (start_path.empty() ? "root" : start_path.c_str()) : "");
     fprintf(jf, " \"start_off\": \"0x%llx\", \"start\": \"0x%llx\", \"start_flags\": \"0x%x\", \"start_ok\": %s,\n",
             start_off < 0 ? off : (unsigned long long)start_off, start, start_flags, start_ok ? "true" : "false");
     fprintf(jf, " \"lane_rays\": [");
-    for (unsigned i = 0; i < LANES; ++i)
+    for (unsigned i = 0; i < NR; ++i)
         fprintf(jf, "%s[%.9g,%.9g,%.9g,%.9g,%.9g,%.9g]", i ? "," : "", rays[i].o[0], rays[i].o[1], rays[i].o[2], rays[i].d[0], rays[i].d[1], rays[i].d[2]);
     fprintf(jf, "],\n");
     fprintf(jf, " \"warps\": %d, \"flush_mb\": %g, \"fill\": \"%s\",\n \"ref\": [", warps, flush_mb, argv[4]);
-    for (unsigned i = 0; i < LANES; ++i)
+    for (unsigned i = 0; i < NR; ++i)
         fprintf(jf, "%s{\"hit\": %u, \"t\": \"0x%08x\", \"prim\": %u, \"u\": \"0x%08x\", \"v\": \"0x%08x\", \"front\": %u, \"gas_index\": %u}",
                 i ? ", " : "", ref[i].hit, fbits(ref[i].t), ref[i].prim, fbits(ref[i].u), fbits(ref[i].v), ref[i].front, ref[i].gas_index);
     fprintf(jf, "]");
@@ -379,19 +411,29 @@ int main(int argc, char **argv)
     }
     if (!run_ttu) { fprintf(jf, "\n}\n"); fclose(jf); return 0; }
 
+    fprintf(jf, ",\n \"nchunks\": %u, \"passes\": %d", nchunks, passes);
+    cudaError_t e_all = cudaSuccess;
+    for (int pc = 0; pc < passes * (int)nchunks && e_all == cudaSuccess; ++pc) {
+    const int pass = pc / (int)nchunks, chunk = pc % (int)nchunks;
+    const Ray8 *crays = &rays[(size_t)chunk * LANES];
+    if (pc > 0) {   // next chunk file
+        const std::string cn = std::string(argv[5]) + ".p" + std::to_string(pass) + "c" + std::to_string(chunk);
+        jf = fopen(cn.c_str(), "w"); fprintf(jf, "{\"pass\": %d, \"chunk\": %d", pass, chunk);
+    } else fprintf(jf, ",\n \"pass\": 0, \"chunk\": 0");
     // ---- register image for ttu_one: word r of a thread = register r --------------
     const size_t TOTAL = (size_t)blocks * LANES;
     std::vector<unsigned> in(TOTAL * N, 0), out(TOTAL * N, 0x77777777u);
     for (size_t i = 0; i < TOTAL; ++i) {
         unsigned *R = &in[i * N];
-        const Ray8 &y = rays[i % LANES];
+        const Ray8 &y = crays[i % LANES];
         R[12] = fbits(y.o[2]); R[13] = fbits(y.tmin); R[82] = fbits(y.o[0]); R[83] = fbits(y.o[1]);   // 0x40
         R[16] = fbits(y.d[2]); R[17] = fbits(y.tmax); R[14] = fbits(y.d[0]); R[15] = fbits(y.d[1]);   // 0x50
         R[52] = R[12]; R[53] = R[13]; R[56] = R[82]; R[57] = R[83];                                   // 0xC0
         R[30] = R[16]; R[31] = R[17]; R[46] = R[14]; R[47] = R[15];                                   // 0xD0
         R[54] = 0; R[55] = 0;                                                                          // 0x100 high
         R[34] = (unsigned)(A >> 6); R[35] = ((((unsigned)(A >> 32) >> 6) | 0x402800u) & 0x1ffffffu) | 0x2000000u;
-        R[70] = (unsigned)(start >> 7); R[71] = ((unsigned)(start >> 32) >> 7) | start_flags;        // 0x180 low (root by default)
+        const unsigned long long st0 = ray_start[(size_t)chunk * LANES + i % LANES];
+        R[70] = (unsigned)(st0 >> 7); R[71] = ((unsigned)(st0 >> 32) >> 7) | start_flags;           // 0x180 low (root by default)
         unsigned *unk[6] = {&R[32], &R[33], &R[2], &R[3], &R[44], &R[45]};                             // 0x180 high, 0x190
         std::mt19937 lane_rng(12345);   // same pattern in every lane
         for (auto u : unk) *u = random_fill ? (unsigned)lane_rng() : 0u;
@@ -478,9 +520,9 @@ int main(int argc, char **argv)
         auto absf = [](unsigned u) { u &= 0x7fffffffu; float f; memcpy(&f, &u, 4); return f; };
         std::vector<unsigned> cur = in, prev = out;
         std::vector<int> nq(LANES, 1), done(LANES, 0), npend0(LANES, 0);
-        std::vector<float> best_t(LANES, -1.f); std::vector<unsigned> best_p(LANES, 0);
+        std::vector<float> best_t(LANES, -1.f); std::vector<unsigned> best_p(LANES, 0); std::vector<unsigned long long> best_leaf(LANES, 0);
         auto take = [&](unsigned i, const unsigned *R) {
-            if (R[3]) { const float t = absf(R[45]); if (best_t[i] < 0 || t < best_t[i]) { best_t[i] = t; best_p[i] = R[44] & 0x1fffffffu; } }
+            if (R[3]) { const float t = absf(R[45]); if (best_t[i] < 0 || t < best_t[i]) { best_t[i] = t; best_p[i] = R[44] & 0x1fffffffu; best_leaf[i] = ((unsigned long long)R[31] << 32) | R[30]; } }
         };
         auto npairs = [](const unsigned *R) { return (int)((R[56] | R[57]) != 0) + ((R[58] | R[59]) != 0) + ((R[60] | R[61]) != 0) + ((R[70] | R[71]) != 0); };
         for (unsigned i = 0; i < LANES; ++i) { take(i, &prev[i * N]); done[i] = !pend(&prev[i * N]); npend0[i] = npairs(&prev[i * N]); }
@@ -492,7 +534,7 @@ int main(int argc, char **argv)
             for (unsigned i = 0; i < LANES; ++i) {
                 unsigned *R = &cur[i * N]; const unsigned *Pv = &prev[i * N];
                 if (done[i]) { R[17] = R[31] = 0u; continue; }          // finished lane: tmax 0, no work
-                const float tmax = best_t[i] >= 0.f ? best_t[i] : rays[i % LANES].tmax;
+                const float tmax = best_t[i] >= 0.f ? best_t[i] : crays[i % LANES].tmax;
                 R[17] = R[31] = fbits(tmax);
                 R[70] = Pv[56]; R[71] = Pv[57]; R[32] = Pv[58]; R[33] = Pv[59];       // 0x180
                 R[44] = Pv[60]; R[45] = Pv[61]; R[2] = Pv[70]; R[3] = Pv[71];         // 0x190
@@ -501,6 +543,7 @@ int main(int argc, char **argv)
             CK(cudaMemcpy(dout, out.data(), out.size() * 4, cudaMemcpyHostToDevice));
             std::vector<unsigned> fill(out.size(), 0x77777777u);
             CK(cudaMemcpy(dout, fill.data(), fill.size() * 4, cudaMemcpyHostToDevice));
+            if (fn) { flush_read<<<142 * 8, 256>>>(fbuf, fn, sink); CK(cudaGetLastError()); }
             ttu_one<<<1, LANES>>>(din, dout);
             e = cudaGetLastError(); if (e == cudaSuccess) e = cudaDeviceSynchronize();
             if (e != cudaSuccess) break;
@@ -526,6 +569,8 @@ int main(int argc, char **argv)
         for (unsigned i = 0; i < LANES; ++i) fprintf(jf, "%s%d", i ? "," : "", npend0[i]);
         fprintf(jf, "],\n \"lane_best\": [");
         for (unsigned i = 0; i < LANES; ++i) fprintf(jf, "%s[\"0x%08x\", %u]", i ? "," : "", best_t[i] >= 0 ? fbits(best_t[i]) : 0xffffffffu, best_p[i]);
+        fprintf(jf, "],\n \"lane_leaf_off\": [");   // TTULD 0x310 high of the best hit: leaf block (low 48 bits) minus GAS base, slot bits dropped
+        for (unsigned i = 0; i < LANES; ++i) fprintf(jf, "%s%lld", i ? "," : "", best_t[i] >= 0 ? (long long)((best_leaf[i] & 0xffffffffffffULL) - (unsigned long long)gas) : -1LL);
         fprintf(jf, "]");
         int maxq = 0; size_t ndone = 0; for (unsigned i = 0; i < LANES; ++i) { maxq = std::max(maxq, nq[i]); ndone += done[i]; }
         printf("resume: %s, %d round(s), %zu of %u lanes finished, max queries per lane %d\n", cudaGetErrorString(e), round, ndone, LANES, maxq);
@@ -556,5 +601,8 @@ int main(int argc, char **argv)
             fprintf(jf, "]");
         } }
     fprintf(jf, "]\n}\n"); fclose(jf);
-    return e == cudaSuccess ? 0 : 1;   // pipeline and GAS stay alive until here
+    CK(cudaFree(din)); CK(cudaFree(dout)); CK(cudaFree(sink)); if (fbuf) CK(cudaFree(fbuf)); if (tbuf) CK(cudaFree(tbuf));
+    e_all = e;
+    }
+    return e_all == cudaSuccess ? 0 : 1;   // pipeline and GAS stay alive until here
 }
