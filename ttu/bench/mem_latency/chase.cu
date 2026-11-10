@@ -88,7 +88,10 @@ __global__ void flush_read(const uint4 *p, size_t n, unsigned *sink)
 
 int main(int argc, char **argv)
 {
-    if (argc < 4) { fprintf(stderr, "usage: chase SIZE_KB ca|cg|cross|cold OUT.json\n"); return 2; }
+    if (argc < 4) { fprintf(stderr, "usage: chase SIZE_KB ca|cg|cross|cold OUT.json [SMEM_BYTES]\n"); return 2; }
+    // SMEM_BYTES (ca mode): dynamic shared memory reserved by the launch (unused), which shrinks L1 (Memory_1 carveout)
+    const int smem = argc > 4 ? atoi(argv[4]) : 0;
+    if (smem) CK(cudaFuncSetAttribute(chase<false>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
     const size_t kb = strtoull(argv[1], 0, 10); const char *mode = argv[2];
     const size_t words = kb * 1024 / 4, lines = words / 32;
     if (lines < 2 || kb > 4u << 20) { fprintf(stderr, "bad size\n"); return 2; }
@@ -120,7 +123,7 @@ int main(int argc, char **argv)
     if (thr) { if (kl > 1024) { fprintf(stderr, "K <= 1024\n"); return 2; } CK(cudaMalloc(&tb, 4u << 20)); CK(cudaMemset(tb, 0, 4u << 20)); }
     if (cold) { CK(cudaMalloc(&fbuf, fn * sizeof(uint4))); CK(cudaMemset(fbuf, 1, fn * sizeof(uint4))); }
     FILE *jf = fopen(argv[3], "w");
-    fprintf(jf, "{\"size_kb\": %zu, \"mode\": \"%s\", \"lines\": %zu, \"timed_loads\": %u, \"cycles_per_load\": [", kb, mode, lines, n);
+    fprintf(jf, "{\"smem\": %d, \"size_kb\": %zu, \"mode\": \"%s\", \"lines\": %zu, \"timed_loads\": %u, \"cycles_per_load\": [", smem, kb, mode, lines, n);
     for (int rep = 0; rep < 11; ++rep) {
         unsigned start = 0;
         if (cross) { chase<false><<<1, 1>>>(a, 0, 0, warm, cyc, sink); CK(cudaGetLastError()); CK(cudaDeviceSynchronize()); }
@@ -129,7 +132,7 @@ int main(int argc, char **argv)
         if (thr) chase_thrash<<<1, 32>>>(a, warm, n, tb, kl, cyc, sink);
         else if (ev) chase_evict<<<1, 1>>>(a, eb, warm, ewalk, n, cyc, sink);
         else if (cg) chase<true><<<1, 1>>>(a, start, w, n, cyc, sink);
-        else    chase<false><<<1, 1>>>(a, start, w, n, cyc, sink);
+        else    chase<false><<<1, 1, smem>>>(a, start, w, n, cyc, sink);
         CK(cudaGetLastError()); CK(cudaDeviceSynchronize());
         unsigned long long c; CK(cudaMemcpy(&c, cyc, 8, cudaMemcpyDeviceToHost));
         fprintf(jf, "%s%.2f", rep ? ", " : "", (double)c / n);

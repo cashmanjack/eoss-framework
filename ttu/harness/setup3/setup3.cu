@@ -53,6 +53,8 @@
 //                    finished lanes are masked; compact: the rays still running are packed into full warps in
 //                    their previous order; regroup: packed after sorting by the pending node pointer they resume
 //                    at. Padding lanes are masked. --passes P repeats the whole schedule; the last is reported.
+//     --smem BYTES   ttu_one launches reserve BYTES of dynamic shared memory (unused), which shrinks L1
+//                    (Memory_1; measured with chase.cu: any reservation gives L1 about 16..24 KB, none about 90 KB)
 //     --no-ttu       stop after the OptiX reference
 //
 // ttu_one as compiled here only loads 96 words into registers and stores them
@@ -194,12 +196,13 @@ int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
-    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int passes = 1; std::string sched; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int smem = 0; int passes = 1; std::string sched; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
         else if (!strcmp(argv[a], "--repeat") && a + 1 < argc) repeat = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--passes") && a + 1 < argc) passes = atoi(argv[++a]);
+        else if (!strcmp(argv[a], "--smem") && a + 1 < argc) smem = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--active") && a + 1 < argc) active = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--sched") && a + 1 < argc) sched = argv[++a];
         else if (!strcmp(argv[a], "--idle") && a + 1 < argc) idle = argv[++a];
@@ -554,6 +557,7 @@ int main(int argc, char **argv)
         printf("sched %s: %s, %d round(s), %lld launches (last pass), %zu of %u rays finished, max queries %d\n", sched.c_str(), cudaGetErrorString(e), round, launches, ndone, NR, maxq);
         return e == cudaSuccess && ndone == NR ? 0 : 1;
     }
+    fprintf(jf, ",\n \"smem\": %d", smem);
     fprintf(jf, ",\n \"nchunks\": %u, \"passes\": %d, \"active\": %d, \"idle\": \"%s\"", nchunks, passes, active, idle.c_str());
     cudaError_t e_all = cudaSuccess;
     for (int pc = 0; pc < passes * (int)nchunks && e_all == cudaSuccess; ++pc) {
@@ -617,7 +621,8 @@ int main(int argc, char **argv)
     for (int it = 0; it < repeat && e == cudaSuccess; ++it) {
         CK(cudaMemcpy(dout, out.data(), out.size() * 4, cudaMemcpyHostToDevice));
         if (fn) { flush_read<<<142 * 8, 256>>>(fbuf, fn, sink); CK(cudaGetLastError()); }
-        ttu_one<<<blocks, LANES>>>(din, dout);
+        if (smem && it == 0) CK(cudaFuncSetAttribute(ttu_one, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+        ttu_one<<<blocks, LANES, smem>>>(din, dout);
         e = cudaGetLastError();                     // launch errors (e.g. too many resources)
         if (e == cudaSuccess) e = cudaDeviceSynchronize();
         if (e != cudaSuccess) break;
