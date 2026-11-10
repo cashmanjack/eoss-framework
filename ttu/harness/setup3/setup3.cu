@@ -18,6 +18,8 @@
 //   options
 //     --scene S      tri1 (default) | tri2 (2 triangles, 1 build input) | tri2g (2 build inputs) | grid:N
 //                    | soup:N[:E] (N random small triangles in [-1,1]^3, edge E/cbrt(N), E default 3)
+//                    | par:N:s|o[:DELTA] (full traversal: N triangles parallel to a +z ray at x = y = 0,
+//                      DELTA (default 1e-3) off it, stacked along z (s) or all overlapping (o); every box, no hit)
 //                    | layers:N:L[:DZ] (L copies of grid:N at z = DZ k, DZ default 0.5)
 //                    | stack:L (L copies of triangle 0 at z = 0.01 k, k = 0..L-1, all on the hit ray)
 //     --warps W      warps in the single block, 1..21 (default 1); build_patch.py --regs 96 sets the register count
@@ -135,6 +137,21 @@ static std::vector<std::vector<Tri>> make_scene(const std::string &s)
         for (int i = 0; i < n; ++i) {
             const float x = -1.f + (i % k) * c, y = -1.f + (i / k) * c;
             v.push_back({{x + 0.1f * c, y + 0.1f * c, 0.f}, {x + 0.9f * c, y + 0.1f * c, 0.f}, {x + 0.5f * c, y + 0.9f * c, 0.f}});
+        }
+        return {v};
+    }
+    if (s.rfind("par:", 0) == 0) {   // full traversal scene for a ray along +z at x = y = 0 (Traversal_2a)
+        // triangle k lies in the plane y = x tan(th_k) + DELTA, x in [-0.5, 0.5]: its box holds the ray's line,
+        // but the plane is parallel to the ray and DELTA away, so the ray never hits it.
+        // s: stacked along z (k-th at z in [2k/N - 1, 2(k+1)/N - 1]); o: all overlapping at z in [-1, 1].
+        int n = 0; char mode = 's'; float delta = 1e-3f;
+        if (sscanf(s.c_str() + 4, "%d:%c:%f", &n, &mode, &delta) < 2 || n < 1 || n > (1 << 22) || (mode != 's' && mode != 'o') || !(delta > 0.f)) {
+            fprintf(stderr, "par:N:s|o[:DELTA]\n"); exit(2); }
+        std::vector<Tri> v; std::mt19937 g(99); std::uniform_real_distribution<float> U(0.5f, 2.f);
+        for (int k = 0; k < n; ++k) {
+            const float t = U(g) * (k % 2 ? -1.f : 1.f);
+            const float z0 = mode == 's' ? 2.f * k / n - 1.f : -1.f, z1 = mode == 's' ? 2.f * (k + 1) / n - 1.f : 1.f;
+            v.push_back({{-0.5f, -0.5f * t + delta, z0}, {0.5f, 0.5f * t + delta, z0}, {0.f, delta, z1}});
         }
         return {v};
     }
