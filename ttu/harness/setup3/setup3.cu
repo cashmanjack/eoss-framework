@@ -10,10 +10,13 @@
 //            random  = lane i: its own random origin in [-1,1]^3 and random direction
 //            random1 = every lane traces lane 0's random ray (coherent control)
 //            randomz = lane i: its own random origin, direction +z
+//            pairs:F = lane i reads line i (wrapping) of F, "src dst": origin above the centroid of
+//                      triangle src (z - 1), aimed at the centroid of triangle dst (src == dst: +z ray)
 //     FILL   zero | random   (value of the words OptiX leaves uninitialized: 0x180 high, 0x190)
 //   options
 //     --scene S      tri1 (default) | tri2 (2 triangles, 1 build input) | tri2g (2 build inputs) | grid:N
 //                    | soup:N[:E] (N random small triangles in [-1,1]^3, edge E/cbrt(N), E default 3)
+//                    | layers:N:L[:DZ] (L copies of grid:N at z = DZ k, DZ default 0.5)
 //                    | stack:L (L copies of triangle 0 at z = 0.01 k, k = 0..L-1, all on the hit ray)
 //     --warps W      warps in the single block, 1..21 (default 1); build_patch.py --regs 96 sets the register count
 //     --repeat N     timed launches in this process, 1..100 (default 1)
@@ -24,6 +27,12 @@
 //     --thrash       allocate a 4 MB buffer; words 26, 27 = buffer + 128 x lane (for build_patch --thrash)
 //     --resume K     then up to K follow up queries per lane, built as OptiX's loop builds them
 //     --dump-tris F  write all triangles (9 floats each) to F, for the CPU reference
+//     --start OFF[:FLAGS]  first query starts at the node at GAS + OFF (hex, 128 byte aligned) instead
+//                    of the GAS root: 0x180 low = node >> 7, high word (node_hi >> 7) | FLAGS (hex,
+//                    default 0x2484000 = the root word's flags). Resumed queries use the TTU's own words.
+//     --start-path P[:FLAGS]  same, but the node is named by its slot path from the root (e.g. 3,5 = the
+//                    internal child in slot 3 of the root, then its slot 5; "root" = the root). OptiX
+//                    places nodes in a different memory order in each process; the slot path is stable.
 //     --no-ttu       stop after the OptiX reference
 //
 // ttu_one as compiled here only loads 96 words into registers and stores them
@@ -109,6 +118,15 @@ static std::vector<std::vector<Tri>> make_scene(const std::string &s)
         }
         return {v};
     }
+    if (s.rfind("layers:", 0) == 0) {   // L copies of grid:N at z = DZ k, k = 0..L-1 (triangle index = k N + i)
+        int n = 0, L = 0; float dz = 0.5f;
+        if (sscanf(s.c_str() + 7, "%d:%d:%f", &n, &L, &dz) < 2 || n < 1 || L < 1 || (long long)n * L > (1 << 23) || !(dz > 0.f)) {
+            fprintf(stderr, "layers:N:L[:DZ]\n"); exit(2); }
+        auto g = make_scene("grid:" + std::to_string(n))[0];
+        std::vector<Tri> v;
+        for (int k = 0; k < L; ++k) for (Tri t : g) { t.a.z = t.b.z = t.c.z = dz * k; v.push_back(t); }
+        return {v};
+    }
     if (s.rfind("stack:", 0) == 0) {
         const int L = atoi(s.c_str() + 6);
         if (L < 1 || L > 4096) { fprintf(stderr, "stack:L with 1 <= L <= 4096\n"); exit(2); }
@@ -139,7 +157,7 @@ int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
-    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
@@ -152,6 +170,17 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--dump-gas") && a + 1 < argc) dump = argv[++a];
         else if (!strcmp(argv[a], "--resume") && a + 1 < argc) resume = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--dump-tris") && a + 1 < argc) dump_tris = argv[++a];
+        else if (!strcmp(argv[a], "--start-path") && a + 1 < argc) {
+            std::string v = argv[++a]; const size_t c = v.find(':'); use_path = true;
+            if (c != std::string::npos) { char *end; start_flags = (unsigned)strtoul(v.c_str() + c + 1, &end, 16); v = v.substr(0, c);
+                if (*end || (start_flags & 0xffu)) { fprintf(stderr, "--start-path P[:FLAGS]\n"); return 2; } }
+            start_path = v == "root" ? "" : v;
+        }
+        else if (!strcmp(argv[a], "--start") && a + 1 < argc) {
+            const char *v = argv[++a]; char *end; start_off = strtoll(v, &end, 16);
+            if (*end == ':') start_flags = (unsigned)strtoul(end + 1, &end, 16);
+            if (*end || start_off < 0 || (start_off & 0x7f) || (start_flags & 0xffu)) { fprintf(stderr, "--start OFF[:FLAGS], OFF 128 byte aligned, FLAGS low byte 0\n"); return 2; }
+        }
         else { fprintf(stderr, "unknown option %s\n", argv[a]); return 2; }
     }
     if (repeat < 1 || repeat > 100 || warps < 1 || warps > MAXW || blocks < 1 || blocks > 1024 || flush_mb < 0 || flush_mb > 4096) {
@@ -231,7 +260,16 @@ int main(int argc, char **argv)
     Ray8 ray{};
     const bool perlane = !strcmp(argv[3], "perlane"), jitter = !strcmp(argv[3], "jitter");
     const bool rnd = !strcmp(argv[3], "random"), rnd1 = !strcmp(argv[3], "random1"), rndz = !strcmp(argv[3], "randomz");
-    if (perlane || jitter || rnd || rnd1 || rndz) {
+    std::vector<std::pair<int, int>> pairs;
+    if (!strncmp(argv[3], "pairs:", 6)) {
+        std::istringstream ps(read_file(argv[3] + 6)); int a, b;
+        while (ps >> a >> b) {
+            if (a < 0 || b < 0 || a >= (int)all.size() || b >= (int)all.size()) { fprintf(stderr, "pairs: index out of range\n"); return 2; }
+            pairs.push_back({a, b});
+        }
+        if (pairs.empty()) { fprintf(stderr, "pairs: empty file\n"); return 2; }
+    }
+    if (perlane || jitter || rnd || rnd1 || rndz || !pairs.empty()) {
         ray = {{0.f, 0.f, -1.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f};   // replaced per lane below
     } else if (!strncmp(argv[3], "tri:", 4)) {
         const int i = atoi(argv[3] + 4);
@@ -260,6 +298,14 @@ int main(int argc, char **argv)
         const float w = 1.f - u - v;
         rays[i] = {{w * t.a.x + u * t.b.x + v * t.c.x, w * t.a.y + u * t.b.y + v * t.c.y, -1.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f};
     }
+    for (unsigned i = 0; i < LANES && !pairs.empty(); ++i) {
+        auto cen = [&](int k) { const Tri &t = all[k]; return float3{(t.a.x + t.b.x + t.c.x) / 3.f, (t.a.y + t.b.y + t.c.y) / 3.f, (t.a.z + t.b.z + t.c.z) / 3.f}; };
+        const auto &pr = pairs[i % pairs.size()];
+        const float3 s = cen(pr.first), t = cen(pr.second);
+        const float3 o{s.x, s.y, s.z - 1.f}, d{t.x - o.x, t.y - o.y, t.z - o.z};
+        const float l = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        rays[i] = {{o.x, o.y, o.z}, 0.f, {d.x / l, d.y / l, d.z / l}, 1e16f};
+    }
     Params prm{}; prm.handle = h; prm.n = LANES;
     CK(cudaMalloc((void **)&prm.rays, LANES * sizeof(Ray8)));
     CK(cudaMemcpy((void *)prm.rays, rays.data(), LANES * sizeof(Ray8), cudaMemcpyHostToDevice));
@@ -281,6 +327,23 @@ int main(int argc, char **argv)
     const unsigned long long root = (unsigned long long)gas + off;
     const bool handle_ok = (h & ~0x3fULL) == (unsigned long long)gas && (h & 0x3f) == 0xc && (gas & 0x7f) == 0;
     const bool align_ok = (A & 0x3f) == 0 && (root & 0x7f) == 0;
+    if (use_path) {   // walk the slot path in this process's GAS (format: see ttu/bench/BVH_5/gas.py)
+        std::vector<unsigned char> G(bs.outputSizeInBytes);
+        CK(cudaMemcpy(G.data(), (void *)gas, G.size(), cudaMemcpyDeviceToHost));
+        long long cur = (long long)off; std::istringstream ps(start_path); std::string tok;
+        while (std::getline(ps, tok, ',')) {
+            const int want = atoi(tok.c_str()); int rel; memcpy(&rel, &G[cur + 0x1c], 4); int k = 0; bool found = false;
+            for (int sl = 0; sl < 12 && !found; ++sl) {
+                const unsigned char *b = &G[cur + 0x20 + 8 * sl];
+                if (b[4] == 0xff && b[5] == 0 && b[6] == 0 && b[7] == 0) continue;   // empty slot
+                if (b[7] == 0) { if (sl == want) { cur += 0x80LL * (rel + k); found = true; } ++k; }
+            }
+            if (!found || cur < 0 || cur + 0x80 > (long long)G.size()) { fprintf(stderr, "--start-path: slot %d is not an internal child\n", want); return 2; }
+        }
+        start_off = cur;
+    }
+    const bool start_ok = start_off < 0 || (start_off >= (long long)off && start_off + 0x80 <= (long long)bs.outputSizeInBytes);
+    const unsigned long long start = start_off < 0 ? root : (unsigned long long)gas + (unsigned long long)start_off;
 
     FILE *jf = fopen(argv[5], "w");
     fprintf(jf, "{\n \"scene\": \"%s\", \"geoms\": %u, \"tris\": [", scene.c_str(), ng);
@@ -296,8 +359,11 @@ int main(int argc, char **argv)
             (unsigned long long)gas, (size_t)bs.outputSizeInBytes, (unsigned long long)h, off, root);
     fprintf(jf, " \"inst\": \"0x%llx\", \"inst_ok\": %s, \"c3_34\": \"0x%08x\", \"handle_ok\": %s, \"align_ok\": %s,\n", A,
             inst_ok ? "true" : "false", c3_34, handle_ok ? "true" : "false", align_ok ? "true" : "false");
+    fprintf(jf, " \"start_path\": \"%s\",", use_path ? (start_path.empty() ? "root" : start_path.c_str()) : "");
+    fprintf(jf, " \"start_off\": \"0x%llx\", \"start\": \"0x%llx\", \"start_flags\": \"0x%x\", \"start_ok\": %s,\n",
+            start_off < 0 ? off : (unsigned long long)start_off, start, start_flags, start_ok ? "true" : "false");
     fprintf(jf, " \"lane_rays\": [");
-    for (unsigned i = 0; i < LANES && i < 32; ++i)
+    for (unsigned i = 0; i < LANES; ++i)
         fprintf(jf, "%s[%.9g,%.9g,%.9g,%.9g,%.9g,%.9g]", i ? "," : "", rays[i].o[0], rays[i].o[1], rays[i].o[2], rays[i].d[0], rays[i].d[1], rays[i].d[2]);
     fprintf(jf, "],\n");
     fprintf(jf, " \"warps\": %d, \"flush_mb\": %g, \"fill\": \"%s\",\n \"ref\": [", warps, flush_mb, argv[4]);
@@ -308,7 +374,7 @@ int main(int argc, char **argv)
     printf("scene %s (%zu tris, %u inputs) gas 0x%llx size %zu root 0x%llx inst 0x%llx inst_ok %d c3_34 0x%x handle_ok %d align_ok %d\n",
            scene.c_str(), all.size(), ng, (unsigned long long)gas, (size_t)bs.outputSizeInBytes, root, A, inst_ok, c3_34, handle_ok, align_ok);
     printf("optix ref lane 0: hit %u t %g prim %u front %u gas_index %u\n", ref[0].hit, ref[0].t, ref[0].prim, ref[0].front, ref[0].gas_index);
-    if (!inst_ok || !handle_ok || !align_ok || !c3_ok) {
+    if (!inst_ok || !handle_ok || !align_ok || !c3_ok || !start_ok) {
         fprintf(jf, "\n}\n"); fclose(jf); fprintf(stderr, "check failed, ttu_one not launched\n"); return 3;
     }
     if (!run_ttu) { fprintf(jf, "\n}\n"); fclose(jf); return 0; }
@@ -325,7 +391,7 @@ int main(int argc, char **argv)
         R[30] = R[16]; R[31] = R[17]; R[46] = R[14]; R[47] = R[15];                                   // 0xD0
         R[54] = 0; R[55] = 0;                                                                          // 0x100 high
         R[34] = (unsigned)(A >> 6); R[35] = ((((unsigned)(A >> 32) >> 6) | 0x402800u) & 0x1ffffffu) | 0x2000000u;
-        R[70] = (unsigned)(root >> 7); R[71] = ((unsigned)(root >> 32) >> 7) | 0x2484000u;           // 0x180 low
+        R[70] = (unsigned)(start >> 7); R[71] = ((unsigned)(start >> 32) >> 7) | start_flags;        // 0x180 low (root by default)
         unsigned *unk[6] = {&R[32], &R[33], &R[2], &R[3], &R[44], &R[45]};                             // 0x180 high, 0x190
         std::mt19937 lane_rng(12345);   // same pattern in every lane
         for (auto u : unk) *u = random_fill ? (unsigned)lane_rng() : 0u;
