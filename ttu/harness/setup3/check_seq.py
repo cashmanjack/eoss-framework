@@ -41,46 +41,74 @@ def check(path):
     ok('one ttu_one section', len(sec) == 1)
     body = [b for _, b in elf.iter_instructions(p.data, sec[0])]
     dec = Decoder(ISASpec.load(sm=89))
-    ex = next(i for i, b in enumerate(body) if low12(b) == 0x94d)
+    ex = next(i for i, b in enumerate(body) if low12(b) == 0x94d and pred(b) == (7, 0))   # the unpredicated EXIT
     fails = [i for i in range(ex) if dec.decode(0, body[i]).n_failed]
     ok('A1 body decodes with 0 failed checks up to EXIT', not fails, fails[:5])
     g = meta['group_index']
+    groups = meta.get('groups') or [g]
+    ok('layout: the timed group is the last session', groups[-1] == g, groups)
     if meta['stage'] == 0:
         ok('stage 0: no TTU instruction anywhere', not hits, len(hits))
     else:
         ok('A2/A9 TTU only in ttu_one', all(h[0] == meta['section'] for h in hits))
         opens = [i for i, b in enumerate(body) if low12(b) == OPEN]
-        ok('A2 exactly one TTUOPEN, at group start', opens == [g], opens)
-        n = (W(body[g + 1]) >> 40) & 0x1f
-        ok('A3 TTUMACROFUSE right after TTUOPEN', low12(body[g + 1]) == FUSE, n)
-        grp = body[g + 2:g + 2 + n]
-        ok('A4 next N are all TTU (ST, GO, LD)', len(grp) == n and all(low12(b) in (ST, GO, LD) for b in grp), n)
-        ok('A5 instruction after the group is not TTU', low12(body[g + 2 + n]) not in TTU)
-        kinds = [low12(b) for b in grp]
-        ok('A4 group is 10 ST, then 1 GO, then 6 LD', kinds == [ST] * 10 + [GO] + [LD] * 6, kinds)
-        lds = [i for i, b in enumerate(grp) if low12(b) == LD]
-        close = [i for i in lds if bit(grp[i], 74)]
-        ok('A6 exactly one TTULD with bit 74, and it is last', close == [n - 1] and lds[-1] == n - 1, close)
-        ok('A7 CLOSE unpredicated', pred(grp[-1]) == (7, 0), pred(grp[-1]))
-        ok('A8 bit 72 only on TTUOPEN', not any(bit(b, 72) for b in grp), [bit(b, 72) for b in grp])
-        ok('A6 no other TTU anywhere in the binary', len(hits) == n + 2, len(hits))
-        ok('A11 no branch or BSSY/BSYNC between OPEN and CLOSE',
-           not any(low12(b) in (0x947, 0x945, 0x941, 0x94d, 0x950, 0x943, 0x949) for b in body[g:g + 2 + n]))
+        ok('A2 one TTUOPEN per session, each at its session start', opens == groups, (opens, groups))
+        total = 0
+        for si, gi in enumerate(groups):
+            tag = 'session %d: ' % si
+            n = (W(body[gi + 1]) >> 40) & 0x1f
+            ok(tag + 'A3 TTUMACROFUSE right after TTUOPEN', low12(body[gi + 1]) == FUSE, n)
+            grp = body[gi + 2:gi + 2 + n]
+            ok(tag + 'A4 next N are all TTU (ST, GO, LD)', len(grp) == n and all(low12(b) in (ST, GO, LD) for b in grp), n)
+            ok(tag + 'A5 instruction after the group is not TTU', low12(body[gi + 2 + n]) not in TTU)
+            kinds = [low12(b) for b in grp]
+            ok(tag + 'A4 group is 10 ST, then 1 GO, then 6 LD', kinds == [ST] * 10 + [GO] + [LD] * 6, kinds)
+            lds = [i for i, b in enumerate(grp) if low12(b) == LD]
+            close = [i for i in lds if bit(grp[i], 74)]
+            ok(tag + 'A6 exactly one TTULD with bit 74, and it is last', close == [n - 1] and lds[-1] == n - 1, close)
+            ok(tag + 'A7 CLOSE unpredicated', pred(grp[-1]) == (7, 0), pred(grp[-1]))
+            ok(tag + 'A8 bit 72 only on TTUOPEN', not any(bit(b, 72) for b in grp))
+            ok(tag + 'A11 no branch or BSSY/BSYNC between OPEN and CLOSE',
+               not any(low12(b) in (0x947, 0x945, 0x941, 0x94d, 0x950, 0x943, 0x949) for b in body[gi:gi + 2 + n]))
+            total += n + 2
+            if si + 1 < len(groups):
+                nxt = body[gi + 2 + n]
+                ok(tag + 'next instruction after CLOSE waits on every scoreboard (session closed before the next OPEN)',
+                   low12(nxt) == 0x918 and ((W(nxt[8:]) >> 52) & 0x3f) == 0x3f)
+                ok(tag + 'no TTU instruction between this CLOSE and the next OPEN',
+                   not any(low12(b) in TTU for b in body[gi + 2 + n:groups[si + 1]]))
+        ok('A6 no other TTU anywhere in the binary', len(hits) == total, (len(hits), total))
         ok('B15 no branch anywhere before EXIT', not any(low12(b) in (0x947, 0x949, 0x943) for b in body[:ex]))
     wt = lambda b: (W(b[8:]) >> 52) & 0x3f
     stall = lambda b: (W(b[8:]) >> 41) & 0xf
     nb = meta.get('barnops', 1) if meta.get('sync') else 0
-    c = (1 if meta.get('clock') else 0) + ((1 + nb) if meta.get('sync') else 0) + (1 if meta.get('preclk') else 0)
+    c = (1 if meta.get('clock') else 0) + ((1 + nb) if meta.get('sync') else 0) + (1 if meta.get('preclk') else 0) + (1 if meta.get('gtime') else 0)
     is_clk = lambda b, rd: low12(b) == 0x805 and (W(b) >> 16) & 0xff == rd and (W(b) >> 72) & 0xff == 0x50
-    ok('B12 loads waited on before ISETP P0', low12(body[g - 3 - c]) == 0x918 and wt(body[g - 3 - c]) == 0x3f)
+    f4 = 4 if meta.get('smfilter') else 0   # S2R, 2 ISETP, @P0 EXIT sit between the wait and ISETP P0
+    ok('B12 loads waited on before ISETP P0 (and before the SM filter)', low12(body[g - 3 - c - f4]) == 0x918 and wt(body[g - 3 - c - f4]) == 0x3f)
     ok('B12 ISETP P0 then a NOP with stall 15 before the group',
        low12(body[g - 2 - c]) == 0x80c and low12(body[g - 1 - c]) == 0x918 and stall(body[g - 1 - c]) == 15)
     ok('B13 NOP after the group waits on all scoreboards', low12(body[g + 19]) == 0x918 and wt(body[g + 19]) == 0x3f)
     if meta.get('clock'):
         ok('clock: CS2R R84 SR_CLOCKLO right before TTUOPEN', is_clk(body[g - 1], 84))
         ok('clock: CS2R R86 SR_CLOCKLO right after the wait NOP', is_clk(body[g + 20], 86))
-    if meta.get('sync'):
+    pexits = [i for i, b in enumerate(body[:ex]) if low12(b) == 0x94d]
+    if meta.get('smfilter'):
+        first_ttu = min([i for i, b in enumerate(body) if low12(b) in TTU] or [ex])
+        bars = [i for i, b in enumerate(body) if low12(b) == 0xb1d]
+        ok('smfilter: one predicated EXIT, before any TTU instruction and any barrier',
+           len(pexits) == 1 and pexits[0] < first_ttu and all(pexits[0] < x for x in bars) and pred(body[pexits[0]]) != (7, 0), pexits)
+        ok('smfilter: it is preceded by S2R SR_VIRTUALSMID and two compares',
+           low12(body[pexits[0] - 3]) == 0x919 and ((W(body[pexits[0] - 3]) >> 72) & 0xff) == 0x43
+           and low12(body[pexits[0] - 2]) == 0x20c and low12(body[pexits[0] - 1]) == 0x20c)
+    else:
+        ok('no early EXIT', not pexits, pexits)
+    if meta.get('gtime'):
+        gt = lambda b, rd: low12(b) == 0x805 and (W(b) >> 16) & 0xff == rd and (W(b) >> 72) & 0xff == 0x52
         k = 1 if meta.get('clock') else 0
+        ok('gtime: global timer reads around the clock reads', gt(body[g - 1 - k], 22) and gt(body[g + 20 + k], 24))
+    if meta.get('sync'):
+        k = (1 if meta.get('clock') else 0) + (1 if meta.get('gtime') else 0)
         b = body[g - 1 - k - nb]
         ok('sync: NOPs between BAR.SYNC and the clock read / group', all(low12(body[g - 1 - k - i]) == 0x918 for i in range(nb)))
         ok('sync: blocking BAR.SYNC 0 (bit 80 clear) before the clock read / group',

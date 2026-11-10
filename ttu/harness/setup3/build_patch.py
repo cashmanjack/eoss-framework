@@ -56,6 +56,34 @@ def bar_sync0():
     return ctrl.write_control(instr, stall=1, yield_=1, wr_bar=7, rd_bar=7, wt_bar=0)
 
 
+def _instr(lo, hi_low, stall, yld, wr, rd, wt):
+    return ctrl.write_control((lo | (hi_low << 64)).to_bytes(16, 'little'), stall=stall, yield_=yld, wr_bar=wr, rd_bar=rd, wt_bar=wt)
+
+
+def s2r_virtualsmid(rd):
+    """S2R Rd, SR_VIRTUALSMID (what PTX %smid compiles to), as nvcc 12.8 encodes it:
+    opcode 0x919, SR id 0x43, writes scoreboard 2."""
+    return _instr(0x7919 | (rd << 16), 0x43 << 8, 2, 1, 2, 7, 0)
+
+
+def isetp_ne(pu, ra, rb, stall, wt):
+    """ISETP.NE.AND Pu, PT, Ra, Rb, PT (nvcc 12.8 field layout; Pu in bits 81..83)."""
+    return _instr(0x720c | (ra << 24) | (rb << 32), 0x3f05270 | (pu << 17), stall, 0, 7, 7, wt)
+
+
+def exit_if(pg, pp):
+    """@Pg EXIT Pp: exit when Pg and Pp are both true (nvcc 12.8 encoding)."""
+    return _instr(0x094d | (pg << 12), pp << 23, 5, 1, 7, 7, 0)
+
+
+def cs2r_globaltimer(rd):
+    """CS2R Rd, SR_GLOBALTIMERLO (64 bit, ns, the same on every SM): SR id 0x52."""
+    instr = (0x7805 | (rd << 16) | (((0x52 << 8) | (0x1 << 16)) << 64)).to_bytes(16, 'little')
+    return ctrl.write_control(instr, stall=2, yield_=1, wr_bar=7, rd_bar=7, wt_bar=0)
+
+
+SM_A, SM_B, SM_ID = 18, 19, 20   # --smfilter: run only on SM A or SM B (VIRTUALSMID into R20)
+GT_START, GT_END = 22, 24       # --gtime: global timer before the start clock and after the end clock
 CLK_START, CLK_END = 84, 86   # R84:R85 before TTUOPEN, R86:R87 after the group's results
 
 
@@ -120,7 +148,8 @@ def set_regcount(data, secname, regs):
     return old
 
 
-def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out=95, preclk=False, barnops=1):
+def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out=95, preclk=False, barnops=1,
+          twice=False, compact_out=False, smfilter=False, gtime=False):
     d = open(dump, 'rb').read()
     at = lambda o: d[DUMP_BASE + o:DUMP_BASE + o + 16]
     group = [at(GROUP_AT + 16 * k) for k in range(GROUP_LEN)]
@@ -151,7 +180,15 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     body.append(wide[1])
     for r in INPUTS:
         body.append(field(field(ldg[r], 16, r), 24, IN_PTR))
+    if smfilter:
+        for r in (SM_A, SM_B):
+            body.append(field(field(ldg[r], 16, r), 24, IN_PTR))
     body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))   # all loads done
+    if smfilter:   # leave unless this block's SM is A or B; before any TTU instruction or barrier
+        body.append(s2r_virtualsmid(SM_ID))
+        body.append(isetp_ne(1, SM_ID, SM_A, 2, 0x4))
+        body.append(isetp_ne(0, SM_ID, SM_B, 13, 0x4))
+        body.append(exit_if(0, 1))
     body.append(isetp)
     body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=15))               # P0 ready
     if preclk:
@@ -160,14 +197,36 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         body.append(bar_sync0())                  # all warps of the block start together
         for _ in range(barnops):
             body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=1))
+    groups = []
+    if twice:
+        # first trace (untimed): one full session, then wait for all of its results
+        groups.append(len(body))
+        body += group if stage == 1 else [ctrl.NOP_BYTES] * GROUP_LEN
+        body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))   # CLOSE done
+        # its TTULDs overwrite input registers: load the inputs again, same ray
+        for r in INPUTS:
+            body.append(field(field(ldg[r], 16, r), 24, IN_PTR))
+        body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))   # all loads done
+        body.append(isetp)
+        body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=15))               # P0 ready
+    if gtime:
+        body.append(cs2r_globaltimer(GT_START))
     if clock:
         body.append(cs2r_clock(CLK_START))
     g0 = len(body)
+    groups.append(g0)
     body += group if stage == 1 else [ctrl.NOP_BYTES] * GROUP_LEN
     body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
     if clock:
         body.append(cs2r_clock(CLK_END))
-    outputs = [r for r in OUTPUTS if r <= max_out]
+    if gtime:
+        body.append(cs2r_globaltimer(GT_END))
+    if compact_out:   # only what the checks need: inputs (incl. TTULD destinations) and the clock
+        outputs = sorted(set(INPUTS) | ({CLK_START, CLK_START + 1, CLK_END, CLK_END + 1} if clock else set())
+                         | ({SM_A, SM_B, SM_ID} if smfilter else set())
+                         | ({GT_START, GT_START + 1, GT_END, GT_END + 1} if gtime else set()))
+    else:
+        outputs = [r for r in OUTPUTS if r <= max_out]
     for r in outputs:
         body.append(field(stg[r], 32, r))
     body += [orig[ex[0]], orig[ex[0] + 1]]            # EXIT, BRA self
@@ -182,7 +241,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         print('register count %s -> %d' % (sorted(set(old)), regs))
     p.save(out)
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
-    meta = {'stage': stage, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0,
+    meta = {'stage': stage, 'twice': twice, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0,
             'inputs': INPUTS, 'outputs': outputs, 'in_ptr': IN_PTR}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
     used = g0 + GROUP_LEN + 1 + int(clock) + len(outputs) + 2
@@ -200,7 +259,12 @@ if __name__ == '__main__':
     a.add_argument('--sync', action='store_true', help='BAR.SYNC before the group (with --clock: before the start read)')
     a.add_argument('--regs', type=int, help='declared register count of ttu_one (>= 96)')
     a.add_argument('--max-out', type=int, default=95, help='store registers only up to this one')
+    a.add_argument('--twice', action='store_true', help='two full sessions with the same ray; time the second')
+    a.add_argument('--compact-out', action='store_true', help='store only input and clock registers')
+    a.add_argument('--smfilter', action='store_true', help='blocks not on SM A or B (words 18, 19) exit before any TTU code')
+    a.add_argument('--gtime', action='store_true', help='global timer reads around the timed group (R22:R23, R24:R25)')
     a.add_argument('--preclk', action='store_true', help='diagnostic clock read into R88:R89 before the barrier')
     a.add_argument('--barnops', type=int, default=8, help='NOPs after the barrier: a warp issues a few instructions past BAR.SYNC before it stalls (8 measured enough at 20 warps)')
     x = a.parse_args()
-    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else ''), x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops)
+    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else ''),
+          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime)

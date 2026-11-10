@@ -5,11 +5,15 @@
 //     WORDS  8 hex words: TTUST 0 then TTUST 0x80, low to high (made at build time)
 //     RAY    hit | miss | t2 | back | moved | moved2 | hitB | tri:I   (every lane the same ray)
 //            tri:I = straight down (+z) onto the centroid of triangle I
+//            perlane = lane i onto the centroid of triangle (7919 i + 13) mod N (different paths)
+//            jitter  = lane i onto a different point of triangle 0 (same path, different hit data)
 //     FILL   zero | random   (value of the words OptiX leaves uninitialized: 0x180 high, 0x190)
 //   options
 //     --scene S      tri1 (default) | tri2 (2 triangles, 1 build input) | tri2g (2 build inputs) | grid:N
 //     --warps W      warps in the single block, 1..21 (default 1); build_patch.py --regs 96 sets the register count
 //     --repeat N     timed launches in this process, 1..100 (default 1)
+//     --blocks G     blocks of W warps (default 1); with an --smfilter build only blocks on SM A or B run
+//     --sms A,B      the SMs allowed to run (VIRTUALSMID; words 18, 19), default 0,0
 //     --flush MB     before every ttu_one launch, a plain kernel reads MB megabytes (L2 eviction)
 //     --dump-gas F   write the GAS bytes to F
 //     --no-ttu       stop after the OptiX reference
@@ -99,17 +103,19 @@ int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
-    bool run_ttu = true; int repeat = 1, warps = 1; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool run_ttu = true; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--repeat") && a + 1 < argc) repeat = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--warps") && a + 1 < argc) warps = atoi(argv[++a]);
+        else if (!strcmp(argv[a], "--blocks") && a + 1 < argc) blocks = atoi(argv[++a]);
+        else if (!strcmp(argv[a], "--sms") && a + 1 < argc) { if (sscanf(argv[++a], "%u,%u", &sm_a, &sm_b) != 2) { fprintf(stderr, "--sms A,B\n"); return 2; } }
         else if (!strcmp(argv[a], "--flush") && a + 1 < argc) flush_mb = atof(argv[++a]);
         else if (!strcmp(argv[a], "--scene") && a + 1 < argc) scene = argv[++a];
         else if (!strcmp(argv[a], "--dump-gas") && a + 1 < argc) dump = argv[++a];
         else { fprintf(stderr, "unknown option %s\n", argv[a]); return 2; }
     }
-    if (repeat < 1 || repeat > 100 || warps < 1 || warps > MAXW || flush_mb < 0 || flush_mb > 4096) {
+    if (repeat < 1 || repeat > 100 || warps < 1 || warps > MAXW || blocks < 1 || blocks > 1024 || flush_mb < 0 || flush_mb > 4096) {
         fprintf(stderr, "bad option value\n"); return 2;
     }
     unsigned words[8];
@@ -183,7 +189,10 @@ int main(int argc, char **argv)
         {"hitB",   {{2.f, 0.f, -1.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f}},
     };
     Ray8 ray{};
-    if (!strncmp(argv[3], "tri:", 4)) {
+    const bool perlane = !strcmp(argv[3], "perlane"), jitter = !strcmp(argv[3], "jitter");
+    if (perlane || jitter) {
+        ray = {{0.f, 0.f, -1.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f};   // replaced per lane below
+    } else if (!strncmp(argv[3], "tri:", 4)) {
         const int i = atoi(argv[3] + 4);
         if (i < 0 || i >= (int)all.size()) { fprintf(stderr, "tri:I out of range\n"); return 2; }
         const Tri &t = all[i];
@@ -195,6 +204,13 @@ int main(int argc, char **argv)
         ray = *pick;
     }
     std::vector<Ray8> rays(LANES, ray);
+    for (unsigned i = 0; i < LANES && (perlane || jitter); ++i) {
+        const Tri &t = all[perlane ? (size_t)((7919ull * i + 13) % all.size()) : 0];
+        float u = 1.f / 3, v = 1.f / 3;
+        if (jitter) { u = ((i % 8) + 0.5f) / 16.f; v = (((i / 8) % 8) + 0.5f) / 16.f; }   // u, v < 0.5
+        const float w = 1.f - u - v;
+        rays[i] = {{w * t.a.x + u * t.b.x + v * t.c.x, w * t.a.y + u * t.b.y + v * t.c.y, -1.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f};
+    }
     Params prm{}; prm.handle = h; prm.n = LANES;
     CK(cudaMalloc((void **)&prm.rays, LANES * sizeof(Ray8)));
     CK(cudaMemcpy((void *)prm.rays, rays.data(), LANES * sizeof(Ray8), cudaMemcpyHostToDevice));
@@ -231,6 +247,10 @@ int main(int argc, char **argv)
             (unsigned long long)gas, (size_t)bs.outputSizeInBytes, (unsigned long long)h, off, root);
     fprintf(jf, " \"inst\": \"0x%llx\", \"inst_ok\": %s, \"c3_34\": \"0x%08x\", \"handle_ok\": %s, \"align_ok\": %s,\n", A,
             inst_ok ? "true" : "false", c3_34, handle_ok ? "true" : "false", align_ok ? "true" : "false");
+    fprintf(jf, " \"lane_rays\": [");
+    for (unsigned i = 0; i < LANES && i < 32; ++i)
+        fprintf(jf, "%s[%.9g,%.9g,%.9g]", i ? "," : "", rays[i].o[0], rays[i].o[1], rays[i].o[2]);
+    fprintf(jf, "],\n");
     fprintf(jf, " \"warps\": %d, \"flush_mb\": %g, \"fill\": \"%s\",\n \"ref\": [", warps, flush_mb, argv[4]);
     for (unsigned i = 0; i < LANES; ++i)
         fprintf(jf, "%s{\"hit\": %u, \"t\": \"0x%08x\", \"prim\": %u, \"u\": \"0x%08x\", \"v\": \"0x%08x\", \"front\": %u, \"gas_index\": %u}",
@@ -244,11 +264,12 @@ int main(int argc, char **argv)
     }
     if (!run_ttu) { fprintf(jf, "\n}\n"); fclose(jf); return 0; }
 
-    // ---- register image for ttu_one: word r of a lane = register r --------------
-    std::vector<unsigned> in(LANES * N, 0), out(LANES * N, 0x77777777u);
-    for (unsigned i = 0; i < LANES; ++i) {
+    // ---- register image for ttu_one: word r of a thread = register r --------------
+    const size_t TOTAL = (size_t)blocks * LANES;
+    std::vector<unsigned> in(TOTAL * N, 0), out(TOTAL * N, 0x77777777u);
+    for (size_t i = 0; i < TOTAL; ++i) {
         unsigned *R = &in[i * N];
-        const Ray8 &y = rays[i];
+        const Ray8 &y = rays[i % LANES];
         R[12] = fbits(y.o[2]); R[13] = fbits(y.tmin); R[82] = fbits(y.o[0]); R[83] = fbits(y.o[1]);   // 0x40
         R[16] = fbits(y.d[2]); R[17] = fbits(y.tmax); R[14] = fbits(y.d[0]); R[15] = fbits(y.d[1]);   // 0x50
         R[52] = R[12]; R[53] = R[13]; R[56] = R[82]; R[57] = R[83];                                   // 0xC0
@@ -262,71 +283,95 @@ int main(int argc, char **argv)
         R[68] = words[0]; R[69] = words[1]; R[62] = words[2]; R[63] = words[3];                        // 0
         R[60] = words[4]; R[61] = words[5]; R[58] = words[6]; R[59] = words[7];                        // 0x80
         R[90] = 0;   // (R37 & 0xC0000) for flags NONE: P0 true
+        R[18] = sm_a; R[19] = sm_b;   // used only by --smfilter builds
     }
     unsigned *din, *dout, *sink; uint4 *fbuf = nullptr; size_t fn = (size_t)(flush_mb * 1048576.0) / sizeof(uint4);
     CK(cudaMalloc((void **)&din, in.size() * 4)); CK(cudaMalloc((void **)&dout, out.size() * 4)); CK(cudaMalloc((void **)&sink, 4));
     CK(cudaMemcpy(din, in.data(), in.size() * 4, cudaMemcpyHostToDevice));
     if (fn) { CK(cudaMalloc((void **)&fbuf, fn * sizeof(uint4))); CK(cudaMemset(fbuf, 1, fn * sizeof(uint4))); }
 
-    // Each launch: one group per lane. Clock words R84:R85 (before TTUOPEN) and
-    // R86:R87 (after all results), if patched in; lane 0 of each warp is recorded.
+    // Each launch: one group per lane. Clock words R84:R85 (before TTUOPEN) and R86:R87
+    // (after all results), global timer R22:R23 / R24:R25, SM id R20, if patched in.
+    // A block ran if its lane 0 stored anything (the output is filled with 0x77777777 first).
+    auto ran = [&](const std::vector<unsigned> &o, int b) { return o[(size_t)b * LANES * N + 84] != 0x77777777u || o[(size_t)b * LANES * N + 12] != 0x77777777u; };
+    auto u64 = [](const unsigned *R, int r) { return ((unsigned long long)R[r + 1] << 32) | R[r]; };
     cudaError_t e = cudaSuccess;
     std::vector<unsigned> first;
-    fprintf(jf, ",\n \"launches\": [");
+    std::vector<int> ran_blocks;
+    fprintf(jf, ",\n \"blocks\": %d, \"sms\": [%u, %u],\n \"launches\": [", blocks, sm_a, sm_b);
     bool same_all = true;
     for (int it = 0; it < repeat && e == cudaSuccess; ++it) {
         CK(cudaMemcpy(dout, out.data(), out.size() * 4, cudaMemcpyHostToDevice));
         if (fn) { flush_read<<<142 * 8, 256>>>(fbuf, fn, sink); CK(cudaGetLastError()); }
-        ttu_one<<<1, LANES>>>(din, dout);
+        ttu_one<<<blocks, LANES>>>(din, dout);
         e = cudaGetLastError();                     // launch errors (e.g. too many resources)
         if (e == cudaSuccess) e = cudaDeviceSynchronize();
         if (e != cudaSuccess) break;
         std::vector<unsigned> o(out.size());
         CK(cudaMemcpy(o.data(), dout, o.size() * 4, cudaMemcpyDeviceToHost));
         if (it == 0) first = o;
-        bool same = true;
-        for (unsigned i = 0; i < LANES; ++i)
-            for (int r : {2, 3, 30, 31, 32, 33, 34, 35, 44, 45, 56, 57, 58, 59, 60, 61, 62, 63, 68, 69, 70, 71})
-                same &= o[i * N + r] == first[i * N + r];
+        std::vector<int> rb;
+        for (int b = 0; b < blocks; ++b) if (ran(o, b)) rb.push_back(b);
+        if (it == 0) ran_blocks = rb;
+        bool same = rb == ran_blocks;
+        for (int b : rb)
+            for (unsigned i = 0; i < LANES; ++i)
+                for (int r : {2, 3, 30, 31, 32, 33, 34, 35, 44, 45, 56, 57, 58, 59, 60, 61, 62, 63, 68, 69, 70, 71})
+                    same &= o[((size_t)b * LANES + i) * N + r] == first[((size_t)b * LANES + i) * N + r];
         same_all &= same;
-        fprintf(jf, "%s{\"same_as_first\": %s, \"warp_clk\": [", it ? ", " : "", same ? "true" : "false");
         bool lanes_eq = true;
-        for (int w = 0; w < warps; ++w) {
-            const unsigned *L0 = &o[(32 * w) * N];
-            const unsigned long long a = ((unsigned long long)L0[85] << 32) | L0[84];
-            const unsigned long long b = ((unsigned long long)L0[87] << 32) | L0[86];
-            for (int l = 1; l < 32; ++l) {
-                const unsigned *Ll = &o[(32 * w + l) * N];
-                lanes_eq &= Ll[84] == L0[84] && Ll[85] == L0[85] && Ll[86] == L0[86] && Ll[87] == L0[87];
+        fprintf(jf, "%s{\"same_as_first\": %s, \"ran\": %zu, \"per_block\": [", it ? ", " : "", same ? "true" : "false", rb.size());
+        std::string wc0;
+        for (size_t bi = 0; bi < rb.size(); ++bi) {
+            const int b = rb[bi];
+            const unsigned *B0 = &o[(size_t)b * LANES * N];
+            fprintf(jf, "%s{\"block\": %d, \"sm\": %u, \"warp_clk\": [", bi ? ", " : "", b, B0[20]);
+            std::string wc;
+            for (int w = 0; w < warps; ++w) {
+                const unsigned *L0 = &B0[(32 * w) * N];
+                for (int l = 1; l < 32; ++l) {
+                    const unsigned *Ll = &B0[(32 * w + l) * N];
+                    lanes_eq &= Ll[84] == L0[84] && Ll[85] == L0[85] && Ll[86] == L0[86] && Ll[87] == L0[87];
+                }
+                char buf[64]; snprintf(buf, sizeof buf, "%s[%llu,%llu]", w ? "," : "", u64(L0, 84), u64(L0, 86)); wc += buf;
             }
-            fprintf(jf, "%s[%llu,%llu]", w ? "," : "", a, b);
+            fprintf(jf, "%s], \"gt\": [", wc.c_str());
+            for (int w = 0; w < warps; ++w) {
+                const unsigned *L0 = &B0[(32 * w) * N];
+                fprintf(jf, "%s[%llu,%llu]", w ? "," : "", u64(L0, 22), u64(L0, 24));
+            }
+            fprintf(jf, "]}");
+            if (bi == 0) wc0 = wc;
         }
-        fprintf(jf, "], \"lanes_equal\": %s}", lanes_eq ? "true" : "false");
+        fprintf(jf, "], \"warp_clk\": [%s], \"lanes_equal\": %s}", wc0.c_str(), lanes_eq ? "true" : "false");
         if (it == repeat - 1) out = o;
     }
     fprintf(jf, "]");
-    printf("ttu_one: %s (%d launch(es) x %d warp(s), flush %g MB, results same every launch: %d)\n",
-           cudaGetErrorString(e), repeat, warps, flush_mb, same_all);
+    printf("ttu_one: %s (%d launch(es) x %d block(s) x %d warp(s), %zu block(s) ran, flush %g MB, results same every launch: %d)\n",
+           cudaGetErrorString(e), repeat, blocks, warps, ran_blocks.size(), flush_mb, same_all);
+    const int b0 = ran_blocks.empty() ? 0 : ran_blocks[0];
     fprintf(jf, ",\n \"ttu_status\": \"%s\",\n \"in\": [", cudaGetErrorString(e));
-    const unsigned keep = LANES < 32 ? LANES : 32;   // first warp only, to keep files small
+    const unsigned keep = LANES < 32 ? LANES : 32;   // first warp of the first block that ran
     for (unsigned i = 0; i < keep; ++i) {
         fprintf(jf, "%s[", i ? ", " : "");
-        for (unsigned k = 0; k < N; ++k) fprintf(jf, "%s%u", k ? "," : "", in[i * N + k]);
+        for (unsigned k = 0; k < N; ++k) fprintf(jf, "%s%u", k ? "," : "", in[((size_t)b0 * LANES + i) * N + k]);
         fprintf(jf, "]");
     }
     fprintf(jf, "],\n \"out\": [");
     for (unsigned i = 0; i < keep; ++i) {
         fprintf(jf, "%s[", i ? ", " : "");
-        for (unsigned k = 0; k < N; ++k) fprintf(jf, "%s%u", k ? "," : "", out[i * N + k]);
+        for (unsigned k = 0; k < N; ++k) fprintf(jf, "%s%u", k ? "," : "", out[((size_t)b0 * LANES + i) * N + k]);
         fprintf(jf, "]");
     }
-    // all warps' TTULD destination registers of lane 0, last launch
+    // lane 0 of every warp of every block that ran, last launch
     fprintf(jf, "],\n \"warp_out\": [");
-    for (int w = 0; w < warps; ++w) {
-        fprintf(jf, "%s[", w ? ", " : "");
-        for (unsigned k = 0; k < N; ++k) fprintf(jf, "%s%u", k ? "," : "", out[(32 * w) * N + k]);
-        fprintf(jf, "]");
-    }
+    { bool firstw = true;
+      for (int b : ran_blocks)
+        for (int w = 0; w < warps; ++w) {
+            fprintf(jf, "%s[", firstw ? "" : ", "); firstw = false;
+            for (unsigned k = 0; k < N; ++k) fprintf(jf, "%s%u", k ? "," : "", out[((size_t)b * LANES + 32 * w) * N + k]);
+            fprintf(jf, "]");
+        } }
     fprintf(jf, "]\n}\n"); fclose(jf);
     return e == cudaSuccess ? 0 : 1;   // pipeline and GAS stay alive until here
 }
