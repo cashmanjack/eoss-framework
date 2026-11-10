@@ -147,7 +147,7 @@ static std::vector<std::vector<Tri>> make_scene(const std::string &s)
         // A: a long slanted triangle, box z in [0, 9], hit by the ray at z = 4.5; then K - 1 small triangles on the
         // ray at z = 4 k / K (k = 1..K-1), all closer than A's hit but with boxes that start after A's.
         const int K = atoi(s.c_str() + 5);
-        if (K < 1 || K > 64) { fprintf(stderr, "clus:K with 1 <= K <= 64\n"); exit(2); }
+        if (K < 1 || K > 4096) { fprintf(stderr, "clus:K with 1 <= K <= 4096\n"); exit(2); }
         std::vector<Tri> v{{{-1.f, 0.5f, 0.f}, {1.f, 0.5f, 0.f}, {0.f, -0.5f, 9.f}}};
         for (int k = 1; k < K; ++k) { const float z = 4.f * k / K; v.push_back({{-0.05f, -0.05f, z}, {0.05f, -0.05f, z}, {0.f, 0.05f, z}}); }
         return {v};
