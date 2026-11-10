@@ -62,7 +62,8 @@ def check(path):
             ok(tag + 'A4 next N are all TTU (ST, GO, LD)', len(grp) == n and all(low12(b) in (ST, GO, LD) for b in grp), n)
             ok(tag + 'A5 instruction after the group is not TTU', low12(body[gi + 2 + n]) not in TTU)
             kinds = [low12(b) for b in grp]
-            ok(tag + 'A4 group is 10 ST, then 1 GO, then 6 LD', kinds == [ST] * 10 + [GO] + [LD] * 6, kinds)
+            shape = [ST] * 10 + [GO] + [ST] * 10 + [GO] + [LD] * 6 if meta.get('dualgo') else [ST] * 10 + [GO] + [LD] * 6
+            ok(tag + ('A4 group is 10 ST, GO, 10 ST, GO, 6 LD (dualgo)' if meta.get('dualgo') else 'A4 group is 10 ST, then 1 GO, then 6 LD'), kinds == shape, kinds)
             lds = [i for i, b in enumerate(grp) if low12(b) == LD]
             close = [i for i in lds if bit(grp[i], 74)]
             ok(tag + 'A6 exactly one TTULD with bit 74, and it is last', close == [n - 1] and lds[-1] == n - 1, close)
@@ -73,7 +74,7 @@ def check(path):
             fld = lambda b, lo: (W(b) >> lo) & 0xff
             regs = [(k, fld(b, lo)) for b in grp for k, lo in ((('ST Rb', 32), ('ST Rc', 64)) if low12(b) == ST else (('LD Rd', 16), ('LD Rd2', 64)) if low12(b) == LD else ())]
             odd = [(k, r) for k, r in regs if r != 255 and r % 2]
-            ok(tag + 'A12 every TTUST/TTULD register pair base is even (or RZ)', not odd and len(regs) == 2 * (n - 1), (odd, len(regs)))
+            ok(tag + 'A12 every TTUST/TTULD register pair base is even (or RZ)', not odd and len(regs) == 2 * sum(1 for b in grp if low12(b) in (ST, LD)), (odd, len(regs)))
             ok(tag + 'A11 no branch or BSSY/BSYNC between OPEN and CLOSE',
                not any(low12(b) in (0x947, 0x945, 0x941, 0x94d, 0x950, 0x943, 0x949) for b in body[gi:gi + 2 + n]))
             total += n + 2
@@ -97,17 +98,21 @@ def check(path):
     wt = lambda b: (W(b[8:]) >> 52) & 0x3f
     stall = lambda b: (W(b[8:]) >> 41) & 0xf
     nb = meta.get('barnops', 1) if meta.get('sync') else 0
-    c = (1 if meta.get('clock') else 0) + ((1 + nb) if meta.get('sync') else 0) + (1 if meta.get('preclk') else 0) + (1 if meta.get('gtime') else 0)
+    c = (1 if meta.get('clock') else 0) + ((1 + nb) if meta.get('sync') else 0) + (1 if meta.get('preclk') else 0) + (1 if meta.get('gtime') else 0) + (1 if meta.get('sr133') else 0)
+    GL = meta.get('group_len', 19)
     is_clk = lambda b, rd: low12(b) == 0x805 and (W(b) >> 16) & 0xff == rd and (W(b) >> 72) & 0xff == 0x50
     cs, ce = meta.get('clk', [84, 86])
     f4 = 4 if meta.get('smfilter') else 0   # S2R, 2 ISETP, @P0 EXIT sit between the wait and ISETP P0
     ok('B12 loads waited on before ISETP P0 (and before the SM filter)', low12(body[g - 3 - c - f4]) == 0x918 and wt(body[g - 3 - c - f4]) == 0x3f)
     ok('B12 ISETP P0 then a NOP with stall 15 before the group',
        low12(body[g - 2 - c]) == 0x80c and low12(body[g - 1 - c]) == 0x918 and stall(body[g - 1 - c]) == 15)
-    ok('B13 NOP after the group waits on all scoreboards', low12(body[g + 19]) == 0x918 and wt(body[g + 19]) == 0x3f)
+    ok('B13 NOP after the group waits on all scoreboards', low12(body[g + GL]) == 0x918 and wt(body[g + GL]) == 0x3f)
     if meta.get('clock'):
         ok('clock: CS2R SR_CLOCKLO right before TTUOPEN', is_clk(body[g - 1], cs), cs)
-        ok('clock: CS2R SR_CLOCKLO right after the wait NOP', is_clk(body[g + 20], ce), ce)
+        ok('clock: CS2R SR_CLOCKLO right after the wait NOP', is_clk(body[g + GL + 1], ce), ce)
+    if meta.get('sr133'):   # S2R SR_TTU_TICKET_INFO (0x85): one before the start clock, one after the end clock, both outside the group
+        s2r = [i for i, b in enumerate(body[:ex]) if low12(b) == 0x919 and ((W(b) >> 72) & 0xff) == 0x85]
+        ok('sr133: two S2R SR133, one before TTUOPEN and one after the group', len(s2r) == 2 and s2r[0] < g and s2r[1] > g + GL, s2r)
     pexits = [i for i, b in enumerate(body[:ex]) if low12(b) == 0x94d]
     if meta.get('smfilter'):
         first_ttu = min([i for i, b in enumerate(body) if low12(b) in TTU] or [ex])

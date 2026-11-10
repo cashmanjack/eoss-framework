@@ -60,6 +60,11 @@ def _instr(lo, hi_low, stall, yld, wr, rd, wt):
     return ctrl.write_control((lo | (hi_low << 64)).to_bytes(16, 'little'), stall=stall, yield_=yld, wr_bar=wr, rd_bar=rd, wt_bar=wt)
 
 
+def s2r_sr(rd, sr):
+    """S2R Rd, SR_<sr> (same encoding as s2r_virtualsmid with another SR id; writes scoreboard 2)."""
+    return _instr(0x7919 | (rd << 16), sr << 8, 2, 1, 2, 7, 0)
+
+
 def s2r_virtualsmid(rd):
     """S2R Rd, SR_VIRTUALSMID (what PTX %smid compiles to), as nvcc 12.8 encodes it:
     opcode 0x919, SR id 0x43, writes scoreboard 2."""
@@ -157,7 +162,7 @@ def set_regcount(data, secname, regs):
 
 
 def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out=95, preclk=False, barnops=1,
-          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0):
+          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False):
     d = open(dump, 'rb').read()
     at = lambda o: d[DUMP_BASE + o:DUMP_BASE + o + 16]
     group = [at(GROUP_AT + 16 * k) for k in range(GROUP_LEN)]
@@ -266,18 +271,29 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))   # all loads done
         body.append(isetp)
         body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=15))               # P0 ready
+    if sr133:
+        assert not compact_out and not remap and max_out >= 89, 'sr133: R88, R89 are stored only by the plain layout'
+        body.append(s2r_sr(88, 0x85))             # SR_TTU_TICKET_INFO before TTUOPEN (waited on by the NOP after the group)
     if gtime:
         body.append(cs2r_globaltimer(phys(GT_START)))
     if clock:
         body.append(cs2r_clock(phys(CLK_START)))
+    if dualgo:   # Interface_5: OPEN, FUSE 28, 10 ST, GO, the same 10 ST, GO, 6 LD (CLOSE last): one ray submitted twice
+        assert stage != 1 or (low12(group[12]) == 0x3d3 and all(low12(b) == 0x3d1 for b in group[2:12])), 'group shape'
+        fuse = W(group[1]) & ~(0x1f << 40) | (28 << 40)
+        group = [group[0], fuse.to_bytes(16, 'little')] + group[2:13] + group[2:13] + group[13:19]
+    GLEN = len(group)
     g0 = len(body)
     groups.append(g0)
-    body += group if stage == 1 else [ctrl.NOP_BYTES] * GROUP_LEN
+    body += group if stage == 1 else [ctrl.NOP_BYTES] * GLEN
     body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
     if clock:
         body.append(cs2r_clock(phys(CLK_END)))
     if gtime:
         body.append(cs2r_globaltimer(phys(GT_END)))
+    if sr133:
+        body.append(s2r_sr(89, 0x85))             # SR_TTU_TICKET_INFO after the group closed
+        body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
     if compact_out:   # only what the checks need: inputs (incl. TTULD destinations) and the clock
         outputs = sorted(set(INPUTS) | ({CLK_START, CLK_START + 1, CLK_END, CLK_END + 1} if clock else set())
                          | ({SM_A, SM_B, SM_ID} if smfilter else set())
@@ -301,7 +317,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     p.save(out)
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
     top_reg = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5])
-    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0,
+    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0,
             'inputs': INPUTS, 'outputs': outputs, 'in_ptr': in_ptr}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
     used = g0 + GROUP_LEN + 1 + int(clock) + len(outputs) + 2
@@ -323,10 +339,12 @@ if __name__ == '__main__':
     a.add_argument('--compact-out', action='store_true', help='store only input and clock registers')
     a.add_argument('--smfilter', action='store_true', help='blocks not on SM A or B (words 18, 19) exit before any TTU code')
     a.add_argument('--thrash', type=int, default=0, help='with --twice --remap: N L1 allocating loads per lane between the two sessions (N x 4 KB per warp)')
+    a.add_argument('--sr133', action='store_true', help='Interface_5: S2R SR_TTU_TICKET_INFO into R88 before TTUOPEN and R89 after the group')
+    a.add_argument('--dualgo', action='store_true', help='Interface_5: OPEN, FUSE 28, 10 ST, GO, 10 ST, GO, 6 LD (same ray twice)')
     a.add_argument('--remap', action='store_true', help='move the group to R8..R43 and our registers below R50')
     a.add_argument('--gtime', action='store_true', help='global timer reads around the timed group (R22:R23, R24:R25)')
     a.add_argument('--preclk', action='store_true', help='diagnostic clock read into R88:R89 before the barrier')
     a.add_argument('--barnops', type=int, default=8, help='NOPs after the barrier: a warp issues a few instructions past BAR.SYNC before it stalls (8 measured enough at 20 warps)')
     x = a.parse_args()
-    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else ''),
-          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash)
+    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else ''),
+          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo)
