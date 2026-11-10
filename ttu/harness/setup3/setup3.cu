@@ -39,6 +39,11 @@
 //     --passes P     run the whole chunk sequence P times (1..8, default 1); pass p chunk c > 0 writes
 //                    OUT.json.p<p>c<c> (pass 0 chunk 0 is OUT.json itself)
 //     --flush MB also flushes before every resume round
+//     --active L --idle mask|tmax0   only lanes 0..L-1 of every warp carry a query (1 <= L <= 32). mask: the
+//                    other lanes get SM words 18, 19 = 0xffffffff, so an --smfilter build makes them exit
+//                    before any TTU instruction (run with --sms of the block's SM, 0 for one block);
+//                    tmax0: they run the group with tmax 0 (riding along like finished resume lanes);
+//                    tneg: tmax -1; empty: tmin 1, tmax 0
 //     --no-ttu       stop after the OptiX reference
 //
 // ttu_one as compiled here only loads 96 words into registers and stores them
@@ -164,12 +169,14 @@ int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
-    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int passes = 1; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int passes = 1; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
         else if (!strcmp(argv[a], "--repeat") && a + 1 < argc) repeat = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--passes") && a + 1 < argc) passes = atoi(argv[++a]);
+        else if (!strcmp(argv[a], "--active") && a + 1 < argc) active = atoi(argv[++a]);
+        else if (!strcmp(argv[a], "--idle") && a + 1 < argc) idle = argv[++a];
         else if (!strcmp(argv[a], "--warps") && a + 1 < argc) warps = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--blocks") && a + 1 < argc) blocks = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--sms") && a + 1 < argc) { if (sscanf(argv[++a], "%u,%u", &sm_a, &sm_b) != 2) { fprintf(stderr, "--sms A,B\n"); return 2; } }
@@ -192,7 +199,7 @@ int main(int argc, char **argv)
         }
         else { fprintf(stderr, "unknown option %s\n", argv[a]); return 2; }
     }
-    if (passes < 1 || passes > 8 || repeat < 1 || repeat > 100 || warps < 1 || warps > MAXW || blocks < 1 || blocks > 1024 || flush_mb < 0 || flush_mb > 4096) {
+    if (active < 1 || active > 32 || (idle != "mask" && idle != "tmax0" && idle != "tneg" && idle != "empty") || passes < 1 || passes > 8 || repeat < 1 || repeat > 100 || warps < 1 || warps > MAXW || blocks < 1 || blocks > 1024 || flush_mb < 0 || flush_mb > 4096) {
         fprintf(stderr, "bad option value\n"); return 2;
     }
     unsigned words[8];
@@ -411,7 +418,7 @@ int main(int argc, char **argv)
     }
     if (!run_ttu) { fprintf(jf, "\n}\n"); fclose(jf); return 0; }
 
-    fprintf(jf, ",\n \"nchunks\": %u, \"passes\": %d", nchunks, passes);
+    fprintf(jf, ",\n \"nchunks\": %u, \"passes\": %d, \"active\": %d, \"idle\": \"%s\"", nchunks, passes, active, idle.c_str());
     cudaError_t e_all = cudaSuccess;
     for (int pc = 0; pc < passes * (int)nchunks && e_all == cudaSuccess; ++pc) {
     const int pass = pc / (int)nchunks, chunk = pc % (int)nchunks;
@@ -441,6 +448,12 @@ int main(int argc, char **argv)
         R[60] = words[4]; R[61] = words[5]; R[58] = words[6]; R[59] = words[7];                        // 0x80
         R[90] = 0;   // (R37 & 0xC0000) for flags NONE: P0 true
         R[18] = sm_a; R[19] = sm_b;   // used only by --smfilter builds
+        if ((int)(i % 32) >= active) {
+            if (idle == "mask") R[18] = R[19] = 0xffffffffu;   // no SM has this id: the lane exits before TTUOPEN
+            else if (idle == "tmax0") R[17] = R[31] = 0u;        // tmax 0 in 0x50 and 0xD0
+            else if (idle == "tneg") R[17] = R[31] = fbits(-1.f); // tmax -1
+            else { R[13] = R[53] = fbits(1.f); R[17] = R[31] = 0u; }   // empty: tmin 1 > tmax 0 (0x40 and 0xC0 high)
+        }
     }
     unsigned char *tbuf = nullptr;
     if (thrash) {
