@@ -1,9 +1,9 @@
 // Setup_3 host: one triangle GAS, an OptiX reference launch, then ttu_one<<<1, 32>>>.
 //
-//   setup3 PTX WORDS RAYS FILL OUT.json [--no-ttu]
+//   setup3 PTX WORDS RAYS FILL OUT.json [--no-ttu] [--repeat N]
 //     PTX    setup3_dev.ptx
 //     WORDS  8 hex words: TTUST 0 then TTUST 0x80, low to high (made at build time)
-//     RAYS   hit | miss      (all 32 lanes the same ray)
+//     RAYS   hit | miss | t2 | back | moved | moved2   (all 32 lanes the same ray; see ref.py)
 //     FILL   zero | random   (value of the words OptiX leaves uninitialized: 0x180 high, 0x190)
 //
 // ttu_one as compiled here only loads 96 words into registers and stores them
@@ -54,8 +54,13 @@ static unsigned fbits(float x) { unsigned u; memcpy(&u, &x, 4); return u; }
 int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: setup3 PTX WORDS RAYS FILL OUT.json [--no-ttu]\n"); return 2; }
-    const bool hit_ray = !strcmp(argv[3], "hit"), random_fill = !strcmp(argv[4], "random");
-    const bool run_ttu = !(argc > 6 && !strcmp(argv[6], "--no-ttu"));
+    const bool random_fill = !strcmp(argv[4], "random");
+    bool run_ttu = true; int repeat = 1;
+    for (int a = 6; a < argc; ++a) {
+        if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
+        else if (!strcmp(argv[a], "--repeat") && a + 1 < argc) repeat = atoi(argv[++a]);
+    }
+    if (repeat < 1 || repeat > 100) { fprintf(stderr, "repeat 1..100\n"); return 2; }
     unsigned words[8];
     { std::istringstream ws(read_file(argv[2])); for (auto &w : words) ws >> std::hex >> w; }
 
@@ -98,8 +103,19 @@ int main(int argc, char **argv)
 
     // ---- rays and OptiX reference ---------------------------------------------
     const unsigned LANES = 32;
-    Ray8 ray = hit_ray ? Ray8{{0.f, 0.f, -1.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f}
-                       : Ray8{{2.f, 2.f, -1.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f};
+    struct Named { const char *name; Ray8 r; };
+    const Named named[] = {   // keep in sync with ref.py RAYS
+        {"hit",    {{0.f, 0.f, -1.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f}},
+        {"miss",   {{2.f, 2.f, -1.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f}},
+        {"t2",     {{0.f, 0.f, -2.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f}},
+        {"back",   {{0.f, 0.f, 1.f}, 0.f, {0.f, 0.f, -1.f}, 1e16f}},
+        {"moved",  {{0.2f, -0.3f, -1.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f}},
+        {"moved2", {{-0.3f, -0.4f, -1.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f}},
+    };
+    const Ray8 *pick = nullptr;
+    for (const Named &n : named) if (!strcmp(argv[3], n.name)) pick = &n.r;
+    if (!pick) { fprintf(stderr, "unknown ray %s\n", argv[3]); return 2; }
+    const Ray8 ray = *pick;
     std::vector<Ray8> rays(LANES, ray);
     Params prm{}; prm.handle = h; prm.n = LANES;
     CK(cudaMalloc((void **)&prm.rays, LANES * sizeof(Ray8)));
@@ -160,10 +176,36 @@ int main(int argc, char **argv)
     CK(cudaMalloc((void **)&din, in.size() * 4)); CK(cudaMalloc((void **)&dout, out.size() * 4));
     CK(cudaMemcpy(din, in.data(), in.size() * 4, cudaMemcpyHostToDevice));
     CK(cudaMemcpy(dout, out.data(), out.size() * 4, cudaMemcpyHostToDevice));
-    ttu_one<<<1, LANES>>>(din, dout);
-    cudaError_t e = cudaDeviceSynchronize();
-    printf("ttu_one: %s\n", cudaGetErrorString(e));
-    if (e == cudaSuccess) CK(cudaMemcpy(out.data(), dout, out.size() * 4, cudaMemcpyDeviceToHost));
+    // Each launch: one group per lane. Launch 0 is cold; the rest find the BVH in L2.
+    // Clock words R84:R85 (before TTUOPEN) and R86:R87 (after results), if patched in.
+    cudaError_t e = cudaSuccess;
+    std::vector<unsigned> first;
+    fprintf(jf, ",\n \"launches\": [");
+    bool same_all = true;
+    for (int it = 0; it < repeat && e == cudaSuccess; ++it) {
+        CK(cudaMemcpy(dout, out.data(), out.size() * 4, cudaMemcpyHostToDevice));
+        ttu_one<<<1, LANES>>>(din, dout);
+        e = cudaDeviceSynchronize();
+        if (e != cudaSuccess) break;
+        std::vector<unsigned> o(out.size());
+        CK(cudaMemcpy(o.data(), dout, o.size() * 4, cudaMemcpyDeviceToHost));
+        if (it == 0) first = o;
+        bool same = true;
+        for (unsigned i = 0; i < LANES; ++i)
+            for (int r : {2, 3, 30, 31, 32, 33, 34, 35, 44, 45, 56, 57, 58, 59, 60, 61, 62, 63, 68, 69, 70, 71})
+                same &= o[i * N + r] == first[i * N + r];
+        same_all &= same;
+        fprintf(jf, "%s{\"same_as_first\": %s, \"clk\": [", it ? ", " : "", same ? "true" : "false");
+        for (unsigned i = 0; i < LANES; ++i) {
+            unsigned long long a = ((unsigned long long)o[i * N + 85] << 32) | o[i * N + 84];
+            unsigned long long b = ((unsigned long long)o[i * N + 87] << 32) | o[i * N + 86];
+            fprintf(jf, "%s%lld", i ? "," : "", (long long)(b - a));
+        }
+        fprintf(jf, "]}");
+        if (it == repeat - 1) out = o;
+    }
+    fprintf(jf, "]");
+    printf("ttu_one: %s (%d launch(es), results same every launch: %d)\n", cudaGetErrorString(e), repeat, same_all);
     fprintf(jf, ",\n \"ttu_status\": \"%s\",\n \"in\": [", cudaGetErrorString(e));
     for (unsigned i = 0; i < LANES; ++i) {
         fprintf(jf, "%s[", i ? ", " : "");

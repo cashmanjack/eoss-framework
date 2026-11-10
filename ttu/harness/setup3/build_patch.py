@@ -38,7 +38,19 @@ def field(b, lo, val, width=8):
     return B(W(b) & ~(((1 << width) - 1) << lo) | (val << lo))
 
 
-def build(stage, binpath, dump, out):
+def cs2r_clock(rd):
+    """CS2R Rd, SR_CLOCKLO (64 bit), as nvcc 12.8 encodes it for SM89: opcode 0x805,
+    SR id 0x50 in bits 79:72, no scoreboard, stall 2."""
+    lo = 0x7805 | (rd << 16)          # 0x7000: Pg = PT
+    hi = (0x50 << 8) | (0x1 << 16)    # SR_CLOCKLO, size field as nvcc emits
+    instr = (lo | (hi << 64)).to_bytes(16, 'little')
+    return ctrl.write_control(instr, stall=2, yield_=1, wr_bar=7, rd_bar=7, wt_bar=0)
+
+
+CLK_START, CLK_END = 84, 86   # R84:R85 before TTUOPEN, R86:R87 after the group's results
+
+
+def build(stage, binpath, dump, out, clock=False):
     d = open(dump, 'rb').read()
     at = lambda o: d[DUMP_BASE + o:DUMP_BASE + o + 16]
     group = [at(GROUP_AT + 16 * k) for k in range(GROUP_LEN)]
@@ -72,9 +84,13 @@ def build(stage, binpath, dump, out):
     body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))   # all loads done
     body.append(isetp)
     body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=15))               # P0 ready
+    if clock:
+        body.append(cs2r_clock(CLK_START))
     g0 = len(body)
     body += group if stage == 1 else [ctrl.NOP_BYTES] * GROUP_LEN
     body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
+    if clock:
+        body.append(cs2r_clock(CLK_END))
     for r in OUTPUTS:
         body.append(field(stg[r], 32, r))
     body += [orig[ex[0]], orig[ex[0] + 1]]            # EXIT, BRA self
@@ -84,10 +100,10 @@ def build(stage, binpath, dump, out):
         p.data[off:off + 16] = b
     p.save(out)
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
-    meta = {'stage': stage, 'sha256': sha, 'section': sec[0][2], 'group_index': g0,
+    meta = {'stage': stage, 'clock': clock, 'sha256': sha, 'section': sec[0][2], 'group_index': g0,
             'inputs': INPUTS, 'outputs': OUTPUTS, 'in_ptr': IN_PTR}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
-    used = g0 + GROUP_LEN + 1 + len(OUTPUTS) + 2
+    used = g0 + GROUP_LEN + 1 + int(clock) + len(OUTPUTS) + 2
     print('built %s stage %d: %d of %d slots used, group at index %d, sha256 %s' % (out, stage, used, len(orig), g0, sha))
     return out
 
@@ -98,5 +114,6 @@ if __name__ == '__main__':
     a.add_argument('--bin', default='/dev/shm/setup3/setup3')
     a.add_argument('--dump', default=os.path.expanduser('~/eoss/notes/setup4/sm89_pipeline_fnaddr-0x14000.bin'))
     a.add_argument('--out')
+    a.add_argument('--clock', action='store_true', help='clock reads around the group')
     x = a.parse_args()
-    build(x.stage, x.bin, x.dump, x.out or '%s_s%d' % (x.bin, x.stage))
+    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s' % (x.bin, x.stage, 'c' if x.clock else ''), x.clock)

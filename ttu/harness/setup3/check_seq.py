@@ -68,10 +68,15 @@ def check(path):
         ok('B15 no branch anywhere before EXIT', not any(low12(b) in (0x947, 0x949, 0x943) for b in body[:ex]))
     wt = lambda b: (W(b[8:]) >> 52) & 0x3f
     stall = lambda b: (W(b[8:]) >> 41) & 0xf
-    ok('B12 loads waited on before ISETP P0', low12(body[g - 3]) == 0x918 and wt(body[g - 3]) == 0x3f)
+    c = 1 if meta.get('clock') else 0
+    is_clk = lambda b, rd: low12(b) == 0x805 and (W(b) >> 16) & 0xff == rd and (W(b) >> 72) & 0xff == 0x50
+    ok('B12 loads waited on before ISETP P0', low12(body[g - 3 - c]) == 0x918 and wt(body[g - 3 - c]) == 0x3f)
     ok('B12 ISETP P0 then a NOP with stall 15 before the group',
-       low12(body[g - 2]) == 0x80c and low12(body[g - 1]) == 0x918 and stall(body[g - 1]) == 15)
-    ok('B13 NOP after the group waits on all scoreboards', wt(body[g + 19]) == 0x3f)
+       low12(body[g - 2 - c]) == 0x80c and low12(body[g - 1 - c]) == 0x918 and stall(body[g - 1 - c]) == 15)
+    ok('B13 NOP after the group waits on all scoreboards', low12(body[g + 19]) == 0x918 and wt(body[g + 19]) == 0x3f)
+    if c:
+        ok('clock: CS2R R84 SR_CLOCKLO right before TTUOPEN', is_clk(body[g - 1], 84))
+        ok('clock: CS2R R86 SR_CLOCKLO right after the wait NOP', is_clk(body[g + 20], 86))
     regs = int(next(l for l in os.popen('cuobjdump --dump-resource-usage %s' % path).read().split('Function ttu_one:')[1].split('\n') if 'REG:' in l).split('REG:')[1].split()[0])
     ok('B14 register count above highest register used (95)', regs > 95, regs)
     for name, good, info in res:

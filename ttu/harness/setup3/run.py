@@ -1,9 +1,9 @@
 """Run a patched setup3 binary on GPU 1, only if check_seq.py passed on this exact file.
 
-    run.py BIN RAYS FILL OUT.json [--no-ttu]
+    run.py BIN RAYS FILL OUT.json [--no-ttu] [--repeat N]
 
 Refuses if: BIN.checked is missing or holds another sha256, any process is on
-GPU 1, or the driver is not 580.178.04. Runs under `timeout -k 2 30`.
+GPU 1, or the driver is not 580.178.04. Runs under `timeout -k 2 30` (one process, all repeats inside it).
 """
 import hashlib, os, subprocess, sys
 

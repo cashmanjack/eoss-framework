@@ -18,7 +18,11 @@ def intersect(o, d, tmin=0.0, tmax=1e16, tri=TRI):
     return (hit, t, u, v) if hit else (False, None, None, None)
 
 
-RAYS = {'hit': ((0.0, 0.0, -1.0), (0.0, 0.0, 1.0)), 'miss': ((2.0, 2.0, -1.0), (0.0, 0.0, 1.0))}
+f32 = lambda x: __import__('struct').unpack('<f', __import__('struct').pack('<f', x))[0]   # setup3.cu uses float
+RAYS = {k: (tuple(map(f32, o)), tuple(map(f32, d))) for k, (o, d) in {   # keep in sync with setup3.cu
+    'hit': ((0.0, 0.0, -1.0), (0.0, 0.0, 1.0)), 'miss': ((2.0, 2.0, -1.0), (0.0, 0.0, 1.0)),
+    't2': ((0.0, 0.0, -2.0), (0.0, 0.0, 1.0)), 'back': ((0.0, 0.0, 1.0), (0.0, 0.0, -1.0)),
+    'moved': ((0.2, -0.3, -1.0), (0.0, 0.0, 1.0)), 'moved2': ((-0.3, -0.4, -1.0), (0.0, 0.0, 1.0))}.items()}
 
 if __name__ == '__main__':
     for k, (o, d) in RAYS.items():
