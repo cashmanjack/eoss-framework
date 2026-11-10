@@ -9,6 +9,7 @@ import hashlib, json, sys, os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(HERE))))
+sys.path.insert(0, HERE)
 from eoss.binary.patcher import BinaryPatcher
 from eoss.binary import elf
 from eoss.isa.model import ISASpec
@@ -68,17 +69,31 @@ def check(path):
         ok('B15 no branch anywhere before EXIT', not any(low12(b) in (0x947, 0x949, 0x943) for b in body[:ex]))
     wt = lambda b: (W(b[8:]) >> 52) & 0x3f
     stall = lambda b: (W(b[8:]) >> 41) & 0xf
-    c = 1 if meta.get('clock') else 0
+    nb = meta.get('barnops', 1) if meta.get('sync') else 0
+    c = (1 if meta.get('clock') else 0) + ((1 + nb) if meta.get('sync') else 0) + (1 if meta.get('preclk') else 0)
     is_clk = lambda b, rd: low12(b) == 0x805 and (W(b) >> 16) & 0xff == rd and (W(b) >> 72) & 0xff == 0x50
     ok('B12 loads waited on before ISETP P0', low12(body[g - 3 - c]) == 0x918 and wt(body[g - 3 - c]) == 0x3f)
     ok('B12 ISETP P0 then a NOP with stall 15 before the group',
        low12(body[g - 2 - c]) == 0x80c and low12(body[g - 1 - c]) == 0x918 and stall(body[g - 1 - c]) == 15)
     ok('B13 NOP after the group waits on all scoreboards', low12(body[g + 19]) == 0x918 and wt(body[g + 19]) == 0x3f)
-    if c:
+    if meta.get('clock'):
         ok('clock: CS2R R84 SR_CLOCKLO right before TTUOPEN', is_clk(body[g - 1], 84))
         ok('clock: CS2R R86 SR_CLOCKLO right after the wait NOP', is_clk(body[g + 20], 86))
+    if meta.get('sync'):
+        k = 1 if meta.get('clock') else 0
+        b = body[g - 1 - k - nb]
+        ok('sync: NOPs between BAR.SYNC and the clock read / group', all(low12(body[g - 1 - k - i]) == 0x918 for i in range(nb)))
+        ok('sync: blocking BAR.SYNC 0 (bit 80 clear) before the clock read / group',
+           low12(b) == 0xb1d and ((W(b) >> 80) & 1) == 0 and ((W(b) >> 77) & 7) == 0)
     regs = int(next(l for l in os.popen('cuobjdump --dump-resource-usage %s' % path).read().split('Function ttu_one:')[1].split('\n') if 'REG:' in l).split('REG:')[1].split()[0])
     ok('B14 register count above highest register used (95)', regs > 95, regs)
+    if meta.get('regs'):
+        from build_patch import regcount_fields
+        f = regcount_fields(bytes(p.data), meta['section'])
+        vals = [(sh, [v for _, v in at]) for _, sh, at in f]
+        ok('B14 sh_info and EIATTR_REGCOUNT both equal the requested count',
+           f and all(sh == meta['regs'] and at == [meta['regs']] for sh, at in vals), vals)
+    ok('B14 no stack (template did not spill into what we run)', 'STACK:0' in os.popen('cuobjdump --dump-resource-usage %s' % path).read().split('Function ttu_one:')[1].split('\n')[1], '')
     for name, good, info in res:
         print('%-55s %s %s' % (name, 'PASS' if good else 'FAIL', info))
     allok = all(r[1] for r in res)

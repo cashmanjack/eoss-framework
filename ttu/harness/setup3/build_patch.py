@@ -47,10 +47,80 @@ def cs2r_clock(rd):
     return ctrl.write_control(instr, stall=2, yield_=1, wr_bar=7, rd_bar=7, wt_bar=0)
 
 
+def bar_sync0():
+    """BAR.SYNC 0x0, blocking form (opcode 0xb1d, barmode SYNC, bit 80 = 0). nvcc's
+    __syncthreads uses BAR.SYNC.DEFER_BLOCKING (bit 80 = 1); with that form a warp
+    keeps issuing past the barrier, so a clock read right after it sees the arrival
+    time, not the release time (measured: 2,900 cycles of skew at 20 warps)."""
+    instr = (0x7b1d).to_bytes(16, 'little')
+    return ctrl.write_control(instr, stall=1, yield_=1, wr_bar=7, rd_bar=7, wt_bar=0)
+
+
 CLK_START, CLK_END = 84, 86   # R84:R85 before TTUOPEN, R86:R87 after the group's results
 
 
-def build(stage, binpath, dump, out, clock=False):
+def _sections(data, b):
+    import struct
+    shoff, = struct.unpack_from('<Q', data, b + 0x28)
+    shes, shn, shstr = struct.unpack_from('<HHH', data, b + 0x3a)
+    stro = b + struct.unpack_from('<Q', data, b + shoff + shstr * shes + 0x18)[0]
+    out = {}
+    for k in range(shn):
+        h = b + shoff + k * shes
+        nm = struct.unpack_from('<I', data, h)[0]
+        name = bytes(data[stro + nm:data.index(b'\0', stro + nm)]).decode('latin1')
+        out[name] = h
+    return out
+
+
+def regcount_fields(data, secname):
+    """(sh_info register count, [EIATTR_REGCOUNT values]) for the kernel in every cubin."""
+    import struct
+    res = []; i = 0
+    while (i := data.find(b'\x7fELF\x02\x01\x01', i)) >= 0:
+        b = i; i += 4
+        try:
+            secs = _sections(data, b)
+        except (struct.error, ValueError):
+            continue
+        if secname not in secs:
+            continue
+        h = secs[secname]
+        info, = struct.unpack_from('<I', data, h + 0x2c)
+        sym = info & 0xffffff
+        attrs = []
+        if '.nv.info' in secs:
+            hi = secs['.nv.info']
+            off, size = struct.unpack_from('<QQ', data, hi + 0x18)
+            j = b + off
+            while j + 4 <= b + off + size:
+                fmt, attr, ln = data[j], data[j + 1], struct.unpack_from('<H', data, j + 2)[0]
+                if fmt == 4:
+                    if attr == 0x2f and ln == 8 and struct.unpack_from('<I', data, j + 4)[0] == sym:
+                        attrs.append((j + 8, struct.unpack_from('<I', data, j + 8)[0]))
+                    j += 4 + ln
+                else:
+                    j += 4
+        res.append((h, info >> 24, attrs))
+    return res
+
+
+def set_regcount(data, secname, regs):
+    """Set a kernel's register count in every embedded cubin: the top byte of the
+    .text.<kernel> sh_info and the EIATTR_REGCOUNT (0x2f) entry for its symbol in
+    .nv.info (the driver uses the latter). Returns the old values."""
+    import struct
+    old = []
+    for h, sh_regs, attrs in regcount_fields(data, secname):
+        assert len(attrs) == 1, 'expected one EIATTR_REGCOUNT entry, found %d' % len(attrs)
+        info, = struct.unpack_from('<I', data, h + 0x2c)
+        struct.pack_into('<I', data, h + 0x2c, (info & 0xffffff) | (regs << 24))
+        struct.pack_into('<I', data, attrs[0][0], regs)
+        old.append((sh_regs, attrs[0][1]))
+    return old
+
+
+def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out=95, preclk=False, barnops=1):
     d = open(dump, 'rb').read()
     at = lambda o: d[DUMP_BASE + o:DUMP_BASE + o + 16]
     group = [at(GROUP_AT + 16 * k) for k in range(GROUP_LEN)]
@@ -84,6 +154,12 @@ def build(stage, binpath, dump, out, clock=False):
     body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))   # all loads done
     body.append(isetp)
     body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=15))               # P0 ready
+    if preclk:
+        body.append(cs2r_clock(88))               # diagnostic: arrival at the barrier, R88:R89
+    if sync:
+        body.append(bar_sync0())                  # all warps of the block start together
+        for _ in range(barnops):
+            body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=1))
     if clock:
         body.append(cs2r_clock(CLK_START))
     g0 = len(body)
@@ -91,19 +167,25 @@ def build(stage, binpath, dump, out, clock=False):
     body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
     if clock:
         body.append(cs2r_clock(CLK_END))
-    for r in OUTPUTS:
+    outputs = [r for r in OUTPUTS if r <= max_out]
+    for r in outputs:
         body.append(field(stg[r], 32, r))
     body += [orig[ex[0]], orig[ex[0] + 1]]            # EXIT, BRA self
     assert len(body) <= len(orig), (len(body), len(orig))
     body += [ctrl.NOP_BYTES] * (len(orig) - len(body))
     for (off, _), b in zip(ins, body):
         p.data[off:off + 16] = b
+    if regs:
+        assert regs % 8 == 0 and 96 <= regs <= 255, 'body uses up to R95'
+        old = set_regcount(p.data, sec[0][2], regs)
+        assert old, 'register count field not found'
+        print('register count %s -> %d' % (sorted(set(old)), regs))
     p.save(out)
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
-    meta = {'stage': stage, 'clock': clock, 'sha256': sha, 'section': sec[0][2], 'group_index': g0,
-            'inputs': INPUTS, 'outputs': OUTPUTS, 'in_ptr': IN_PTR}
+    meta = {'stage': stage, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0,
+            'inputs': INPUTS, 'outputs': outputs, 'in_ptr': IN_PTR}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
-    used = g0 + GROUP_LEN + 1 + int(clock) + len(OUTPUTS) + 2
+    used = g0 + GROUP_LEN + 1 + int(clock) + len(outputs) + 2
     print('built %s stage %d: %d of %d slots used, group at index %d, sha256 %s' % (out, stage, used, len(orig), g0, sha))
     return out
 
@@ -115,5 +197,10 @@ if __name__ == '__main__':
     a.add_argument('--dump', default=os.path.expanduser('~/eoss/notes/setup4/sm89_pipeline_fnaddr-0x14000.bin'))
     a.add_argument('--out')
     a.add_argument('--clock', action='store_true', help='clock reads around the group')
+    a.add_argument('--sync', action='store_true', help='BAR.SYNC before the group (with --clock: before the start read)')
+    a.add_argument('--regs', type=int, help='declared register count of ttu_one (>= 96)')
+    a.add_argument('--max-out', type=int, default=95, help='store registers only up to this one')
+    a.add_argument('--preclk', action='store_true', help='diagnostic clock read into R88:R89 before the barrier')
+    a.add_argument('--barnops', type=int, default=8, help='NOPs after the barrier: a warp issues a few instructions past BAR.SYNC before it stalls (8 measured enough at 20 warps)')
     x = a.parse_args()
-    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s' % (x.bin, x.stage, 'c' if x.clock else ''), x.clock)
+    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else ''), x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops)

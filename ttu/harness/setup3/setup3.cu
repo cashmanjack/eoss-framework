@@ -8,7 +8,7 @@
 //     FILL   zero | random   (value of the words OptiX leaves uninitialized: 0x180 high, 0x190)
 //   options
 //     --scene S      tri1 (default) | tri2 (2 triangles, 1 build input) | tri2g (2 build inputs) | grid:N
-//     --warps W      warps in the single block, 1..16 (default 1)
+//     --warps W      warps in the single block, 1..21 (default 1); build_patch.py --regs 96 sets the register count
 //     --repeat N     timed launches in this process, 1..100 (default 1)
 //     --flush MB     before every ttu_one launch, a plain kernel reads MB megabytes (L2 eviction)
 //     --dump-gas F   write the GAS bytes to F
@@ -33,7 +33,7 @@
 #include "setup3_params.h"
 
 #define N 96
-#define MAXW 16
+#define MAXW 21   // 21 x 32 x 96 registers fit the 65536 register file
 #define CK(x) do { cudaError_t e_ = (x); if (e_ != cudaSuccess) { \
     fprintf(stderr, "%s:%d %s: %s\n", __FILE__, __LINE__, #x, cudaGetErrorString(e_)); exit(2); } } while (0)
 #define OX(x) do { OptixResult r_ = (x); if (r_ != OPTIX_SUCCESS) { \
@@ -41,7 +41,7 @@
 
 // Template for build_patch.py: 96 loads into live registers, then 96 stores.
 // Load k and store k use word k of this lane's record (= register k after patching).
-extern "C" __global__ void __launch_bounds__(32 * MAXW) ttu_one(const unsigned *in, unsigned *out)
+extern "C" __global__ void ttu_one(const unsigned *in, unsigned *out)
 {
     const unsigned t = blockIdx.x * blockDim.x + threadIdx.x;
     const volatile unsigned *p = in + t * N;
@@ -114,6 +114,8 @@ int main(int argc, char **argv)
     }
     unsigned words[8];
     { std::istringstream ws(read_file(argv[2])); for (auto &w : words) ws >> std::hex >> w; }
+    { cudaFuncAttributes fa; CK(cudaFuncGetAttributes(&fa, ttu_one));
+      printf("ttu_one: numRegs %d maxThreadsPerBlock %d localBytes %zu\n", fa.numRegs, fa.maxThreadsPerBlock, fa.localSizeBytes); }
 
     // ---- OptiX GAS ------------------------------------------------------------
     CK(cudaFree(0)); OX(optixInit());
@@ -276,7 +278,8 @@ int main(int argc, char **argv)
         CK(cudaMemcpy(dout, out.data(), out.size() * 4, cudaMemcpyHostToDevice));
         if (fn) { flush_read<<<142 * 8, 256>>>(fbuf, fn, sink); CK(cudaGetLastError()); }
         ttu_one<<<1, LANES>>>(din, dout);
-        e = cudaDeviceSynchronize();
+        e = cudaGetLastError();                     // launch errors (e.g. too many resources)
+        if (e == cudaSuccess) e = cudaDeviceSynchronize();
         if (e != cudaSuccess) break;
         std::vector<unsigned> o(out.size());
         CK(cudaMemcpy(o.data(), dout, o.size() * 4, cudaMemcpyDeviceToHost));
