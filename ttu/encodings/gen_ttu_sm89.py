@@ -66,12 +66,14 @@ out = {
     "sm": "89",
     "generated_by": "ttu/encodings/gen_ttu_sm89.py",
     "comment": ("SM89 rebuild of the SM120 canonical traversal. Opcodes, field "
-                "positions and control bits are identical to SM120. Two real "
-                "differences: (1) TTUST second source and TTULD second destination "
-                "(bits 71:64) are a GPR pair Rc on SM89 vs uniform Ra_URc on SM120, "
-                "same bits, different register file; (2) the close bit is "
-                "UNRESOLVED: both ISA specs say bit 74, Cesar's SM120 file sets "
-                "bit 72. Do not run either close variant until confirmed."),
+                "positions and control bits are identical to SM120. TTUST's second "
+                "source and TTULD's second destination (bits 71:64) are ordinary "
+                "registers on both architectures (named Rc on SM89 and Ra_URc on "
+                "SM120, operand type Register on both), even aligned 64 bit pairs "
+                "(IDEST_SIZE 64). The close bit is 74 (see close_bit); Cesar's "
+                "SM120 file sets bit 72, kept only as an alternative. Corrected "
+                "2026-11-10: an earlier comment called SM120's field a uniform "
+                "register and the close bit unresolved."),
     "close_bit": {"spec": CLOSE_BIT_SPEC, "cesar_sm120": CLOSE_BIT_CESAR,
                   "status": "resolved: bit 74. Read from SM89 OptiX pipeline code in device memory (Setup_4, driver 580.178.04): the last TTULD of each sequence sets bit 74, bit 72 is never set. Also bit 74 in the sm75 gpuWarmup kernel in libnvoptix."},
     "sequences": {"canonical_traversal": {

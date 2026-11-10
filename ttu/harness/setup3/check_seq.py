@@ -68,6 +68,12 @@ def check(path):
             ok(tag + 'A6 exactly one TTULD with bit 74, and it is last', close == [n - 1] and lds[-1] == n - 1, close)
             ok(tag + 'A7 CLOSE unpredicated', pred(grp[-1]) == (7, 0), pred(grp[-1]))
             ok(tag + 'A8 bit 72 only on TTUOPEN', not any(bit(b, 72) for b in grp))
+            # A12 (2026-11-10, Cesar): TTUST Rb, Rc and TTULD Rd, Rd2 are even aligned 64 bit register pairs on SM89
+            # and SM120 (IDEST_SIZE 64; the spec requires even Rd and Rd2). Each base register must be even or RZ.
+            fld = lambda b, lo: (W(b) >> lo) & 0xff
+            regs = [(k, fld(b, lo)) for b in grp for k, lo in ((('ST Rb', 32), ('ST Rc', 64)) if low12(b) == ST else (('LD Rd', 16), ('LD Rd2', 64)) if low12(b) == LD else ())]
+            odd = [(k, r) for k, r in regs if r != 255 and r % 2]
+            ok(tag + 'A12 every TTUST/TTULD register pair base is even (or RZ)', not odd and len(regs) == 2 * (n - 1), (odd, len(regs)))
             ok(tag + 'A11 no branch or BSSY/BSYNC between OPEN and CLOSE',
                not any(low12(b) in (0x947, 0x945, 0x941, 0x94d, 0x950, 0x943, 0x949) for b in body[gi:gi + 2 + n]))
             total += n + 2
