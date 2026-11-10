@@ -9,10 +9,12 @@
 //            jitter  = lane i onto a different point of triangle 0 (same path, different hit data)
 //            random  = lane i: its own random origin in [-1,1]^3 and random direction
 //            random1 = every lane traces lane 0's random ray (coherent control)
+//            randomz = lane i: its own random origin, direction +z
 //     FILL   zero | random   (value of the words OptiX leaves uninitialized: 0x180 high, 0x190)
 //   options
 //     --scene S      tri1 (default) | tri2 (2 triangles, 1 build input) | tri2g (2 build inputs) | grid:N
-//                    | soup:N (N random small triangles in the cube [-1,1]^3)
+//                    | soup:N[:E] (N random small triangles in [-1,1]^3, edge E/cbrt(N), E default 3)
+//                    | stack:L (L copies of triangle 0 at z = 0.01 k, k = 0..L-1, all on the hit ray)
 //     --warps W      warps in the single block, 1..21 (default 1); build_patch.py --regs 96 sets the register count
 //     --repeat N     timed launches in this process, 1..100 (default 1)
 //     --blocks G     blocks of W warps (default 1); with an --smfilter build only blocks on SM A or B run
@@ -20,6 +22,8 @@
 //     --flush MB     before every ttu_one launch, a plain kernel reads MB megabytes (L2 eviction)
 //     --dump-gas F   write the GAS bytes to F
 //     --thrash       allocate a 4 MB buffer; words 26, 27 = buffer + 128 x lane (for build_patch --thrash)
+//     --resume K     then up to K follow up queries per lane, built as OptiX's loop builds them
+//     --dump-tris F  write all triangles (9 floats each) to F, for the CPU reference
 //     --no-ttu       stop after the OptiX reference
 //
 // ttu_one as compiled here only loads 96 words into registers and stores them
@@ -29,6 +33,7 @@
 #include <optix.h>
 #include <optix_function_table_definition.h>
 #include <optix_stubs.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -104,10 +109,20 @@ static std::vector<std::vector<Tri>> make_scene(const std::string &s)
         }
         return {v};
     }
+    if (s.rfind("stack:", 0) == 0) {
+        const int L = atoi(s.c_str() + 6);
+        if (L < 1 || L > 4096) { fprintf(stderr, "stack:L with 1 <= L <= 4096\n"); exit(2); }
+        std::vector<Tri> v;
+        for (int k = 0; k < L; ++k) { Tri t = t0; t.a.z = t.b.z = t.c.z = 0.01f * k; v.push_back(t); }
+        return {v};
+    }
     if (s.rfind("soup:", 0) == 0) {
         const int n = atoi(s.c_str() + 5);
         if (n < 1 || n > 1 << 23) { fprintf(stderr, "soup:N with 1 <= N <= 2^23\n"); exit(2); }
-        const float e = 3.f / std::cbrt((float)n);          // edge length: rays hit something
+        const size_t colon = s.find(':', 5);
+        const float E = colon == std::string::npos ? 3.f : (float)atof(s.c_str() + colon + 1);
+        if (!(E > 0.f && E <= 100.f)) { fprintf(stderr, "soup:N:E with 0 < E <= 100\n"); exit(2); }
+        const float e = E / std::cbrt((float)n);            // edge length: E sets the overlap
         std::mt19937 g(1234); std::uniform_real_distribution<float> U(-1.f, 1.f);
         std::vector<Tri> v; v.reserve(n);
         for (int i = 0; i < n; ++i) {
@@ -124,7 +139,7 @@ int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
-    bool run_ttu = true, thrash = false; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
@@ -135,6 +150,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--flush") && a + 1 < argc) flush_mb = atof(argv[++a]);
         else if (!strcmp(argv[a], "--scene") && a + 1 < argc) scene = argv[++a];
         else if (!strcmp(argv[a], "--dump-gas") && a + 1 < argc) dump = argv[++a];
+        else if (!strcmp(argv[a], "--resume") && a + 1 < argc) resume = atoi(argv[++a]);
+        else if (!strcmp(argv[a], "--dump-tris") && a + 1 < argc) dump_tris = argv[++a];
         else { fprintf(stderr, "unknown option %s\n", argv[a]); return 2; }
     }
     if (repeat < 1 || repeat > 100 || warps < 1 || warps > MAXW || blocks < 1 || blocks > 1024 || flush_mb < 0 || flush_mb > 4096) {
@@ -161,6 +178,7 @@ int main(int argc, char **argv)
         bi.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3; bi.triangleArray.numVertices = (unsigned)v.size() * 3;
         bi.triangleArray.vertexBuffers = &dverts[g]; bi.triangleArray.flags = &gflags; bi.triangleArray.numSbtRecords = 1;
     }
+    if (dump_tris) { FILE *f = fopen(dump_tris, "wb"); fwrite(all.data(), sizeof(Tri), all.size(), f); fclose(f); }
     OptixAccelBuildOptions ao{}; ao.buildFlags = OPTIX_BUILD_FLAG_NONE; ao.operation = OPTIX_BUILD_OPERATION_BUILD;
     OptixAccelBufferSizes bs{}; OX(optixAccelComputeMemoryUsage(ctx, &ao, bis.data(), ng, &bs));
     CUdeviceptr tmp, gas; CK(cudaMalloc((void **)&tmp, bs.tempSizeInBytes)); CK(cudaMalloc((void **)&gas, bs.outputSizeInBytes));
@@ -212,8 +230,8 @@ int main(int argc, char **argv)
     };
     Ray8 ray{};
     const bool perlane = !strcmp(argv[3], "perlane"), jitter = !strcmp(argv[3], "jitter");
-    const bool rnd = !strcmp(argv[3], "random"), rnd1 = !strcmp(argv[3], "random1");
-    if (perlane || jitter || rnd || rnd1) {
+    const bool rnd = !strcmp(argv[3], "random"), rnd1 = !strcmp(argv[3], "random1"), rndz = !strcmp(argv[3], "randomz");
+    if (perlane || jitter || rnd || rnd1 || rndz) {
         ray = {{0.f, 0.f, -1.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f};   // replaced per lane below
     } else if (!strncmp(argv[3], "tri:", 4)) {
         const int i = atoi(argv[3] + 4);
@@ -227,10 +245,11 @@ int main(int argc, char **argv)
         ray = *pick;
     }
     std::vector<Ray8> rays(LANES, ray);
-    for (unsigned i = 0; i < LANES && (rnd || rnd1); ++i) {
-        std::mt19937 g(777 + (rnd ? i : 0)); std::uniform_real_distribution<float> U(-1.f, 1.f);
+    for (unsigned i = 0; i < LANES && (rnd || rnd1 || rndz); ++i) {
+        std::mt19937 g(777 + (rnd1 ? 0 : i)); std::uniform_real_distribution<float> U(-1.f, 1.f);
         float3 o{U(g), U(g), U(g)}, d;
         do { d = {U(g), U(g), U(g)}; } while (d.x * d.x + d.y * d.y + d.z * d.z < 0.01f || d.x * d.x + d.y * d.y + d.z * d.z > 1.f);
+        if (rndz) d = {0.f, 0.f, 1.f};
         const float l = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
         rays[i] = {{o.x, o.y, o.z}, 0.f, {d.x / l, d.y / l, d.z / l}, 1e16f};
     }
@@ -385,6 +404,66 @@ int main(int argc, char **argv)
         if (it == repeat - 1) out = o;
     }
     fprintf(jf, "]");
+    // ---- resume: follow up queries per lane, built the way OptiX's traversal loop builds them ----
+    // OptiX (fnaddr-0xd430) sets tmax = |R45| (best t), then loops to fnaddr-0x10000, which stores
+    // 0x180 = {R56:R57, R58:R59} and 0x190 = {R60:R61, R70:R71} from the previous TTULD 0x3C0 / 0x3D0.
+    if (resume > 0 && e == cudaSuccess && blocks == 1) {
+        auto pend = [](const unsigned *R) { return (R[56] | R[57] | R[58] | R[59] | R[60] | R[61] | R[70] | R[71]) != 0; };
+        auto absf = [](unsigned u) { u &= 0x7fffffffu; float f; memcpy(&f, &u, 4); return f; };
+        std::vector<unsigned> cur = in, prev = out;
+        std::vector<int> nq(LANES, 1), done(LANES, 0), npend0(LANES, 0);
+        std::vector<float> best_t(LANES, -1.f); std::vector<unsigned> best_p(LANES, 0);
+        auto take = [&](unsigned i, const unsigned *R) {
+            if (R[3]) { const float t = absf(R[45]); if (best_t[i] < 0 || t < best_t[i]) { best_t[i] = t; best_p[i] = R[44] & 0x1fffffffu; } }
+        };
+        auto npairs = [](const unsigned *R) { return (int)((R[56] | R[57]) != 0) + ((R[58] | R[59]) != 0) + ((R[60] | R[61]) != 0) + ((R[70] | R[71]) != 0); };
+        for (unsigned i = 0; i < LANES; ++i) { take(i, &prev[i * N]); done[i] = !pend(&prev[i * N]); npend0[i] = npairs(&prev[i * N]); }
+        fprintf(jf, ",\n \"resume_rounds\": [");
+        int round = 0;
+        for (; round < resume; ++round) {
+            bool any = false; for (unsigned i = 0; i < LANES; ++i) any |= !done[i];
+            if (!any) break;
+            for (unsigned i = 0; i < LANES; ++i) {
+                unsigned *R = &cur[i * N]; const unsigned *Pv = &prev[i * N];
+                if (done[i]) { R[17] = R[31] = 0u; continue; }          // finished lane: tmax 0, no work
+                const float tmax = best_t[i] >= 0.f ? best_t[i] : rays[i % LANES].tmax;
+                R[17] = R[31] = fbits(tmax);
+                R[70] = Pv[56]; R[71] = Pv[57]; R[32] = Pv[58]; R[33] = Pv[59];       // 0x180
+                R[44] = Pv[60]; R[45] = Pv[61]; R[2] = Pv[70]; R[3] = Pv[71];         // 0x190
+            }
+            CK(cudaMemcpy(din, cur.data(), cur.size() * 4, cudaMemcpyHostToDevice));
+            CK(cudaMemcpy(dout, out.data(), out.size() * 4, cudaMemcpyHostToDevice));
+            std::vector<unsigned> fill(out.size(), 0x77777777u);
+            CK(cudaMemcpy(dout, fill.data(), fill.size() * 4, cudaMemcpyHostToDevice));
+            ttu_one<<<1, LANES>>>(din, dout);
+            e = cudaGetLastError(); if (e == cudaSuccess) e = cudaDeviceSynchronize();
+            if (e != cudaSuccess) break;
+            std::vector<unsigned> o(out.size());
+            CK(cudaMemcpy(o.data(), dout, o.size() * 4, cudaMemcpyDeviceToHost));
+            int active = 0, still = 0;
+            fprintf(jf, "%s{\"round\": %d, \"warp_clk\": [", round ? ", " : "", round + 1);
+            for (int w = 0; w < warps; ++w) {
+                const unsigned *L0 = &o[(32 * w) * N];
+                fprintf(jf, "%s[%llu,%llu]", w ? "," : "", ((unsigned long long)L0[85] << 32) | L0[84], ((unsigned long long)L0[87] << 32) | L0[86]);
+            }
+            for (unsigned i = 0; i < LANES; ++i) {
+                if (done[i]) continue;
+                ++active; ++nq[i]; take(i, &o[i * N]);
+                done[i] = !pend(&o[i * N]); still += !done[i];
+            }
+            fprintf(jf, "], \"active\": %d, \"still_pending\": %d}", active, still);
+            prev = o;
+        }
+        fprintf(jf, "],\n \"resume_status\": \"%s\", \"resume_rounds_used\": %d,\n \"lane_queries\": [", cudaGetErrorString(e), round);
+        for (unsigned i = 0; i < LANES; ++i) fprintf(jf, "%s%d", i ? "," : "", done[i] ? nq[i] : -nq[i]);
+        fprintf(jf, "],\n \"lane_pending_pairs_first\": [");
+        for (unsigned i = 0; i < LANES; ++i) fprintf(jf, "%s%d", i ? "," : "", npend0[i]);
+        fprintf(jf, "],\n \"lane_best\": [");
+        for (unsigned i = 0; i < LANES; ++i) fprintf(jf, "%s[\"0x%08x\", %u]", i ? "," : "", best_t[i] >= 0 ? fbits(best_t[i]) : 0xffffffffu, best_p[i]);
+        fprintf(jf, "]");
+        int maxq = 0; size_t ndone = 0; for (unsigned i = 0; i < LANES; ++i) { maxq = std::max(maxq, nq[i]); ndone += done[i]; }
+        printf("resume: %s, %d round(s), %zu of %u lanes finished, max queries per lane %d\n", cudaGetErrorString(e), round, ndone, LANES, maxq);
+    }
     printf("ttu_one: %s (%d launch(es) x %d block(s) x %d warp(s), %zu block(s) ran, flush %g MB, results same every launch: %d)\n",
            cudaGetErrorString(e), repeat, blocks, warps, ran_blocks.size(), flush_mb, same_all);
     const int b0 = ran_blocks.empty() ? 0 : ran_blocks[0];
