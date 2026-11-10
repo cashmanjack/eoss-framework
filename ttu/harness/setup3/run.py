@@ -26,6 +26,8 @@ def main():
         i = extra.index('--ncu'); metrics = extra[i + 1]; del extra[i:i + 2]
         j = extra.index('--ncu-out'); csv = extra[j + 1]; del extra[j:j + 2]
         skip = []
+        if '--ncu-instances' in extra:   # per unit values (e.g. one L1 per SM) instead of only the sum
+            extra.remove('--ncu-instances'); skip += ['--print-metric-instances', 'values']
         if '--ncu-skip' in extra:   # profile only after the first K ttu_one launches (e.g. pass 0 of --passes 2)
             k = extra.index('--ncu-skip'); skip = ['--launch-skip', str(int(extra[k + 1]))]; del extra[k:k + 2]
         ncu = [os.path.expanduser('~/opt/cuda-12.8/bin/ncu'), '--target-processes', 'all', '-k', 'ttu_one',
