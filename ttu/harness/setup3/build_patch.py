@@ -121,6 +121,31 @@ def ldg_ca(rd, ra, imm):
     return _instr(0x7981 | (rd << 16) | (ra << 24) | (imm << 40), 0xc1eb900, 1, 1, 2, 7, 0)
 
 
+def lop3(rd, ra, rb, rc, lut, stall, pu=None):
+    """LOP3.LUT Rd, Ra, Rb, Rc, lut (nvcc 12.8: opcode 0x212; Rc bits 71:64, lut bits 79:72). With pu: LOP3.LUT Pu, RZ, ...
+    (predicate = result != 0, Pu in bits 83:81; nvcc's form for a compare of an OR with zero)."""
+    hi = 0x078e0000 | (lut << 8) | rc
+    if pu is not None:
+        rd = 255; hi = 0x07800000 | (lut << 8) | rc | ((pu << 1) << 16)
+    return _instr(0x7212 | (rd << 16) | (ra << 24) | (rb << 32), hi, stall, 0, 7, 7, 0)
+
+
+def lop3_abs_imm(pg, rd, ra, imm, stall):
+    """@Pg LOP3.LUT Rd, Ra, imm, RZ, 0xc0 (Ra & imm; nvcc 12.8 opcode 0x812, immediate in bits 63:32)."""
+    return _instr(0x0812 | (pg << 12) | (rd << 16) | (ra << 24) | (imm << 32), 0x078ec0ff, stall, 0, 7, 7, 0)
+
+
+def mov_reg(rd, rs, stall, pg=7):
+    """@Pg MOV Rd, Rs (nvcc 12.8: opcode 0x202, source in bits 39:32; hi bits as nvcc emits)."""
+    return _instr(0x0202 | (pg << 12) | (rd << 16) | (rs << 32), 0x0f00, stall, 0, 7, 7, 0)
+
+
+def bra_back(pg, pp, off_bytes, stall=5):
+    """@Pg BRA Pp, target (nvcc 12.8: opcode 0x947, signed byte offset from the next instruction in bits 63:32, second
+    predicate Pp in bits 89:87)."""
+    return _instr(0x0947 | (pg << 12) | ((off_bytes & 0xffffffff) << 32), 0x03ffff | (pp << 23), stall, 1, 7, 7, 0)
+
+
 THRASH_PTR = 26                  # --thrash: logical slots 26, 27 = this lane's thrash buffer address
 SM_A, SM_B, SM_ID = 18, 19, 20   # --smfilter: run only on SM A or SM B (VIRTUALSMID into R20)
 GT_START, GT_END = 22, 24       # --gtime: global timer before the start clock and after the end clock
@@ -189,7 +214,7 @@ def set_regcount(data, secname, regs):
 
 
 def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out=95, preclk=False, barnops=1,
-          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False):
+          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0):
     d = open(dump, 'rb').read()
     at = lambda o: d[DUMP_BASE + o:DUMP_BASE + o + 16]
     group = [at(GROUP_AT + 16 * k) for k in range(GROUP_LEN)]
@@ -264,6 +289,18 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         assert not (clock or gtime or preclk or sr133 or twice or thrash or dualgo or sleepb), '--slim: no timing and no second session'
         body.append(imov_cbank(CP, 0x160, 11))
         body.append(imov_cbank(CP + 1, 0x164, 11))
+    # --loop K (Throughput_7 fair comparison): the group runs again, from a loop branch, for every lane whose query returned
+    # pending entries, up to K rounds, exactly as OptiX's own traversal loop rebuilds the next query (tmax = best t, 0x180 and
+    # 0x190 from the previous TTULD 0x3C0 / 0x3D0). Extra registers (remap layout only): best hit R62..R66, counter R67, temp R68.
+    LB3, LB32, LB33, LB44, LB45, LCNT, LTMP = 62, 63, 64, 65, 66, 67, 68
+    RELOAD = [30, 31, 34, 35, 56, 57, 58, 59, 60, 61, 62, 63, 68, 69]    # input words the TTULDs overwrite (and R56..R61 reused as pending)
+    if loop:
+        assert slim and remap and not (clock or gtime or preclk or sr133 or twice or thrash or dualgo or sleepb or smfilter or alu), '--loop: slim + remap only, no timing, no SM filter'
+        assert 1 <= loop <= 64
+    def reload_ld(r):
+        if r in RAYSLOT:
+            return field(field(field(ldg[r], 16, phys(r)), 24, in_ptr), 40, 4 * RAYSLOT[r], 24)
+        return field(field(ldg[r], 16, phys(r)), 24, CP)
     for r in INPUTS:
         if slim and r in RAYSLOT:
             body.append(field(field(field(ldg[r], 16, phys(r)), 24, in_ptr), 40, 4 * RAYSLOT[r], 24))
@@ -274,6 +311,9 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     if smfilter:
         for r in (SM_A, SM_B):
             body.append(field(field(ldg[r], 16, phys(r)), 24, in_ptr))
+    if loop:
+        body.append(mov_reg(LB3, 255, 2))                      # no best hit yet
+        body.append(iadd3_imm(LCNT, 255, loop, 2))             # rounds left
     body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))   # all loads done
     if smfilter:   # leave unless this block's SM is A or B; before any TTU instruction or barrier
         body.append(s2r_virtualsmid(phys(SM_ID)))
@@ -330,6 +370,30 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     for _ in range(alu):   # Throughput_4: plain dependent ALU work after the group's last instruction, before the wait
         body.append(iadd3_imm(phys(ALU_REG), phys(ALU_REG), 1, 15))
     body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
+    if loop:
+        ph = phys
+        body.append(isetp_ne(1, ph(3), 255, 6, 0))                                  # P1 = this query hit
+        body.append(lop3(LTMP, ph(56), ph(57), ph(58), 0xfe, 6))                    # T = OR of the 8 pending words
+        body.append(lop3(LTMP, LTMP, ph(59), ph(60), 0xfe, 6))
+        body.append(lop3(LTMP, LTMP, ph(61), ph(70), 0xfe, 6))
+        body.append(lop3(0, LTMP, ph(71), 255, 0xfc, 6, pu=2))                      # P2 = pending
+        for lb, r in ((LB3, 3), (LB32, 32), (LB33, 33), (LB44, 44), (LB45, 45)):
+            body.append(mov_reg(lb, ph(r), 1, pg=1))                                # @P1 best = this hit (later hits are never farther: tmax = best)
+        body.append(iadd3_imm(LCNT, LCNT, 0xffffffff, 6))
+        body.append(lop3(0, LCNT, 255, 255, 0xfc, 6, pu=3))                         # P3 = rounds left
+        body.append(isetp_ne(4, LB3, 255, 6, 0))                                    # P4 = a best hit exists
+        for d, sx in ((2, 70), (3, 71), (70, 56), (71, 57), (32, 58), (33, 59), (44, 60), (45, 61)):   # next query's 0x190 / 0x180 words
+            body.append(mov_reg(ph(d), ph(sx), 1))
+        for r in RELOAD:
+            body.append(reload_ld(r))
+        body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))       # reloads done
+        body.append(lop3_abs_imm(4, ph(17), LB45, 0x7fffffff, 4))                   # @P4 tmax = |best t| in 0x50 and 0xD0
+        body.append(lop3_abs_imm(4, ph(31), LB45, 0x7fffffff, 6))
+        loop_bra = len(body)
+        body.append(bra_back(2, 3, (g0 - (loop_bra + 1)) * 16))                      # @P2 BRA P3, group
+        for lb, r in ((LB3, 3), (LB32, 32), (LB33, 33), (LB44, 44), (LB45, 45)):
+            body.append(mov_reg(ph(r), lb, 1, pg=4))                                # @P4 final result = best hit
+        body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=6))
     if clock:
         body.append(cs2r_clock(phys(CLK_END)))
     if gtime:
@@ -350,6 +414,8 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
             body.append(field(field(stg[r], 32, phys(r)), 40, 4 * SLIM_OUT.index(r), 24))
         else:
             body.append(field(stg[r], 32, phys(r)))
+    if loop:   # rounds left (K - rounds run) to slot 13
+        body.append(field(field(stg[3], 32, LCNT), 40, 4 * 13, 24))
     assert low12(orig[ex[0] + 1]) == 0x947, 'expected BRA self after EXIT'
     body += [orig[ex[0]], orig[ex[0] + 1]]            # EXIT, BRA self
     assert len(body) <= len(orig), (len(body), len(orig))
@@ -357,15 +423,15 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     for (off, _), b in zip(ins, body):
         p.data[off:off + 16] = b
     if regs:
-        top = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5] + ([CP + 1] if slim else []))
+        top = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5] + ([CP + 1] if slim else []) + ([LCNT + 1] if loop else []))
         assert regs % 8 == 0 and regs >= top + 3 and regs <= 255, 'declared count must be >= highest register + 3 (R%d)' % top
         old = set_regcount(p.data, sec[0][2], regs)
         assert old, 'register count field not found'
         print('register count %s -> %d' % (sorted(set(old)), regs))
     p.save(out)
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
-    top_reg = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5])
-    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0,
+    top_reg = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5] + ([LCNT + 1] if loop else []))
+    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'loop': loop, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0,
             'inputs': INPUTS, 'outputs': outputs, 'in_ptr': in_ptr}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
     used = g0 + GROUP_LEN + 1 + int(clock) + len(outputs) + 2
@@ -388,6 +454,7 @@ if __name__ == '__main__':
     a.add_argument('--smfilter', action='store_true', help='blocks not on SM A or B (words 18, 19) exit before any TTU code')
     a.add_argument('--thrash', type=int, default=0, help='with --twice --remap: N L1 allocating loads per lane between the two sessions (N x 4 KB per warp)')
     a.add_argument('--slim', action='store_true', help='Throughput_6/7: ray words from one sector, other inputs broadcast from a shared record, 13 result words stored, no clock or image stores')
+    a.add_argument('--loop', type=int, default=0, help='Throughput_7 fair: resume loop in the kernel, up to K rounds (needs --slim --remap)')
     a.add_argument('--alu', type=int, default=0, help='Throughput_4: N dependent IADD3 (stall 15) after the group, before the wait')
     a.add_argument('--sleepb', type=int, default=0, help='with --smfilter: @P1 NANOSLEEP NS before the start clock (the block on SM B waits)')
     a.add_argument('--sr133', action='store_true', help='Interface_5: S2R SR_TTU_TICKET_INFO into R88 before TTUOPEN and R89 after the group')
@@ -397,5 +464,5 @@ if __name__ == '__main__':
     a.add_argument('--preclk', action='store_true', help='diagnostic clock read into R88:R89 before the barrier')
     a.add_argument('--barnops', type=int, default=8, help='NOPs after the barrier: a warp issues a few instructions past BAR.SYNC before it stalls (8 measured enough at 20 warps)')
     x = a.parse_args()
-    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else '') + ('a%d' % x.alu if x.alu else '') + ('l' if x.slim else ''),
-          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim)
+    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else '') + ('a%d' % x.alu if x.alu else '') + ('l' if x.slim else '') + ('L%d' % x.loop if x.loop else ''),
+          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop)

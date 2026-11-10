@@ -210,7 +210,7 @@ int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
-    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int blockrays = 0; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; const char *dump_final = nullptr; int blockrays = 0; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
@@ -220,6 +220,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--optix-repeat") && a + 1 < argc) optix_repeat = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--blockrays")) blockrays = 1;
         else if (!strcmp(argv[a], "--slim")) slim = 1;
+        else if (!strcmp(argv[a], "--loop")) loopk = 1;   // build_patch --loop binary: 14 result words (slot 13 = rounds left), results are final
+        else if (!strcmp(argv[a], "--dump-final") && a + 1 < argc) dump_final = argv[++a];
         else if (!strcmp(argv[a], "--active") && a + 1 < argc) active = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--sched") && a + 1 < argc) sched = argv[++a];
         else if (!strcmp(argv[a], "--idle") && a + 1 < argc) idle = argv[++a];
@@ -665,11 +667,12 @@ int main(int argc, char **argv)
         std::vector<unsigned> o(out.size());
         CK(cudaMemcpy(o.data(), dout, o.size() * 4, cudaMemcpyDeviceToHost));
         if (slim) {   // 13 result words in slots 0..12 -> standard register slots (3, 32, 33, 44, 45, 56..61, 70, 71)
-            static const int SO[13] = {3, 32, 33, 44, 45, 56, 57, 58, 59, 60, 61, 70, 71};
+            static const int SO[14] = {3, 32, 33, 44, 45, 56, 57, 58, 59, 60, 61, 70, 71, 84};
+            const int nso = loopk ? 14 : 13;
             for (size_t i = 0; i < TOTAL; ++i) {
-                unsigned *Q = &o[i * N]; unsigned w[13]; memcpy(w, Q, sizeof w);
+                unsigned *Q = &o[i * N]; unsigned w[14]; memcpy(w, Q, nso * 4);
                 for (int k = 0; k < N; ++k) Q[k] = 0x77777777u;
-                for (int k = 0; k < 13; ++k) Q[SO[k]] = w[k];
+                for (int k = 0; k < nso; ++k) Q[SO[k]] = w[k];
             }
         }
         if (it == 0) first = o;
@@ -710,6 +713,12 @@ int main(int argc, char **argv)
         if (it == repeat - 1) out = o;
     }
     fprintf(jf, "]");
+    if (dump_final && e == cudaSuccess) {   // per lane final words of the last launch: R3 R32 R33 R44 R45 R56..R61 R70 R71 R84 (15 u32)
+        static const int DF[15] = {3, 32, 33, 44, 45, 56, 57, 58, 59, 60, 61, 70, 71, 84, 3};
+        FILE *df = fopen(dump_final, "wb");
+        for (size_t i = 0; i < TOTAL; ++i) for (int k = 0; k < 14; ++k) fwrite(&out[i * N + DF[k]], 4, 1, df);
+        fclose(df);
+    }
     // ---- resume: follow up queries per lane, built the way OptiX's traversal loop builds them ----
     // OptiX (fnaddr-0xd430) sets tmax = |R45| (best t), then loops to fnaddr-0x10000, which stores
     // 0x180 = {R56:R57, R58:R59} and 0x190 = {R60:R61, R70:R71} from the previous TTULD 0x3C0 / 0x3D0.

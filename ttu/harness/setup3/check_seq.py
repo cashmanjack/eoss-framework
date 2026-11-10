@@ -94,7 +94,15 @@ def check(path):
                 ok('A10 remapped group equals the OptiX group except register fields (session at %d)' % gi, same)
             pm = {int(k): v for k, v in meta['regmap'].items()}
             ok('A10 register map is a pair aligned one to one map', len(set(pm.values())) == len(pm) and all(pm[k] % 2 == k % 2 for k in pm))
-        ok('B15 no branch anywhere before EXIT', not any(low12(b) in (0x947, 0x949, 0x943) for b in body[:ex]))
+        brs = [i for i, b in enumerate(body[:ex]) if low12(b) in (0x947, 0x949, 0x943)]
+        if meta.get('loop'):   # --loop: exactly one backward BRA, after the group, back to TTUOPEN; never inside a session
+            off = lambda b: (W(b) >> 32) & 0xffffffff
+            tgt = [i + 1 + ((off(body[i]) - (1 << 32 if off(body[i]) >> 31 else 0)) // 16) for i in brs]
+            ok('B15 loop: exactly one branch, a backward BRA to the TTUOPEN, after the CLOSE',
+               len(brs) == 1 and low12(body[brs[0]]) == 0x947 and tgt == [g] and brs[0] > g + 18, (brs, tgt, g))
+            ok('B15 loop: no TTU instruction after the branch target other than the one group', len(hits) == 19, len(hits))
+        else:
+            ok('B15 no branch anywhere before EXIT', not brs)
     wt = lambda b: (W(b[8:]) >> 52) & 0x3f
     stall = lambda b: (W(b[8:]) >> 41) & 0xf
     nb = meta.get('barnops', 1) if meta.get('sync') else 0
