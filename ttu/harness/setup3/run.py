@@ -1,6 +1,6 @@
 """Run a patched setup3 binary on GPU 1, only if check_seq.py passed on this exact file.
 
-    run.py BIN RAYS FILL OUT.json [--no-ttu] [--repeat N] [--ncu METRICS --ncu-out CSV [--ncu-skip K]]
+    run.py BIN RAYS FILL OUT.json [--no-ttu] [--repeat N] [--ncu METRICS --ncu-out CSV [--ncu-skip K]] [--inject TOOL.so]
 
 --ncu: run the binary under Nsight Compute (same timeout), profiling only ttu_one, caches and
 clocks left alone (--cache-control none --clock-control none), one CSV row per ttu_one launch.
@@ -22,6 +22,9 @@ def main():
     binp, rays, fill, out = sys.argv[1:5]
     extra = sys.argv[5:]
     ncu = []
+    inject = None
+    if '--inject' in extra:   # an NVBit tool (BITTU): CUDA_INJECTION64_PATH; BITTU_* settings come from the caller's environment
+        i = extra.index('--inject'); inject = os.path.abspath(extra[i + 1]); del extra[i:i + 2]
     if '--ncu' in extra:
         i = extra.index('--ncu'); metrics = extra[i + 1]; del extra[i:i + 2]
         j = extra.index('--ncu-out'); csv = extra[j + 1]; del extra[j:j + 2]
@@ -42,7 +45,7 @@ def main():
     procs = smi('-i', '1', '--query-compute-apps=pid', '--format=csv,noheader')
     if procs:
         sys.exit('refused: GPU 1 busy: %s' % procs)
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES='1',
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES='1', **({'CUDA_INJECTION64_PATH': inject} if inject else {}),
                LD_LIBRARY_PATH=OPTIX_LIB + ':' + os.environ.get('LD_LIBRARY_PATH', ''))
     ptx = os.path.join(os.path.dirname(binp), 'setup3_dev.ptx')
     cmd = ['timeout', '-k', '2', '30'] + ncu + [binp, ptx, os.path.join(os.path.dirname(binp), 'words.txt'), rays, fill, out] + extra
