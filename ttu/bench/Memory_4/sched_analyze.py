@@ -18,14 +18,17 @@ def analyze(p):
         h = ref[r]
         ok = (bt == '0xffffffff') if not h['hit'] else (bt != '0xffffffff' and bp == h['prim'] and abs(f32(bt) - f32(h['t'])) <= 1e-6 * max(1.0, f32(h['t'])))
         bad += not ok
-    cyc = 0; act = 0; nl = 0; per_round = []
+    cyc = 0; act = 0; nl = 0; per_round = []; multi = j.get('blocks', 1) > 1
     for rd in j['rounds']:
-        c = sum(max(e for _, e in l['warp_clk']) - min(s for s, _ in l['warp_clk']) for l in rd['launches'])
+        if multi:   # many SMs: GPU time per launch (CUDA events), in microseconds instead of one SM's cycles
+            c = sum(1000.0 * l['ms'] for l in rd['launches'])
+        else:
+            c = sum(max(e for _, e in l['warp_clk']) - min(s for s, _ in l['warp_clk']) for l in rd['launches'])
         cyc += c; per_round.append((len(rd['launches']), c)); act += sum(l['active'] for l in rd['launches']); nl += len(rd['launches'])
     q = [abs(x) for x in j['ray_queries']]
-    return dict(file=os.path.basename(p), scene=j['scene'], warps=j['warps'], sched=j['sched'], flush=j['flush_mb'], rays=n, wrong=bad,
+    return dict(file=os.path.basename(p), scene=j['scene'], warps=j['warps'], blocks=j.get('blocks', 1), unit='us' if multi else 'cycles', sched=j['sched'], flush=j['flush_mb'], rays=n, wrong=bad,
                 unfinished=sum(x < 0 for x in j['ray_queries']), queries_per_ray=st.mean(q), max_queries=max(q), rounds=len(j['rounds']),
-                launches=nl, lane_use=act / (nl * 32 * j['warps']), cycles_per_ray=cyc / n, rays_per_cycle=n / cyc,
+                launches=nl, lane_use=act / (nl * 32 * j['warps'] * j.get('blocks', 1)), cycles_per_ray=cyc / n, rays_per_cycle=n / cyc,
                 lat_mean=st.mean(j['ray_lat']), round_launches=[a for a, _ in per_round], round_share=[c / cyc for _, c in per_round])
 
 
@@ -35,6 +38,6 @@ if __name__ == '__main__':
         if '--json' in sys.argv:
             print(json.dumps(r)); continue
         print('%-32s %s W%-2d %-7s flush %-3g | %d rays, wrong %d, unfinished %d | q/ray %.3f (max %d), %d rounds, %d launches, lane use %.0f%% | '
-              '%.1f cyc/ray (%.4f rays/cyc) | lat/ray %.0f | round launches %s' % (
+              '%.3f %s/ray (%.4f rays/%s) | lat/ray %.0f cycles | round launches %s' % (
                   r['file'], r['scene'], r['warps'], r['sched'], r['flush'], r['rays'], r['wrong'], r['unfinished'], r['queries_per_ray'], r['max_queries'],
-                  r['rounds'], r['launches'], 100 * r['lane_use'], r['cycles_per_ray'], r['rays_per_cycle'], r['lat_mean'], r['round_launches']))
+                  r['rounds'], r['launches'], 100 * r['lane_use'], r['cycles_per_ray'], r['unit'], r['rays_per_cycle'], r['unit'], r['lat_mean'], r['round_launches']))

@@ -442,8 +442,14 @@ int main(int argc, char **argv)
         };
         auto pend = [](const unsigned *R) { return (R[56] | R[57] | R[58] | R[59] | R[60] | R[61] | R[70] | R[71]) != 0; };
         auto absf = [](unsigned u) { u &= 0x7fffffffu; float f; memcpy(&f, &u, 4); return f; };
+        const unsigned LL = (unsigned)blocks * LANES;   // lanes per launch (--blocks G: G blocks, one per SM)
+        auto sm_of = [&](unsigned lane) -> unsigned {     // the SM a block lands on (measured for Throughput_8);
+            if (blocks == 1) return sm_a;                   // a wrong guess makes the lane exit, which the store check catches
+            const unsigned b = lane / LANES; return b < 71 ? 2 * b : 2 * (b - 71) + 1;
+        };
+        cudaEvent_t ev0, ev1; CK(cudaEventCreate(&ev0)); CK(cudaEventCreate(&ev1)); std::vector<float> launch_ms;
         unsigned *din, *dout, *sink; uint4 *fbuf = nullptr; const size_t fn = (size_t)(flush_mb * 1048576.0) / sizeof(uint4);
-        CK(cudaMalloc((void **)&din, (size_t)LANES * N * 4)); CK(cudaMalloc((void **)&dout, (size_t)LANES * N * 4)); CK(cudaMalloc((void **)&sink, 4));
+        CK(cudaMalloc((void **)&din, (size_t)LL * N * 4)); CK(cudaMalloc((void **)&dout, (size_t)LL * N * 4)); CK(cudaMalloc((void **)&sink, 4));
         if (fn) { CK(cudaMalloc((void **)&fbuf, fn * sizeof(uint4))); CK(cudaMemset(fbuf, 1, fn * sizeof(uint4))); }
         cudaError_t e = cudaSuccess;
         std::vector<unsigned> img((size_t)NR * N); std::vector<int> nq, done; std::vector<float> best_t; std::vector<unsigned> best_p;
@@ -451,19 +457,19 @@ int main(int argc, char **argv)
         for (int pass = 0; pass < passes && e == cudaSuccess; ++pass) {
             for (unsigned r = 0; r < NR; ++r) init_regs(&img[(size_t)r * N], rays[r], ray_start[r]);
             nq.assign(NR, 0); done.assign(NR, 0); best_t.assign(NR, -1.f); best_p.assign(NR, 0); lat.assign(NR, 0.0);
-            std::vector<unsigned long long> key(NR, 0); rounds_json.clear(); launches = 0;
+            std::vector<unsigned long long> key(NR, 0); rounds_json.clear(); launches = 0; launch_ms.clear();
             for (round = 0; round <= resume && e == cudaSuccess; ++round) {
                 std::vector<long long> slots;   // ray per lane, -1 = masked
                 if (round == 0 || sched == "inplace") {
-                    for (unsigned c = 0; c < nchunks; ++c) {
-                        bool any = false; for (unsigned i = 0; i < LANES; ++i) any |= !done[c * LANES + i];
-                        if (any) for (unsigned i = 0; i < LANES; ++i) slots.push_back(done[c * LANES + i] ? -1 : (long long)(c * LANES + i));
+                    for (unsigned c = 0; c * LL < NR; ++c) {
+                        bool any = false; for (unsigned i = 0; i < LL && c * LL + i < NR; ++i) any |= !done[c * LL + i];
+                        if (any) for (unsigned i = 0; i < LL; ++i) { const unsigned r = c * LL + i; slots.push_back(r >= NR || done[r] ? -1 : (long long)r); }
                     }
                 } else {
                     std::vector<unsigned> act; for (unsigned r = 0; r < NR; ++r) if (!done[r]) act.push_back(r);
                     if (sched == "regroup") std::stable_sort(act.begin(), act.end(), [&](unsigned a, unsigned b) { return key[a] < key[b]; });
                     for (unsigned r : act) slots.push_back(r);
-                    while (slots.size() % LANES) slots.push_back(-1);
+                    while (slots.size() % LL) slots.push_back(-1);
                 }
                 if (slots.empty()) break;
                 double kpw = 0; int nw = 0; std::set<unsigned long long> allk;   // distinct resume nodes per warp (rounds >= 1)
@@ -472,24 +478,27 @@ int main(int argc, char **argv)
                     if (!ks.empty()) { kpw += ks.size(); ++nw; }
                 }
                 char hb[192]; snprintf(hb, sizeof hb, "%s{\"round\": %d, \"nodes_per_warp\": %.2f, \"distinct_nodes\": %zu, \"launches\": [", round ? ", " : "", round, round ? kpw / nw : 1.0, round ? allk.size() : (size_t)1); rounds_json += hb;
-                std::vector<unsigned> hin((size_t)LANES * N), hout((size_t)LANES * N);
-                for (size_t L0 = 0; L0 < slots.size() && e == cudaSuccess; L0 += LANES) {
+                std::vector<unsigned> hin((size_t)LL * N), hout((size_t)LL * N);
+                for (size_t L0 = 0; L0 < slots.size() && e == cudaSuccess; L0 += LL) {
                     int nact = 0;
-                    for (unsigned i = 0; i < LANES; ++i) {
+                    for (unsigned i = 0; i < LL; ++i) {
                         const long long r = slots[L0 + i]; unsigned *R = &hin[(size_t)i * N];
-                        if (r >= 0) { memcpy(R, &img[(size_t)r * N], N * 4); ++nact; }
+                        if (r >= 0) { memcpy(R, &img[(size_t)r * N], N * 4); R[18] = R[19] = sm_of(i); ++nact; }
                         else { memcpy(R, &img[0], N * 4); R[18] = R[19] = 0xffffffffu; }   // masked: exits before TTUOPEN
                     }
                     CK(cudaMemcpy(din, hin.data(), hin.size() * 4, cudaMemcpyHostToDevice));
                     std::fill(hout.begin(), hout.end(), 0x77777777u);
                     CK(cudaMemcpy(dout, hout.data(), hout.size() * 4, cudaMemcpyHostToDevice));
                     if (fn) { flush_read<<<142 * 8, 256>>>(fbuf, fn, sink); CK(cudaGetLastError()); }
-                    ttu_one<<<1, LANES>>>(din, dout); ++launches;
+                    CK(cudaEventRecord(ev0));
+                    ttu_one<<<blocks, LANES>>>(din, dout); ++launches;
+                    CK(cudaEventRecord(ev1));
                     e = cudaGetLastError(); if (e == cudaSuccess) e = cudaDeviceSynchronize();
+                    { float ms = 0; if (e == cudaSuccess) CK(cudaEventElapsedTime(&ms, ev0, ev1)); launch_ms.push_back(ms); }
                     if (e != cudaSuccess) break;
                     CK(cudaMemcpy(hout.data(), dout, hout.size() * 4, cudaMemcpyDeviceToHost));
                     std::string wj;
-                    for (int w = 0; w < warps; ++w) {
+                    for (int w = 0; w < warps * blocks; ++w) {
                         int l0 = -1; for (int l = 0; l < 32 && l0 < 0; ++l) if (slots[L0 + 32 * w + l] >= 0) l0 = l;
                         if (l0 < 0) continue;
                         const unsigned *O = &hout[(size_t)(32 * w + l0) * N];
@@ -497,8 +506,8 @@ int main(int argc, char **argv)
                         char b[64]; snprintf(b, sizeof b, "%s[%llu,%llu]", wj.empty() ? "" : ",", s0, s1); wj += b;
                         for (int l = 0; l < 32; ++l) { const long long r = slots[L0 + 32 * w + l]; if (r >= 0) lat[r] += (double)(s1 - s0); }
                     }
-                    char lb[64]; snprintf(lb, sizeof lb, "%s{\"active\": %d, \"warp_clk\": [", L0 ? ", " : "", nact); rounds_json += lb; rounds_json += wj + "]}";
-                    for (unsigned i = 0; i < LANES; ++i) {
+                    char lb[96]; snprintf(lb, sizeof lb, "%s{\"active\": %d, \"ms\": %.6f, \"warp_clk\": [", L0 ? ", " : "", nact, launch_ms.back()); rounds_json += lb; rounds_json += (blocks == 1 ? wj : std::string()) + "]}";
+                    for (unsigned i = 0; i < LL; ++i) {
                         const long long r = slots[L0 + i]; if (r < 0) continue;
                         const unsigned *O = &hout[(size_t)i * N]; unsigned *R = &img[(size_t)r * N];
                         if (O[12] == 0x77777777u && O[84] == 0x77777777u) { fprintf(stderr, "ray %lld: lane did not store\n", r); e = cudaErrorUnknown; break; }
@@ -515,6 +524,8 @@ int main(int argc, char **argv)
             }
         }
         size_t ndone = 0; int maxq = 0; for (unsigned r = 0; r < NR; ++r) { ndone += done[r]; maxq = std::max(maxq, nq[r]); }
+        double tot_ms = 0; for (float m : launch_ms) tot_ms += m;
+        fprintf(jf, ",\n \"blocks\": %d, \"total_ms\": %.6f", blocks, tot_ms);
         fprintf(jf, ",\n \"sched\": \"%s\", \"passes\": %d, \"launches_total\": %lld, \"rounds_used\": %d, \"status\": \"%s\",\n \"rounds\": [%s],\n \"ray_queries\": [",
                 sched.c_str(), passes, launches, round, cudaGetErrorString(e), rounds_json.c_str());
         for (unsigned r = 0; r < NR; ++r) fprintf(jf, "%s%d", r ? "," : "", done[r] ? nq[r] : -nq[r]);
