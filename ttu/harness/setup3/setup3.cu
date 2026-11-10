@@ -143,6 +143,15 @@ static std::vector<std::vector<Tri>> make_scene(const std::string &s)
         }
         return {v};
     }
+    if (s.rfind("clus:", 0) == 0) {   // Traversal_2b: a first hit that is not the closest (ray along +z at x = y = 0)
+        // A: a long slanted triangle, box z in [0, 9], hit by the ray at z = 4.5; then K - 1 small triangles on the
+        // ray at z = 4 k / K (k = 1..K-1), all closer than A's hit but with boxes that start after A's.
+        const int K = atoi(s.c_str() + 5);
+        if (K < 1 || K > 64) { fprintf(stderr, "clus:K with 1 <= K <= 64\n"); exit(2); }
+        std::vector<Tri> v{{{-1.f, 0.5f, 0.f}, {1.f, 0.5f, 0.f}, {0.f, -0.5f, 9.f}}};
+        for (int k = 1; k < K; ++k) { const float z = 4.f * k / K; v.push_back({{-0.05f, -0.05f, z}, {0.05f, -0.05f, z}, {0.f, 0.05f, z}}); }
+        return {v};
+    }
     if (s.rfind("par:", 0) == 0) {   // full traversal scene for a ray along +z at x = y = 0 (Traversal_2a)
         // triangle k lies in the plane y = x tan(th_k) + DELTA, x in [-0.5, 0.5]: its box holds the ray's line,
         // but the plane is parallel to the ray and DELTA away, so the ray never hits it.
@@ -727,7 +736,11 @@ int main(int argc, char **argv)
                 ++active; ++nq[i]; take(i, &o[i * N]);
                 done[i] = !pend(&o[i * N]); still += !done[i];
             }
-            fprintf(jf, "], \"active\": %d, \"still_pending\": %d}", active, still);
+            { const unsigned *Q = &o[0];   // lane 0's returned words after this query (Traversal_2b)
+              fprintf(jf, "], \"lane0\": {\"hit\": %u, \"t\": \"0x%08x\", \"prim\": %u, \"w3c0\": [\"%08x\",\"%08x\",\"%08x\",\"%08x\"], \"w3d0\": [\"%08x\",\"%08x\",\"%08x\",\"%08x\"], \"in180\": [\"%08x\",\"%08x\",\"%08x\",\"%08x\"], \"in190\": [\"%08x\",\"%08x\",\"%08x\",\"%08x\"]}",
+                      Q[3], Q[45], Q[44] & 0x1fffffffu, Q[58], Q[59], Q[56], Q[57], Q[70], Q[71], Q[60], Q[61],
+                      cur[70], cur[71], cur[32], cur[33], cur[44], cur[45], cur[2], cur[3]); }
+            fprintf(jf, ", \"active\": %d, \"still_pending\": %d}", active, still);
             prev = o;
         }
         fprintf(jf, "],\n \"resume_status\": \"%s\", \"resume_rounds_used\": %d,\n \"lane_queries\": [", cudaGetErrorString(e), round);
