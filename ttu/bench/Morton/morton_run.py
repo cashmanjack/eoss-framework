@@ -76,7 +76,7 @@ def oracle_codes(W, kids, root, R, canon, tris, tol=1e-6):
         if not (new != cur).any(): break
         cur = new; anc.append(cur.copy())
     final = cur; depth = np.array([len(W[o]['path']) for o in offs]); out = {}
-    for name, d in (('d1', 1), ('d2', 2), ('d3', 3), ('full', 99)):
+    for name, d in (('d1', 1), ('d2', 2), ('d3', 3), ('d4', 4), ('full', 99)):
         gid = final if d == 99 else np.where(depth[final] <= d, final, anc[min(d, len(anc) - 1)])
         u, inv = np.unique(gid, return_inverse=True)
         out[name] = (inv.astype(np.uint64), len(u))
