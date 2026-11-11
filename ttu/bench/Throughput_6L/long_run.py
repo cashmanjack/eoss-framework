@@ -49,7 +49,7 @@ def go(binp, rays, out, scene, G, R, extra):
     return p.stdout
 
 
-def run(work, scene, kind, G, R, repeat=6, tag=None, smset=None, rays_file=None):
+def run(work, scene, kind, G, R, repeat=6, tag=None, smset=None, rays_file=None, keep=None):
     os.makedirs(work, exist_ok=True)
     n = G * LANES * R
     tag = tag or '%s_g%d_r%d' % (scene.replace(':', ''), G, R)
@@ -101,6 +101,8 @@ def run(work, scene, kind, G, R, repeat=6, tag=None, smset=None, rays_file=None)
     json.dump(res, open(os.path.join(work, 'res_%s.json' % tag), 'w'), indent=1)
     print('%-22s rays %9d | ours %8.3f ms (%.0f r/us) | optix %8.3f ms (%.0f r/us) | optix/ours %.2f | rounds %.2f max %d | unstored %d limit %d | vs optix wrong: hit %d t %d prim %d | cpu %d/%d wrong'
           % (tag, n_proc, res['ours_ms'], res['ours_rays_per_us'], res['optix_ms'], res['optix_rays_per_us'], res['optix_ms'] / res['ours_ms'], res['rounds_mean'], res['rounds_max'], unstored, unfin, bad_hit, bad_t, bad_p, len(idx), cpu_bad), flush=True)
+    if keep:   # replay validation: keep the final record of every ray (word 13 = rounds left) and the OptiX result
+        shutil.copy(fin, keep + '.fin'); shutil.copy(ref, keep + '.ref')
     for f in ((rays,) if not rays_file else ()) + (tris, fin, ref, b0, b1, b0 + '.checked', b1 + '.checked', b0 + '.layout.json', b1 + '.layout.json'):
         if os.path.exists(f): os.remove(f)
     return res
