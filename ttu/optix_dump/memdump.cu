@@ -2,7 +2,7 @@
 // memory (meant for code addresses) and save it. One window per process, so a
 // bad address only kills this process's CUDA context.
 //
-//   memdump launch [--bvh FILE]                 OptiX launch only (run under ncu to learn addresses)
+//   memdump launch [--bvh FILE] [--ias]                 OptiX launch only (run under ncu to learn addresses)
 //   memdump read --method M --addr A --len L --out FILE [--self] [--no-optix]
 //       M = attr   : host side pointer queries only, reads nothing
 //           copy   : cuMemcpyDtoH from A
@@ -22,6 +22,7 @@
 #include <optix.h>
 #include <optix_function_table_definition.h>
 #include <optix_stubs.h>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -75,7 +76,7 @@ static std::string read_file(const std::string &p)
     std::stringstream s; s << f.rdbuf(); return s.str();
 }
 
-static Optix run_optix(const std::string &ptx_path, const char *bvh_out)
+static Optix run_optix(const std::string &ptx_path, const char *bvh_out, bool ias = false)
 {
     Optix o{};
     CK(cudaFree(0));
@@ -104,6 +105,18 @@ static Optix run_optix(const std::string &ptx_path, const char *bvh_out)
     OX(optixAccelBuild(o.ctx, 0, &ao, &bi, 1, tmp, bs.tempSizeInBytes, o.gas, bs.outputSizeInBytes, &h, nullptr, 0));
     CK(cudaDeviceSynchronize()); cudaFree((void *)tmp);
     printf("gas 0x%llx size %zu handle 0x%llx\n", (unsigned long long)o.gas, o.gas_size, (unsigned long long)h);
+    if (ias) {   // BVH_4: one instance of the GAS with a real transform (rotation about z, uniform scale, translation); the launch traces the IAS handle
+        OptixInstance inst{}; const float cs = cosf(0.3f) * 0.9f, sn = sinf(0.3f) * 0.9f; const float m[12] = {cs, -sn, 0, 0.05f, sn, cs, 0, -0.03f, 0, 0, 0.9f, 0.1f};
+        memcpy(inst.transform, m, 48); inst.instanceId = 100; inst.visibilityMask = 255; inst.flags = OPTIX_INSTANCE_FLAG_NONE; inst.traversableHandle = h;
+        CUdeviceptr di; CK(cudaMalloc((void **)&di, sizeof inst)); CK(cudaMemcpy((void *)di, &inst, sizeof inst, cudaMemcpyHostToDevice));
+        OptixBuildInput ib{}; ib.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES; ib.instanceArray.instances = di; ib.instanceArray.numInstances = 1;
+        OptixAccelBufferSizes is{}; OX(optixAccelComputeMemoryUsage(o.ctx, &ao, &ib, 1, &is));
+        CUdeviceptr itmp, ia; CK(cudaMalloc((void **)&itmp, is.tempSizeInBytes)); CK(cudaMalloc((void **)&ia, is.outputSizeInBytes));
+        OptixTraversableHandle hi; OX(optixAccelBuild(o.ctx, 0, &ao, &ib, 1, itmp, is.tempSizeInBytes, ia, is.outputSizeInBytes, &hi, nullptr, 0)); CK(cudaDeviceSynchronize());
+        printf("ias 0x%llx size %zu handle 0x%llx\n", (unsigned long long)ia, (size_t)is.outputSizeInBytes, (unsigned long long)hi);
+        if (bvh_out) { std::vector<char> b(is.outputSizeInBytes); CK(cudaMemcpy(b.data(), (void *)ia, b.size(), cudaMemcpyDeviceToHost)); FILE *f = fopen((std::string(bvh_out) + ".ias").c_str(), "wb"); fwrite(b.data(), 1, b.size(), f); fclose(f); }
+        h = hi;
+    }
     if (bvh_out) {
         std::vector<char> b(o.gas_size);
         CK(cudaMemcpy(b.data(), (void *)o.gas, o.gas_size, cudaMemcpyDeviceToHost));
@@ -114,7 +127,7 @@ static Optix run_optix(const std::string &ptx_path, const char *bvh_out)
     // module, program groups, pipeline
     OptixModuleCompileOptions mo{};
     OptixPipelineCompileOptions po{};
-    po.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
+    po.traversableGraphFlags = ias ? OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING : OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
     po.numPayloadValues = 1;
     po.numAttributeValues = 2;
     po.pipelineLaunchParamsVariableName = "params";
@@ -174,7 +187,7 @@ int main(int argc, char **argv)
 {
     if (argc < 2) { fprintf(stderr, "usage: see header of memdump.cu\n"); return 1; }
     std::string mode = argv[1], method = "attr", out, bvh;
-    unsigned long long addr = 0, rel = 0; size_t len = 256; bool self = false, optix = true, use_rel = false, fn = false; long long fnrel = 0;
+    unsigned long long addr = 0, rel = 0; size_t len = 256; bool self = false, ias = false, optix = true, use_rel = false, fn = false; long long fnrel = 0;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--method") method = argv[++i];
@@ -184,6 +197,7 @@ int main(int argc, char **argv)
         else if (a == "--bvh") bvh = argv[++i];
         else if (a == "--rel") { rel = strtoull(argv[++i], 0, 0); use_rel = true; }
         else if (a == "--self") self = true;
+        else if (a == "--ias") ias = true;
         else if (a == "--fn") fn = true;
         else if (a == "--fnrel") { fn = true; fnrel = strtoll(argv[++i], 0, 0); }
         else if (a == "--no-optix") optix = false;
@@ -192,7 +206,7 @@ int main(int argc, char **argv)
     std::string exe = argv[0], dir = exe.substr(0, exe.find_last_of('/') + 1);
 
     Optix o{};
-    if (optix || mode == "launch") o = run_optix(dir + "memdump_dev.ptx", bvh.empty() ? nullptr : bvh.c_str());
+    if (optix || mode == "launch") o = run_optix(dir + "memdump_dev.ptx", bvh.empty() ? nullptr : bvh.c_str(), ias);
     unsigned long long pa = probe_addr();
     printf("probe_fn at 0x%llx\n", pa);   // printed every run: tells us if the layout is the same run to run
     fflush(stdout);
