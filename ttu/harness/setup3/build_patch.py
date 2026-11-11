@@ -226,7 +226,7 @@ def set_regcount(data, secname, regs):
 
 
 def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out=95, preclk=False, barnops=1,
-          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False):
+          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False):
     d = open(dump, 'rb').read()
     at = lambda o: d[DUMP_BASE + o:DUMP_BASE + o + 16]
     group = [at(GROUP_AT + 16 * k) for k in range(GROUP_LEN)]
@@ -275,6 +275,31 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     phys = lambda r: P.get(r, r)
     in_ptr = 6 if remap else IN_PTR
 
+    # --hoist / --coal (ablations of the persistent kernel, default off: every other build is unchanged).
+    # Extra registers: at --regs > 72 from R72 up (pair and quad aligned), else from the free low registers (the declared
+    # count must stay >= highest register + 3, so R69 is the highest usable one at 72).
+    HZERO = [2, 3, 32, 33, 44, 45]                       # constant words that are zero (fill 'zero'): restored with a MOV from RZ
+    HCOPY = [34, 35, 58, 59, 60, 61, 62, 63, 68, 69, 70, 71]   # constant words the group's TTULDs overwrite: loaded once, restored from copies
+    HKEEP = [54, 55, 90]                                 # constant words nothing overwrites: loaded once into their own registers
+    CO = {}
+    if hoist or coal:
+        assert slim and loop and outer and remap, '--hoist/--coal: need the persistent loop kernel (--slim --remap --loop --outer)'
+        assert not lean and not smfilter, '--hoist/--coal: not with --lean or --smfilter'
+    if hoist and coal and not (regs and regs > 72):
+        raise AssertionError('--hoist --coal needs --regs 96 (20 extra registers)')
+    if hoist or coal:
+        hi = regs and regs > 72
+        if hi:
+            CO.update(Q=72, O2=76, OG=78, R16=79)
+            CO['copy'] = list(range(80, 80 + len(HCOPY)))
+        else:
+            CO.update(Q=48, O2=46, OG=2, R16=3)
+            CO['copy'] = [69, 59, 57, 56, 55, 54, 52, 51, 50, 49, 48, 47][:len(HCOPY)]
+            assert not (hoist and coal)
+        if coal: CO['copy'] = CO['copy'] if hoist else []
+    COPY = dict(zip(HCOPY, CO.get('copy', []))) if hoist else {}
+    assert len(set(COPY.values())) == len(COPY)
+
     p = BinaryPatcher(binpath)
     sec = [s for s in p.sections if s[2].endswith('.ttu_one')]
     assert len(sec) == 1
@@ -294,23 +319,32 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     assert ex
 
     body = list(prologue)
+    CP = 60 if remap else 94
     OW, OC, OS, OWI = 0, 53, 58, 1     # --outer: R0 = 4 (word to byte factor), R53 = outer rounds left, R58 = stride in words, R1 = word index of the lane's current record
     outer_at = None
     if outer:
         assert loop and slim and remap and 1 <= outer <= 1 << 20 and 0 < stride < 1 << 32 and not sync, '--outer: needs --loop (slim, remap), no --sync, --stride words per round'
         body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=15))   # R4 = gid x 96 comes from an IMAD in the nvcc prologue (fast forwarding to the next IMAD only): wait for it
         body.append(mov_reg(OWI, 4, 6))
+        if coal: body.append(mov_reg(CO['OG'], 0, 6))                  # global lane id (R0 is overwritten next)
         body.append(iadd3_imm(OW, 255, 4, 6))
         body.append(iadd3_imm(OC, 255, outer, 6))
         body.append(iadd3_imm(OS, 255, stride, 6))
+        if coal: body.append(iadd3_imm(CO['R16'], 255, 16, 6))       # byte factor of the 16 byte records
+        if hoist:   # constants loaded once, before the outer loop: the 12 the group overwrites into spare copy registers, the 3 nothing overwrites into their own
+            body.append(imov_cbank(CP, 0x160, 11))
+            body.append(imov_cbank(CP + 1, 0x164, 11))
+            for r in HCOPY: body.append(field(field(ldg[r], 16, COPY[r]), 24, CP))
+            for r in HKEEP: body.append(field(field(ldg[r], 16, phys(r)), 24, CP))
+            body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
         outer_at = len(body)
         body.append(ctrl.write_control(field(field(field(wide[0], 16, in_ptr), 24, OWI), 64, OW), stall=6))
         body.append(ctrl.write_control(field(field(field(wide[1], 16, 4), 24, OWI), 64, OW), stall=8))
+        if coal: body.append(ctrl.write_control(field(field(field(wide[1], 16, CO['O2']), 24, CO['OG']), 64, CO['R16']), stall=8))   # out + 16 x lane record index
     else:
         body.append(field(wide[0], 16, in_ptr))
         body.append(wide[1])
-    CP = 60 if remap else 94                     # --slim: pointer pair to the shared record (R94:R95 plain, R60:R61 remapped)
-    if slim:
+    if slim and not hoist:                       # --slim: pointer pair to the shared record (R94:R95 plain, R60:R61 remapped; set before the outer loop with --hoist)
         assert not (clock or gtime or preclk or sr133 or twice or thrash or dualgo or sleepb), '--slim: no timing and no second session (SM filter allowed)'
         body.append(imov_cbank(CP, 0x160, 11))
         body.append(imov_cbank(CP + 1, 0x164, 11))
@@ -331,6 +365,12 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     if outer:   # the lanes of a warp leave the resume loop at different rounds: reconverge after it (as nvcc does around a divergent loop) so the next ray starts with a full warp
         bssy_at = len(body); body.append(NOP_PLACEHOLDER)
     for r in INPUTS:
+        if hoist and r in HKEEP:
+            continue                                                     # loaded once before the outer loop
+        if hoist and r in HCOPY:
+            body.append(mov_reg(phys(r), COPY[r], 1)); continue          # restored from its copy
+        if hoist and r in HZERO:
+            body.append(mov_reg(phys(r), 255, 1)); continue              # a zero word
         if slim and r in RAYSLOT:
             body.append(ldg_ca(phys(r), in_ptr, 4 * RAYSLOT[r]) if lean else field(field(field(ldg[r], 16, phys(r)), 24, in_ptr), 40, 4 * RAYSLOT[r], 24))
         elif slim:
@@ -414,7 +454,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         for d, sx in ((2, 70), (3, 71), (70, 56), (71, 57), (32, 58), (33, 59), (44, 60), (45, 61)):   # next query's 0x190 / 0x180 words
             body.append(mov_reg(ph(d), ph(sx), 1))
         for r in RELOAD:
-            body.append(reload_ld(r))
+            body.append(mov_reg(phys(r), COPY[r], 1) if hoist and r in COPY else reload_ld(r))
         body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))       # reloads done
         body.append(lop3_abs_imm(4, ph(17), LB45, 0x7fffffff, 4))                   # @P4 tmax = |best t| in 0x50 and 0xD0
         body.append(lop3_abs_imm(4, ph(31), LB45, 0x7fffffff, 6))
@@ -443,22 +483,32 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
                          | ({GT_START, GT_START + 1, GT_END, GT_END + 1} if gtime else set()))
     else:
         outputs = [r for r in OUTPUTS if r <= max_out]
-    for r in outputs:
+    if coal:   # one 16 byte record per ray: hit word R3, primitive R44, t R45, rounds left; consecutive lanes write consecutive 16 byte records
+        Q = CO['Q']
+        for k, src in enumerate((phys(3), phys(44), phys(45), LCNT)):
+            body.append(mov_reg(Q + k, src, 1))
+        body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=6))
+        st128 = (W(field(field(stg[3], 24, CO['O2']), 32, Q)) & ~(0xffffff << 40)) | (1 << 74)    # STG.E.STRONG.SYS -> .128 (bit 74: the size field of nvcc's STG.E.128)
+        body.append(B(st128))
+        outputs = []
+    else:
+      for r in outputs:
         if slim:
             body.append(field(field(stg[r], 32, phys(r)), 40, 4 * (outputs.index(r) if lean else SLIM_OUT.index(r)), 24))
         else:
             body.append(field(stg[r], 32, phys(r)))
-    if loop:   # rounds left (K - rounds run) to slot 13
+    if loop and not coal:   # rounds left (K - rounds run) to slot 13
         body.append(field(field(stg[3], 32, LCNT), 40, 4 * 13, 24))
     if outer and os.environ.get('OUTER_DBG'):   # diagnostic: slot 13 = R1 (record word index), slot 12 = R0
         body.append(field(field(stg[3], 32, 1), 40, 4 * 13, 24)); body.append(field(field(stg[3], 32, 0), 40, 4 * 12, 24))
     if outer:  # next record of this lane: wait until every store has read its registers (read barrier 5), then loop
-        n_st = len(outputs) + 1
+        n_st = 1 if coal else len(outputs) + 1
         n_st += 2 if os.environ.get('OUTER_DBG') else 0
         for k in range(n_st):
             body[-1 - k] = ctrl.write_control(body[-1 - k], rd_bar=5)
         body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
         body.append(iadd3_imm(OWI, OWI, stride, 6))
+        if coal: body.append(iadd3_imm(CO['OG'], CO['OG'], stride // 96, 6))
         body.append(iadd3_imm(OC, OC, 0xffffffff, 6))
         body.append(lop3(0, OC, 255, 255, 0xfc, 13, pu=5))                        # P5 = rounds left
         body.append(bra_back(5, 7, (outer_at - (len(body) + 1)) * 16))             # @P5 BRA L0
@@ -469,7 +519,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     for (off, _), b in zip(ins, body):
         p.data[off:off + 16] = b
     if regs:
-        top = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5] + ([CP + 1] if slim else []) + ([LCNT + 1] if loop else []))
+        top = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5] + ([CP + 1] if slim else []) + ([LCNT + 1] if loop else []) + ([CO['Q'] + 3, CO['O2'] + 1, CO['OG'], CO['R16']] if coal else []) + list(COPY.values()))
         assert regs % 8 == 0 and regs >= top + 3 and regs <= 255, 'declared count must be >= highest register + 3 (R%d)' % top
         old = set_regcount(p.data, sec[0][2], regs)
         assert old, 'register count field not found'
@@ -477,7 +527,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     p.save(out)
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
     top_reg = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5] + ([LCNT + 1] if loop else []))
-    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'loop': loop, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0, 'lean': lean, 'outer': outer, 'outer_at': outer_at, 'stride': stride,
+    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'loop': loop, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0, 'lean': lean, 'hoist': hoist, 'coal': coal, 'outer': outer, 'outer_at': outer_at, 'stride': stride,
             'inputs': INPUTS, 'outputs': outputs, 'in_ptr': in_ptr}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
     used = g0 + GROUP_LEN + 1 + int(clock) + len(outputs) + 2
@@ -504,6 +554,8 @@ if __name__ == '__main__':
     a.add_argument('--outer', type=int, default=0, help='persistent kernel: each lane runs OUTER records (record k of lane g = k x STRIDE words + g x 96), needs --loop')
     a.add_argument('--stride', type=int, default=0, help='with --outer: words between a lane\'s records = lanes in the grid x 96')
     a.add_argument('--lean', action='store_true', help='--slim: ray word loads L1 allocating (LDG.CA), only 3 result words + rounds left stored (less harness traffic)')
+    a.add_argument('--hoist', action='store_true', help='ablation: constant input words loaded once before the outer loop (needs --loop --outer)')
+    a.add_argument('--coal', action='store_true', help='ablation: one coalesced 16 byte STG.128 record per ray (host --coal)')
     a.add_argument('--alu', type=int, default=0, help='Throughput_4: N dependent IADD3 (stall 15) after the group, before the wait')
     a.add_argument('--sleepb', type=int, default=0, help='with --smfilter: @P1 NANOSLEEP NS before the start clock (the block on SM B waits)')
     a.add_argument('--sr133', action='store_true', help='Interface_5: S2R SR_TTU_TICKET_INFO into R88 before TTUOPEN and R89 after the group')
@@ -513,5 +565,5 @@ if __name__ == '__main__':
     a.add_argument('--preclk', action='store_true', help='diagnostic clock read into R88:R89 before the barrier')
     a.add_argument('--barnops', type=int, default=8, help='NOPs after the barrier: a warp issues a few instructions past BAR.SYNC before it stalls (8 measured enough at 20 warps)')
     x = a.parse_args()
-    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else '') + ('a%d' % x.alu if x.alu else '') + ('l' if x.slim else '') + ('L%d' % x.loop if x.loop else '') + ('o%ds%d' % (x.outer, x.stride) if x.outer else '') + ('N' if x.lean else ''),
-          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean)
+    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else '') + ('a%d' % x.alu if x.alu else '') + ('l' if x.slim else '') + ('L%d' % x.loop if x.loop else '') + ('o%ds%d' % (x.outer, x.stride) if x.outer else '') + ('N' if x.lean else '') + ('H' if x.hoist else '') + ('C' if x.coal else ''),
+          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean, x.hoist, x.coal)

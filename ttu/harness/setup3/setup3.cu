@@ -214,7 +214,7 @@ int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
-    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
@@ -225,6 +225,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--blockrays")) blockrays = 1;
         else if (!strcmp(argv[a], "--outer") && a + 1 < argc) outer = atoi(argv[++a]);   // build_patch --outer R binary: R records per lane (ray k G W 32 + lane of round k); needs --blockrays
         else if (!strcmp(argv[a], "--quick")) quick = 1;
+        else if (!strcmp(argv[a], "--coal")) coal = 1;   // build_patch --coal binary: one 16 byte record per ray at out + 16 x (record index): words R3, R44, R45, rounds left
         else if (!strcmp(argv[a], "--lean")) lean = 1;   // build_patch --lean binary: stored words are R3 R44 R45 (slots 0..2) and rounds left (slot 13)   // only the last launch is copied back and checked (the others are timed only)
         else if (!strcmp(argv[a], "--dump-ref") && a + 1 < argc) dump_ref = argv[++a];   // OptiX reference result of every ray (RefOut, 32 bytes each)
         else if (!strcmp(argv[a], "--slim")) slim = 1;
@@ -688,8 +689,16 @@ int main(int argc, char **argv)
         float launch_ms = 0; CK(cudaEventElapsedTime(&launch_ms, ev_a, ev_b));
         if (quick && it < repeat - 1) { fprintf(jf, "%s{\"ms\": %.6f}", it ? ", " : "", launch_ms); continue; }
         std::vector<unsigned> o(out.size());
+        if (coal) {   // compact records (4 words per ray): copy only those, then expand in place, last record first (record i is written at N i >= 4 i, never over a compact record still to be read)
+            CK(cudaMemcpy(o.data(), dout, TOTAL * 16, cudaMemcpyDeviceToHost));
+            for (size_t i = TOTAL; i-- > 0;) {
+                unsigned w[4]; memcpy(w, &o[i * 4], 16); unsigned *Q = &o[i * N];
+                for (int k = 0; k < 14; ++k) Q[k] = 0x77777777u;
+                Q[3] = w[0]; Q[44] = w[1]; Q[45] = w[2]; Q[84] = w[3];
+            }
+        } else
         CK(cudaMemcpy(o.data(), dout, o.size() * 4, cudaMemcpyDeviceToHost));
-        if (slim) {   // 13 result words in slots 0..12 -> standard register slots (3, 32, 33, 44, 45, 56..61, 70, 71)
+        if (slim && !coal) {   // 13 result words in slots 0..12 -> standard register slots (3, 32, 33, 44, 45, 56..61, 70, 71)
             static const int SO[14] = {3, 32, 33, 44, 45, 56, 57, 58, 59, 60, 61, 70, 71, 84};
             const int nso = loopk ? 14 : 13;
             for (size_t i = 0; i < TOTAL; ++i) {
