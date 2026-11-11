@@ -130,7 +130,7 @@ def plot(p, rows, g):
     b.axvline(71, color="gray", lw=0.6, ls=":")
     b.set_yscale("log"); b.set_xlabel("active SMs (blocks)"); b.set_ylabel("aggregate rays per cycle"); b.set_title("Whole GPU: lines = model (scenes never fitted)")
     b.legend(fontsize=7)
-    fig.tight_layout(); fig.savefig(os.path.join(os.path.dirname(__file__), "..", "notes", "figures", "model_v1_error.png"), dpi=140)
+    fig.tight_layout(rect=(0, 0.09, 1, 1)); fig.text(0.5, 0.01, "Right panel: the whole GPU fit used partly harness limited data (our kernel, not an RT core limit); tri1 (one triangle) is not modeled.", ha="center", fontsize=8, wrap=True); fig.savefig(os.path.join(os.path.dirname(__file__), "..", "notes", "figures", "model_v1_error.png"), dpi=140)
 
 
 if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "report":
