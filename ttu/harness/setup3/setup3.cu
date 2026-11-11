@@ -46,6 +46,7 @@
 //                    before any TTU instruction (run with --sms of the block's SM, 0 for one block);
 //                    tmax0: they run the group with tmax 0 (riding along like finished resume lanes);
 //                    tneg: tmax -1; empty: tmin 1, tmax 0
+//     --wactive L0,L1,..  per warp lane counts (warp w of each block gets list[w mod size]); overrides --active
 //     --sched M      run the whole ray set with a scheduler instead of chunks (needs an --smfilter build,
 //                    --sms 0,0): round 0 = every ray from its start node in file order; then rounds of
 //                    resumed queries (tmax = best t, 0x180/0x190 from the returned pending entries) until no
@@ -214,7 +215,7 @@ int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
-    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
@@ -233,6 +234,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--loop")) loopk = 1;   // build_patch --loop binary: 14 result words (slot 13 = rounds left), results are final
         else if (!strcmp(argv[a], "--dump-final") && a + 1 < argc) dump_final = argv[++a];
         else if (!strcmp(argv[a], "--active") && a + 1 < argc) active = atoi(argv[++a]);
+        else if (!strcmp(argv[a], "--wactive") && a + 1 < argc) { char *s = argv[++a]; for (char *t = strtok(s, ","); t; t = strtok(nullptr, ",")) wact.push_back(atoi(t)); }   // Throughput_9: active lanes of warp w of every block = list[w mod size] (masked lanes need an --smfilter build)
         else if (!strcmp(argv[a], "--sched") && a + 1 < argc) sched = argv[++a];
         else if (!strcmp(argv[a], "--idle") && a + 1 < argc) idle = argv[++a];
         else if (!strcmp(argv[a], "--warps") && a + 1 < argc) warps = atoi(argv[++a]);
@@ -622,7 +624,7 @@ int main(int argc, char **argv)
             R[8] = fbits(y.o[2]); R[9] = fbits(y.tmin); R[10] = fbits(y.d[0]); R[11] = fbits(y.d[1]); R[12] = fbits(y.d[2]); R[13] = fbits(y.tmax); R[14] = fbits(y.o[0]); R[15] = fbits(y.o[1]);
             R[18] = sm_a; R[19] = sm_b;
             if (!smset.empty()) { const size_t gid = i % ((size_t)blocks * LANES); const unsigned bb = (unsigned)(gid / LANES), sm = bb < 71 ? 2 * bb : 2 * (bb - 71) + 1; R[18] = R[19] = smset.count(sm) ? sm : 0xffffffffu; }
-            if ((int)(i % 32) >= active && idle == "mask") R[18] = R[19] = 0xffffffffu;
+            if ((int)(i % 32) >= (wact.empty() ? active : wact[(i / 32 % warps) % wact.size()]) && idle == "mask") R[18] = R[19] = 0xffffffffu;
             continue;
         }
         R[12] = fbits(y.o[2]); R[13] = fbits(y.tmin); R[82] = fbits(y.o[0]); R[83] = fbits(y.o[1]);   // 0x40
@@ -644,7 +646,7 @@ int main(int argc, char **argv)
         }
         R[18] = sm_a; R[19] = sm_b;   // used only by --smfilter builds
         if (!smset.empty()) { const unsigned bb = (unsigned)((i % ((size_t)blocks * LANES)) / LANES), sm = bb < 71 ? 2 * bb : 2 * (bb - 71) + 1; R[18] = R[19] = smset.count(sm) ? sm : 0xffffffffu; }
-        if ((int)(i % 32) >= active) {
+        if ((int)(i % 32) >= (wact.empty() ? active : wact[(i / 32 % warps) % wact.size()])) {
             if (idle == "mask") R[18] = R[19] = 0xffffffffu;   // no SM has this id: the lane exits before TTUOPEN
             else if (idle == "tmax0") R[17] = R[31] = 0u;        // tmax 0 in 0x50 and 0xD0
             else if (idle == "tneg") R[17] = R[31] = fbits(-1.f); // tmax -1
