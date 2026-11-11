@@ -16,6 +16,21 @@
 #include <string>
 #include <vector>
 #include "morton_params.h"
+#include <cub/device/device_radix_sort.cuh>
+// ---- GPU sort path (net Morton speedup): key generation, CUB radix sort, ray gather, result scatter ----
+__device__ static unsigned spread3(unsigned x[3], int k) { unsigned c = 0; for (int b = 0; b < k; ++b) for (int a = 0; a < 3; ++a) c |= ((x[a] >> b) & 1u) << (3 * b + a); return c; }
+__device__ static unsigned quant(float v, float lo, float hi, int k) { if (!(hi > lo) || k == 0) return 0; float f = (v - lo) / (hi - lo) * (float)(1 << k); int q = (int)f; return (unsigned)(q < 0 ? 0 : (q > (1 << k) - 1 ? (1 << k) - 1 : q)); }
+struct Bounds { float olo[3], ohi[3], dlo[3], dhi[3]; };
+__global__ void keygen(const Ray8 *r, unsigned *key, unsigned *idx, unsigned n, Bounds b, int ko, int kd, int dmajor)
+{
+    unsigned i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= n) return;
+    Ray8 x = r[i]; unsigned qo[3], qd[3];
+    for (int a = 0; a < 3; ++a) { qo[a] = quant(x.o[a], b.olo[a], b.ohi[a], ko); qd[a] = quant(x.d[a], b.dlo[a], b.dhi[a], kd); }
+    unsigned co = spread3(qo, ko), cd = spread3(qd, kd);
+    key[i] = dmajor ? ((cd << (3 * ko)) | co) : ((co << (3 * kd)) | cd); idx[i] = i;
+}
+__global__ void gather(const Ray8 *src, const unsigned *idx, Ray8 *dst, unsigned n) { unsigned i = blockIdx.x * blockDim.x + threadIdx.x; if (i < n) dst[i] = src[idx[i]]; }
+__global__ void scatter(const RefOut *src, const unsigned *idx, RefOut *dst, unsigned n) { unsigned i = blockIdx.x * blockDim.x + threadIdx.x; if (i < n) dst[idx[i]] = src[i]; }
 #define CK(x) do { cudaError_t e_ = (x); if (e_ != cudaSuccess) { fprintf(stderr, "%s:%d %s: %s\n", __FILE__, __LINE__, #x, cudaGetErrorString(e_)); exit(2); } } while (0)
 #define OX(x) do { OptixResult r_ = (x); if (r_ != OPTIX_SUCCESS) { fprintf(stderr, "%s:%d %s: %d\n", __FILE__, __LINE__, #x, (int)r_); exit(2); } } while (0)
 struct Tri { float3 a, b, c; };
@@ -78,6 +93,41 @@ int main(int argc, char **argv)
     cudaEvent_t a0, a1; CK(cudaEventCreate(&a0)); CK(cudaEventCreate(&a1));
     for (size_t mi = 0; mi < modes.size(); ++mi) {
         const std::string &md = modes[mi]; int rg = 0;
+        if (md.rfind("gsort:", 0) == 0) {   // gsort:KO:KD:o|d  (key = origin code major / direction code major)
+            int ko, kd; char mj; if (sscanf(md.c_str(), "gsort:%d:%d:%c", &ko, &kd, &mj) != 3 || 3 * (ko + kd) > 32) { fprintf(stderr, "gsort mode\n"); return 2; }
+            Bounds bd; for (int a = 0; a < 3; ++a) { bd.olo[a] = bd.dlo[a] = 1e30f; bd.ohi[a] = bd.dhi[a] = -1e30f; }
+            for (auto &r : rays) for (int a = 0; a < 3; ++a) { bd.olo[a] = fminf(bd.olo[a], r.o[a]); bd.ohi[a] = fmaxf(bd.ohi[a], r.o[a]); bd.dlo[a] = fminf(bd.dlo[a], r.d[a]); bd.dhi[a] = fmaxf(bd.dhi[a], r.d[a]); }
+            const int bits = 3 * (ko + kd); const unsigned thr = 256, blk = (NR + thr - 1) / thr;
+            Ray8 *rs; RefOut *os; unsigned *k0, *k1, *i0, *i1; void *tmpb = nullptr; size_t tb = 0;
+            CK(cudaMalloc((void **)&rs, NR * sizeof(Ray8))); CK(cudaMalloc((void **)&os, NR * sizeof(RefOut)));
+            CK(cudaMalloc((void **)&k0, NR * 4)); CK(cudaMalloc((void **)&k1, NR * 4)); CK(cudaMalloc((void **)&i0, NR * 4)); CK(cudaMalloc((void **)&i1, NR * 4));
+            cub::DeviceRadixSort::SortPairs(nullptr, tb, k0, k1, i0, i1, (int)NR, 0, bits); CK(cudaMalloc(&tmpb, tb));
+            const Ray8 *orig = prm.rays; RefOut *origout = prm.out;
+            Params pg = prm; pg.rays = rs; pg.out = os;
+            CK(cudaMemcpy((void *)dprm, &pg, sizeof pg, cudaMemcpyHostToDevice));
+            OptixShaderBindingTable sbt{}; sbt.raygenRecord = drec;
+            sbt.missRecordBase = drec + 3 * sizeof(Rec); sbt.missRecordStrideInBytes = sizeof(Rec); sbt.missRecordCount = 1;
+            sbt.hitgroupRecordBase = drec + 4 * sizeof(Rec); sbt.hitgroupRecordStrideInBytes = sizeof(Rec); sbt.hitgroupRecordCount = 1;
+            cudaEvent_t e[6]; for (auto &x : e) CK(cudaEventCreate(&x));
+            std::vector<float> tk, ts, tg, tt, tc;
+            for (int k = -1; k < repeat; ++k) {
+                CK(cudaEventRecord(e[0]));
+                keygen<<<blk, thr>>>(orig, k0, i0, NR, bd, ko, kd, mj == 'd'); CK(cudaEventRecord(e[1]));
+                cub::DeviceRadixSort::SortPairs(tmpb, tb, k0, k1, i0, i1, (int)NR, 0, bits); CK(cudaEventRecord(e[2]));
+                gather<<<blk, thr>>>(orig, i1, rs, NR); CK(cudaEventRecord(e[3]));
+                OX(optixLaunch(pipe, 0, dprm, sizeof pg, &sbt, NR, 1, 1)); CK(cudaEventRecord(e[4]));
+                scatter<<<blk, thr>>>(os, i1, origout, NR); CK(cudaEventRecord(e[5])); CK(cudaEventSynchronize(e[5]));
+                if (k < 0) continue; float x;
+                CK(cudaEventElapsedTime(&x, e[0], e[1])); tk.push_back(x); CK(cudaEventElapsedTime(&x, e[1], e[2])); ts.push_back(x);
+                CK(cudaEventElapsedTime(&x, e[2], e[3])); tg.push_back(x); CK(cudaEventElapsedTime(&x, e[3], e[4])); tt.push_back(x); CK(cudaEventElapsedTime(&x, e[4], e[5])); tc.push_back(x);
+            }
+            std::vector<RefOut> out(NR); CK(cudaMemcpy(out.data(), origout, NR * sizeof(RefOut), cudaMemcpyDeviceToHost));
+            FILE *f = fopen((outp + "." + std::to_string(mi) + ".bin").c_str(), "wb"); fwrite(out.data(), sizeof(RefOut), NR, f); fclose(f);
+            auto pr = [](const char *n, std::vector<float> &v) { printf("\"%s\":[", n); for (size_t q = 0; q < v.size(); ++q) printf("%s%.5f", q ? "," : "", v[q]); printf("]"); };
+            printf("{\"mode\":\"%s\",\"rays\":%u,", md.c_str(), NR); pr("keygen", tk); printf(","); pr("sort", ts); printf(","); pr("gather", tg); printf(","); pr("ms", tt); printf(","); pr("scatter", tc); printf("}\n"); fflush(stdout);
+            for (auto &x : e) cudaEventDestroy(x); cudaFree(rs); cudaFree(os); cudaFree(k0); cudaFree(k1); cudaFree(i0); cudaFree(i1); cudaFree(tmpb);
+            continue;
+        }
         if (md == "plain") rg = 0; else if (md == "serpost") rg = 2;
         else if (md.rfind("ser:", 0) == 0) {
             rg = 1; const size_t c = md.rfind(':'); const std::string hf = md.substr(4, c - 4); prm.bits = (unsigned)atoi(md.c_str() + c + 1);
