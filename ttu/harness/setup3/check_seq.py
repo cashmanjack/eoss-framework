@@ -98,8 +98,13 @@ def check(path):
         if meta.get('loop'):   # --loop: exactly one backward BRA, after the group, back to TTUOPEN; never inside a session
             off = lambda b: (W(b) >> 32) & 0xffffffff
             tgt = [i + 1 + ((off(body[i]) - (1 << 32 if off(body[i]) >> 31 else 0)) // 16) for i in brs]
-            ok('B15 loop: exactly one branch, a backward BRA to the TTUOPEN, after the CLOSE',
-               len(brs) == 1 and low12(body[brs[0]]) == 0x947 and tgt == [g] and brs[0] > g + 18, (brs, tgt, g))
+            if meta.get('outer'):   # --outer: the inner branch to the TTUOPEN, then one outer backward BRA to the record's pointer set up, after the stores
+                oa = meta['outer_at']
+                ok('B15 outer: two backward BRAs: to the TTUOPEN (after the CLOSE), then to the record start (after the stores, before EXIT)',
+                   len(brs) == 2 and all(low12(body[i]) == 0x947 for i in brs) and tgt == [g, oa] and brs[0] > g + 18 and brs[1] > brs[0] and oa < g, (brs, tgt, g, oa))
+            else:
+                ok('B15 loop: exactly one branch, a backward BRA to the TTUOPEN, after the CLOSE',
+                   len(brs) == 1 and low12(body[brs[0]]) == 0x947 and tgt == [g] and brs[0] > g + 18, (brs, tgt, g))
             ok('B15 loop: no TTU instruction after the branch target other than the one group', len(hits) == 19, len(hits))
         else:
             ok('B15 no branch anywhere before EXIT', not brs)

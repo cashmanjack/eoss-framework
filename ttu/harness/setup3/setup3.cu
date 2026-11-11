@@ -206,11 +206,15 @@ static std::vector<std::vector<Tri>> make_scene(const std::string &s)
     fprintf(stderr, "unknown scene %s\n", s.c_str()); exit(2);
 }
 
+#include <chrono>
+static double now_s() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+static double t_start = now_s();
+#define TICK(name) do { if (getenv("SETUP3_TICKS")) fprintf(stderr, "tick %7.2f s  %s\n", now_s() - t_start, name); } while (0)
 int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
-    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
@@ -219,6 +223,10 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--smem") && a + 1 < argc) smem = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--optix-repeat") && a + 1 < argc) optix_repeat = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--blockrays")) blockrays = 1;
+        else if (!strcmp(argv[a], "--outer") && a + 1 < argc) outer = atoi(argv[++a]);   // build_patch --outer R binary: R records per lane (ray k G W 32 + lane of round k); needs --blockrays
+        else if (!strcmp(argv[a], "--quick")) quick = 1;
+        else if (!strcmp(argv[a], "--lean")) lean = 1;   // build_patch --lean binary: stored words are R3 R44 R45 (slots 0..2) and rounds left (slot 13)   // only the last launch is copied back and checked (the others are timed only)
+        else if (!strcmp(argv[a], "--dump-ref") && a + 1 < argc) dump_ref = argv[++a];   // OptiX reference result of every ray (RefOut, 32 bytes each)
         else if (!strcmp(argv[a], "--slim")) slim = 1;
         else if (!strcmp(argv[a], "--sm-set") && a + 1 < argc) { char *s = argv[++a]; for (char *t = strtok(s, ","); t; t = strtok(nullptr, ",")) smset.insert((unsigned)atoi(t)); }   // with an --smfilter build: only blocks whose SM (block b -> SM 2b, b < 71, then 2(b-71)+1) is in the set run
         else if (!strcmp(argv[a], "--loop")) loopk = 1;   // build_patch --loop binary: 14 result words (slot 13 = rounds left), results are final
@@ -351,10 +359,10 @@ int main(int argc, char **argv)
     if (!strncmp(argv[3], "file:", 5)) {
         FILE *rf = fopen(argv[3] + 5, "rb"); if (!rf) { fprintf(stderr, "cannot read %s\n", argv[3] + 5); return 2; }
         std::vector<Ray8> fr; Ray8 y; while (fread(&y, sizeof y, 1, rf) == 1) fr.push_back(y); fclose(rf);
-        if (fr.empty() || fr.size() % (blockrays ? (size_t)blocks * LANES : (size_t)LANES) || fr.size() > (1u << 20)) { fprintf(stderr, "file: ray count %zu is not a multiple of %u\n", fr.size(), LANES); return 2; }
+        if (fr.empty() || fr.size() % (blockrays ? (size_t)blocks * LANES * outer : (size_t)LANES) || fr.size() > (1u << 24)) { fprintf(stderr, "file: ray count %zu is not a multiple of %u\n", fr.size(), LANES); return 2; }
         rays = fr;
     }
-    const unsigned CH = blockrays ? blocks * LANES : LANES, NR = (unsigned)rays.size(), nchunks = NR / CH;
+    const unsigned CH = blockrays ? blocks * LANES * outer : LANES, NR = (unsigned)rays.size(), nchunks = NR / CH;
     for (unsigned i = 0; i < LANES && (rnd || rnd1 || rndz); ++i) {
         std::mt19937 g(777 + (rnd1 ? 0 : i)); std::uniform_real_distribution<float> U(-1.f, 1.f);
         float3 o{U(g), U(g), U(g)}, d;
@@ -396,6 +404,8 @@ int main(int argc, char **argv)
     std::vector<RefOut> ref(NR); unsigned long long inst[18];
     CK(cudaMemcpy(ref.data(), prm.out, NR * sizeof(RefOut), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(inst, prm.inst, sizeof inst, cudaMemcpyDeviceToHost));
+    TICK("optix reference done");
+    if (dump_ref) { FILE *rf = fopen(dump_ref, "wb"); fwrite(ref.data(), sizeof(RefOut), NR, rf); fclose(rf); }
 
     // ---- checks before anything is handed to ttu_one -----------------------------
     const unsigned long long A = inst[0];
@@ -461,12 +471,13 @@ int main(int argc, char **argv)
     fprintf(jf, " \"start_path\": \"%s\",", use_path ? (start_path.empty() ? "root" : start_path.c_str()) : "");
     fprintf(jf, " \"start_off\": \"0x%llx\", \"start\": \"0x%llx\", \"start_flags\": \"0x%x\", \"start_ok\": %s,\n",
             start_off < 0 ? off : (unsigned long long)start_off, start, start_flags, start_ok ? "true" : "false");
+    const unsigned NJ = quick ? std::min(NR, 4096u) : NR;   // --quick: JSON lists only the first 4096 rays
     fprintf(jf, " \"lane_rays\": [");
-    for (unsigned i = 0; i < NR; ++i)
+    for (unsigned i = 0; i < NJ; ++i)
         fprintf(jf, "%s[%.9g,%.9g,%.9g,%.9g,%.9g,%.9g]", i ? "," : "", rays[i].o[0], rays[i].o[1], rays[i].o[2], rays[i].d[0], rays[i].d[1], rays[i].d[2]);
     fprintf(jf, "],\n");
     fprintf(jf, " \"warps\": %d, \"flush_mb\": %g, \"fill\": \"%s\",\n \"ref\": [", warps, flush_mb, argv[4]);
-    for (unsigned i = 0; i < NR; ++i)
+    for (unsigned i = 0; i < NJ; ++i)
         fprintf(jf, "%s{\"hit\": %u, \"t\": \"0x%08x\", \"prim\": %u, \"u\": \"0x%08x\", \"v\": \"0x%08x\", \"front\": %u, \"gas_index\": %u}",
                 i ? ", " : "", ref[i].hit, fbits(ref[i].t), ref[i].prim, fbits(ref[i].u), fbits(ref[i].v), ref[i].front, ref[i].gas_index);
     fprintf(jf, "]");
@@ -599,11 +610,20 @@ int main(int argc, char **argv)
         jf = fopen(cn.c_str(), "w"); fprintf(jf, "{\"pass\": %d, \"chunk\": %d", pass, chunk);
     } else fprintf(jf, ",\n \"pass\": 0, \"chunk\": 0");
     // ---- register image for ttu_one: word r of a thread = register r --------------
-    const size_t TOTAL = (size_t)blocks * LANES;
+    const size_t TOTAL = (size_t)blocks * LANES * outer;   // records (--outer: R per lane)
     std::vector<unsigned> in(TOTAL * N, 0), out(TOTAL * N, 0x77777777u);
+    unsigned unk_vals[6] = {0, 0, 0, 0, 0, 0};
+    if (random_fill) { std::mt19937 lane_rng(12345); for (int k = 0; k < 6; ++k) unk_vals[k] = (unsigned)lane_rng(); }
     for (size_t i = 0; i < TOTAL; ++i) {
         unsigned *R = &in[i * N];
         const Ray8 &y = blockrays ? crays[i] : crays[i % LANES];
+        if (slim && i > 0) {   // slim: only record 0 carries the lane invariant words (broadcast loads); the others only their ray words and SM words
+            R[8] = fbits(y.o[2]); R[9] = fbits(y.tmin); R[10] = fbits(y.d[0]); R[11] = fbits(y.d[1]); R[12] = fbits(y.d[2]); R[13] = fbits(y.tmax); R[14] = fbits(y.o[0]); R[15] = fbits(y.o[1]);
+            R[18] = sm_a; R[19] = sm_b;
+            if (!smset.empty()) { const size_t gid = i % ((size_t)blocks * LANES); const unsigned bb = (unsigned)(gid / LANES), sm = bb < 71 ? 2 * bb : 2 * (bb - 71) + 1; R[18] = R[19] = smset.count(sm) ? sm : 0xffffffffu; }
+            if ((int)(i % 32) >= active && idle == "mask") R[18] = R[19] = 0xffffffffu;
+            continue;
+        }
         R[12] = fbits(y.o[2]); R[13] = fbits(y.tmin); R[82] = fbits(y.o[0]); R[83] = fbits(y.o[1]);   // 0x40
         R[16] = fbits(y.d[2]); R[17] = fbits(y.tmax); R[14] = fbits(y.d[0]); R[15] = fbits(y.d[1]);   // 0x50
         R[52] = R[12]; R[53] = R[13]; R[56] = R[82]; R[57] = R[83];                                   // 0xC0
@@ -613,8 +633,7 @@ int main(int argc, char **argv)
         const unsigned long long st0 = ray_start[(size_t)chunk * LANES + i % LANES];
         R[70] = (unsigned)(st0 >> 7); R[71] = ((unsigned)(st0 >> 32) >> 7) | start_flags;           // 0x180 low (root by default)
         unsigned *unk[6] = {&R[32], &R[33], &R[2], &R[3], &R[44], &R[45]};                             // 0x180 high, 0x190
-        std::mt19937 lane_rng(12345);   // same pattern in every lane
-        for (auto u : unk) *u = random_fill ? (unsigned)lane_rng() : 0u;
+        for (int k = 0; k < 6; ++k) *unk[k] = unk_vals[k];   // same pattern in every lane
         R[68] = words[0]; R[69] = words[1]; R[62] = words[2]; R[63] = words[3];                        // 0
         R[60] = words[4]; R[61] = words[5]; R[58] = words[6]; R[59] = words[7];                        // 0x80
         R[90] = 0;   // (R37 & 0xC0000) for flags NONE: P0 true
@@ -623,7 +642,7 @@ int main(int argc, char **argv)
             for (int k = 0; k < 8; ++k) R[8 + k] = tmp[k];
         }
         R[18] = sm_a; R[19] = sm_b;   // used only by --smfilter builds
-        if (!smset.empty()) { const unsigned bb = (unsigned)(i / LANES), sm = bb < 71 ? 2 * bb : 2 * (bb - 71) + 1; R[18] = R[19] = smset.count(sm) ? sm : 0xffffffffu; }
+        if (!smset.empty()) { const unsigned bb = (unsigned)((i % ((size_t)blocks * LANES)) / LANES), sm = bb < 71 ? 2 * bb : 2 * (bb - 71) + 1; R[18] = R[19] = smset.count(sm) ? sm : 0xffffffffu; }
         if ((int)(i % 32) >= active) {
             if (idle == "mask") R[18] = R[19] = 0xffffffffu;   // no SM has this id: the lane exits before TTUOPEN
             else if (idle == "tmax0") R[17] = R[31] = 0u;        // tmax 0 in 0x50 and 0xD0
@@ -631,6 +650,7 @@ int main(int argc, char **argv)
             else { R[13] = R[53] = fbits(1.f); R[17] = R[31] = 0u; }   // empty: tmin 1 > tmax 0 (0x40 and 0xC0 high)
         }
     }
+    TICK("input image built");
     unsigned char *tbuf = nullptr;
     if (thrash) {
         CK(cudaMalloc((void **)&tbuf, 4u << 20)); CK(cudaMemset(tbuf, 0, 4u << 20));
@@ -656,7 +676,7 @@ int main(int argc, char **argv)
     fprintf(jf, ",\n \"blocks\": %d, \"sms\": [%u, %u],\n \"launches\": [", blocks, sm_a, sm_b);
     bool same_all = true;
     for (int it = 0; it < repeat && e == cudaSuccess; ++it) {
-        CK(cudaMemcpy(dout, out.data(), out.size() * 4, cudaMemcpyHostToDevice));
+        if (quick) CK(cudaMemset(dout, 0x77, out.size() * 4)); else CK(cudaMemcpy(dout, out.data(), out.size() * 4, cudaMemcpyHostToDevice));
         if (fn) { flush_read<<<142 * 8, 256>>>(fbuf, fn, sink); CK(cudaGetLastError()); }
         if (smem && it == 0) CK(cudaFuncSetAttribute(ttu_one, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
         CK(cudaEventRecord(ev_a));
@@ -666,6 +686,7 @@ int main(int argc, char **argv)
         if (e == cudaSuccess) e = cudaDeviceSynchronize();
         if (e != cudaSuccess) break;
         float launch_ms = 0; CK(cudaEventElapsedTime(&launch_ms, ev_a, ev_b));
+        if (quick && it < repeat - 1) { fprintf(jf, "%s{\"ms\": %.6f}", it ? ", " : "", launch_ms); continue; }
         std::vector<unsigned> o(out.size());
         CK(cudaMemcpy(o.data(), dout, o.size() * 4, cudaMemcpyDeviceToHost));
         if (slim) {   // 13 result words in slots 0..12 -> standard register slots (3, 32, 33, 44, 45, 56..61, 70, 71)
@@ -673,16 +694,17 @@ int main(int argc, char **argv)
             const int nso = loopk ? 14 : 13;
             for (size_t i = 0; i < TOTAL; ++i) {
                 unsigned *Q = &o[i * N]; unsigned w[14]; memcpy(w, Q, nso * 4);
-                for (int k = 0; k < N; ++k) Q[k] = 0x77777777u;
-                for (int k = 0; k < nso; ++k) Q[SO[k]] = w[k];
+                for (int k = 0; k < 14; ++k) Q[k] = 0x77777777u;   // slots 14.. were never stored: still the fill
+                if (lean) { Q[3] = w[0]; Q[44] = w[1]; Q[45] = w[2]; Q[84] = w[13]; }
+                else for (int k = 0; k < nso; ++k) Q[SO[k]] = w[k];
             }
         }
-        if (it == 0) first = o;
+        if (it == 0 && !quick) first = o;
         std::vector<int> rb;
         for (int b = 0; b < blocks; ++b) if (ran(o, b)) rb.push_back(b);
-        if (it == 0) ran_blocks = rb;
+        if (it == 0 || quick) ran_blocks = rb;
         bool same = rb == ran_blocks;
-        for (int b : rb)
+        if (!quick) for (int b : rb)
             for (unsigned i = 0; i < LANES; ++i)
                 for (int r : {2, 3, 30, 31, 32, 33, 34, 35, 44, 45, 56, 57, 58, 59, 60, 61, 62, 63, 68, 69, 70, 71})
                     same &= o[((size_t)b * LANES + i) * N + r] == first[((size_t)b * LANES + i) * N + r];
@@ -712,8 +734,9 @@ int main(int argc, char **argv)
             if (bi == 0) wc0 = wc;
         }
         fprintf(jf, "], \"warp_clk\": [%s], \"lanes_equal\": %s}", wc0.c_str(), lanes_eq ? "true" : "false");
-        if (it == repeat - 1) out = o;
+        if (it == repeat - 1) out = std::move(o);
     }
+    TICK("launches done");
     fprintf(jf, "]");
     if (dump_final && e == cudaSuccess) {   // per lane final words of the last launch: R3 R32 R33 R44 R45 R56..R61 R70 R71 R84 (15 u32)
         static const int DF[15] = {3, 32, 33, 44, 45, 56, 57, 58, 59, 60, 61, 70, 71, 84, 3};
@@ -788,6 +811,7 @@ int main(int argc, char **argv)
         int maxq = 0; size_t ndone = 0; for (unsigned i = 0; i < LANES; ++i) { maxq = std::max(maxq, nq[i]); ndone += done[i]; }
         printf("resume: %s, %d round(s), %zu of %u lanes finished, max queries per lane %d\n", cudaGetErrorString(e), round, ndone, LANES, maxq);
     }
+    TICK("final dump done");
     printf("ttu_one: %s (%d launch(es) x %d block(s) x %d warp(s), %zu block(s) ran, flush %g MB, results same every launch: %d)\n",
            cudaGetErrorString(e), repeat, blocks, warps, ran_blocks.size(), flush_mb, same_all);
     const int b0 = ran_blocks.empty() ? 0 : ran_blocks[0];
