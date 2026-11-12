@@ -31,6 +31,25 @@ __global__ void keygen(const Ray8 *r, unsigned *key, unsigned *idx, unsigned n, 
 }
 __global__ void gather(const Ray8 *src, const unsigned *idx, Ray8 *dst, unsigned n) { unsigned i = blockIdx.x * blockDim.x + threadIdx.x; if (i < n) dst[i] = src[idx[i]]; }
 __global__ void scatter(const RefOut *src, const unsigned *idx, RefOut *dst, unsigned n) { unsigned i = blockIdx.x * blockDim.x + threadIdx.x; if (i < n) dst[idx[i]] = src[i]; }
+__global__ void shade_kernel(const Ray8 *in, const RefOut *h, const float *tris, Ray8 *nb, Ray8 *sh, float4 *acc, unsigned n)
+{
+    unsigned i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= n) return;
+    const RefOut o = h[i]; const Ray8 r = in[i]; Ray8 a{}, b{}; float4 c = make_float4(0, 0, 0, 0);
+    if (o.hit) {
+        const float *t = tris + 9ull * o.prim; const float ux = t[3] - t[0], uy = t[4] - t[1], uz = t[5] - t[2], vx = t[6] - t[0], vy = t[7] - t[1], vz = t[8] - t[2];
+        float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx; const float il = rsqrtf(nx * nx + ny * ny + nz * nz + 1e-30f); nx *= il; ny *= il; nz *= il;
+        if (nx * r.d[0] + ny * r.d[1] + nz * r.d[2] > 0.f) { nx = -nx; ny = -ny; nz = -nz; }
+        unsigned s = i * 747796405u + 2891336453u; s = ((s >> ((s >> 28) + 4)) ^ s) * 277803737u; const float u1 = (s >> 8) * (1.f / 16777216.f); s = s * 747796405u + 2891336453u; s = ((s >> ((s >> 28) + 4)) ^ s) * 277803737u; const float u2 = (s >> 8) * (1.f / 16777216.f);
+        const float rr = sqrtf(u1), ph = 6.2831853f * u2, x = rr * cosf(ph), y = rr * sinf(ph), z = sqrtf(fmaxf(0.f, 1.f - u1));
+        const float ax = fabsf(nx) > 0.9f ? 0.f : 1.f, ay = fabsf(nx) > 0.9f ? 1.f : 0.f; float tx = ay * nz, ty = -ax * nz, tz = ax * ny - ay * nx; const float it = rsqrtf(tx * tx + ty * ty + tz * tz + 1e-30f); tx *= it; ty *= it; tz *= it;
+        const float bx = ny * tz - nz * ty, by = nz * tx - nx * tz, bz = nx * ty - ny * tx;
+        const float p0 = r.o[0] + o.t * r.d[0], p1 = r.o[1] + o.t * r.d[1], p2 = r.o[2] + o.t * r.d[2];
+        a.o[0] = p0 + 1e-4f * nx; a.o[1] = p1 + 1e-4f * ny; a.o[2] = p2 + 1e-4f * nz; a.d[0] = x * tx + y * bx + z * nx; a.d[1] = x * ty + y * by + z * ny; a.d[2] = x * tz + y * bz + z * nz; a.tmax = 1e16f;
+        b = a; b.d[0] = 0.3f; b.d[1] = 0.8f; b.d[2] = 0.5f;
+        c = make_float4(0.5f * (nx + 1.f), 0.5f * (ny + 1.f), 0.5f * (nz + 1.f), 1.f);
+    }
+    nb[i] = a; sh[i] = b; acc[i] = c;
+}
 #define CK(x) do { cudaError_t e_ = (x); if (e_ != cudaSuccess) { fprintf(stderr, "%s:%d %s: %s\n", __FILE__, __LINE__, #x, cudaGetErrorString(e_)); exit(2); } } while (0)
 #define OX(x) do { OptixResult r_ = (x); if (r_ != OPTIX_SUCCESS) { fprintf(stderr, "%s:%d %s: %d\n", __FILE__, __LINE__, #x, (int)r_); exit(2); } } while (0)
 struct Tri { float3 a, b, c; };
@@ -41,10 +60,12 @@ int main(int argc, char **argv)
 {
     if (argc < 7) { fprintf(stderr, "usage\n"); return 2; }
     const char *dump_gas = nullptr, *dump_tris = nullptr; std::vector<std::string> modes;
-    const int n_tri = atoi(argv[2]); const std::string outp = argv[4]; const int repeat = atoi(argv[5]);
+    const char *scene_file = (!strncmp(argv[2], "file:", 5)) ? argv[2] + 5 : nullptr; const char *info_file = nullptr;
+    const int n_tri = scene_file ? 0 : atoi(argv[2]); const std::string outp = argv[4]; const int repeat = atoi(argv[5]);
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--dump-gas") && a + 1 < argc) dump_gas = argv[++a];
         else if (!strcmp(argv[a], "--dump-tris") && a + 1 < argc) dump_tris = argv[++a];
+        else if (!strcmp(argv[a], "--info") && a + 1 < argc) info_file = argv[++a];
         else modes.push_back(argv[a]);
     }
     auto rays = read_bin<Ray8>(argv[3]); const unsigned NR = (unsigned)rays.size();
@@ -54,7 +75,8 @@ int main(int argc, char **argv)
     const float e = 3.f / std::cbrt((float)n_tri);
     std::mt19937 g(1234); std::uniform_real_distribution<float> U(-1.f, 1.f);
     std::vector<Tri> v; v.reserve(n_tri);
-    for (int i = 0; i < n_tri; ++i) {
+    if (scene_file) { v = read_bin<Tri>(scene_file); fprintf(stderr, "scene file %s: %zu triangles\n", scene_file, v.size()); }
+    for (int i = 0; i < (scene_file ? 0 : n_tri); ++i) {
         const float3 c{U(g), U(g), U(g)};
         auto pt = [&]() { return float3{c.x + 0.5f * e * U(g), c.y + 0.5f * e * U(g), c.z + 0.5f * e * U(g)}; };
         v.push_back({pt(), pt(), pt()});
@@ -69,6 +91,7 @@ int main(int argc, char **argv)
     CUdeviceptr tmp, gas; CK(cudaMalloc((void **)&tmp, bs.tempSizeInBytes)); CK(cudaMalloc((void **)&gas, bs.outputSizeInBytes));
     OptixTraversableHandle h; OX(optixAccelBuild(ctx, 0, &ao, &bi, 1, tmp, bs.tempSizeInBytes, gas, bs.outputSizeInBytes, &h, nullptr, 0));
     CK(cudaDeviceSynchronize()); CK(cudaFree((void *)tmp));
+    if (info_file) { FILE *f = fopen(info_file, "w"); fprintf(f, "{\"triangles\": %zu, \"gas_bytes\": %zu, \"temp_bytes\": %zu}\n", v.size(), bs.outputSizeInBytes, bs.tempSizeInBytes); fclose(f); }
     if (dump_gas) { std::vector<char> b(bs.outputSizeInBytes); CK(cudaMemcpy(b.data(), (void *)gas, b.size(), cudaMemcpyDeviceToHost)); FILE *f = fopen(dump_gas, "wb"); fwrite(b.data(), 1, b.size(), f); fclose(f); }
     // pipeline with three raygens
     OptixModuleCompileOptions mo{}; OptixPipelineCompileOptions po{};
@@ -76,15 +99,16 @@ int main(int argc, char **argv)
     po.pipelineLaunchParamsVariableName = "params"; po.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE;
     std::string ptx = read_file(argv[1]); char log[4096]; size_t ls = sizeof log; OptixModule m;
     OX(optixModuleCreate(ctx, &mo, &po, ptx.c_str(), ptx.size(), log, &ls, &m));
-    OptixProgramGroupOptions go{}; OptixProgramGroupDesc d[5] = {};
+    OptixProgramGroupOptions go{}; OptixProgramGroupDesc d[6] = {};
     const char *rgn[3] = {"__raygen__plain", "__raygen__ser", "__raygen__serpost"};
     for (int k = 0; k < 3; ++k) { d[k].kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN; d[k].raygen.module = m; d[k].raygen.entryFunctionName = rgn[k]; }
     d[3].kind = OPTIX_PROGRAM_GROUP_KIND_MISS; d[3].miss.module = m; d[3].miss.entryFunctionName = "__miss__ms";
     d[4].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP; d[4].hitgroup.moduleCH = m; d[4].hitgroup.entryFunctionNameCH = "__closesthit__ch";
-    OptixProgramGroup pg[5]; ls = sizeof log; OX(optixProgramGroupCreate(ctx, d, 5, &go, log, &ls, pg));
-    OptixPipelineLinkOptions lo{}; lo.maxTraceDepth = 1; OptixPipeline pipe; ls = sizeof log; OX(optixPipelineCreate(ctx, &po, &lo, pg, 5, log, &ls, &pipe));
+    d[5].kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN; d[5].raygen.module = m; d[5].raygen.entryFunctionName = "__raygen__any";
+    OptixProgramGroup pg[6]; ls = sizeof log; OX(optixProgramGroupCreate(ctx, d, 6, &go, log, &ls, pg));
+    OptixPipelineLinkOptions lo{}; lo.maxTraceDepth = 1; OptixPipeline pipe; ls = sizeof log; OX(optixPipelineCreate(ctx, &po, &lo, pg, 6, log, &ls, &pipe));
     struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) Rec { char h[OPTIX_SBT_RECORD_HEADER_SIZE]; };
-    Rec rec[5]; for (int k = 0; k < 5; ++k) OX(optixSbtRecordPackHeader(pg[k], &rec[k]));
+    Rec rec[6]; for (int k = 0; k < 6; ++k) OX(optixSbtRecordPackHeader(pg[k], &rec[k]));
     CUdeviceptr drec; CK(cudaMalloc((void **)&drec, sizeof rec)); CK(cudaMemcpy((void *)drec, rec, sizeof rec, cudaMemcpyHostToDevice));
     Params prm{}; prm.handle = h; prm.n = NR;
     CK(cudaMalloc((void **)&prm.rays, NR * sizeof(Ray8))); CK(cudaMemcpy((void *)prm.rays, rays.data(), NR * sizeof(Ray8), cudaMemcpyHostToDevice));
@@ -128,7 +152,14 @@ int main(int argc, char **argv)
             for (auto &x : e) cudaEventDestroy(x); cudaFree(rs); cudaFree(os); cudaFree(k0); cudaFree(k1); cudaFree(i0); cudaFree(i1); cudaFree(tmpb);
             continue;
         }
-        if (md == "plain") rg = 0; else if (md == "serpost") rg = 2;
+        if (md == "shade") {   // minimal shading stand in on the hits of the last plain/any mode in prm.out: tri fetch, normal, cosine bounce + shadow ray + accumulator write; timed only
+            Ray8 *nb, *sh; float4 *acc; CK(cudaMalloc((void **)&nb, NR * sizeof(Ray8))); CK(cudaMalloc((void **)&sh, NR * sizeof(Ray8))); CK(cudaMalloc((void **)&acc, NR * sizeof(float4)));
+            const unsigned thr = 256, blk = (NR + thr - 1) / thr; std::vector<float> ms;
+            for (int k = -1; k < repeat; ++k) { CK(cudaEventRecord(a0)); shade_kernel<<<blk, thr>>>(prm.rays, prm.out, (const float *)dv, nb, sh, acc, NR); CK(cudaEventRecord(a1)); CK(cudaEventSynchronize(a1)); float x; CK(cudaEventElapsedTime(&x, a0, a1)); if (k >= 0) ms.push_back(x); }
+            printf("{\"mode\":\"shade\",\"rays\":%u,\"ms\":[", NR); for (size_t k = 0; k < ms.size(); ++k) printf("%s%.5f", k ? "," : "", ms[k]); printf("]}\n"); fflush(stdout);
+            cudaFree(nb); cudaFree(sh); cudaFree(acc); continue;
+        }
+        if (md == "plain") rg = 0; else if (md == "serpost") rg = 2; else if (md == "any") rg = 5;
         else if (md.rfind("ser:", 0) == 0) {
             rg = 1; const size_t c = md.rfind(':'); const std::string hf = md.substr(4, c - 4); prm.bits = (unsigned)atoi(md.c_str() + c + 1);
             auto hv = read_bin<unsigned>(hf.c_str()); if (hv.size() != NR) { fprintf(stderr, "hints size\n"); return 2; }

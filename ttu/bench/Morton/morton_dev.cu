@@ -46,6 +46,18 @@ extern "C" __global__ void __raygen__serpost()
     params.out[i] = o;
 }
 
+extern "C" __global__ void __raygen__any()
+{
+    const unsigned i = optixGetLaunchIndex().x;
+    if (i >= params.n) return;
+    const Ray8 r = params.rays[i];
+    unsigned hit = 0, tb = 0, prim = 0, u = 0, v = 0, front = 0, gi = 0;
+    optixTrace(params.handle, make_float3(r.o[0], r.o[1], r.o[2]), make_float3(r.d[0], r.d[1], r.d[2]),
+               r.tmin, r.tmax, 0.f, OptixVisibilityMask(255), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT, 0, 1, 0, hit, tb, prim, u, v, front, gi);
+    RefOut o; o.hit = hit; o.t = 0.f; o.prim = 0; o.u = 0.f; o.v = 0.f; o.front = 0; o.gas_index = 0; o.pad = 0;
+    params.out[i] = o;
+}
+
 extern "C" __global__ void __miss__ms() { optixSetPayload_0(0u); }
 
 extern "C" __global__ void __closesthit__ch()
