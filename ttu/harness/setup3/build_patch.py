@@ -226,7 +226,7 @@ def set_regcount(data, secname, regs):
 
 
 def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out=95, preclk=False, barnops=1,
-          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False):
+          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False, lean_ld=False, lean_st=False):
     d = open(dump, 'rb').read()
     at = lambda o: d[DUMP_BASE + o:DUMP_BASE + o + 16]
     group = [at(GROUP_AT + 16 * k) for k in range(GROUP_LEN)]
@@ -358,7 +358,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         assert 1 <= loop <= 64
     def reload_ld(r):
         if r in RAYSLOT:
-            if lean: return ldg_ca(phys(r), in_ptr, 4 * RAYSLOT[r])
+            if lean or lean_ld: return ldg_ca(phys(r), in_ptr, 4 * RAYSLOT[r])
             return field(field(field(ldg[r], 16, phys(r)), 24, in_ptr), 40, 4 * RAYSLOT[r], 24)
         return field(field(ldg[r], 16, phys(r)), 24, CP)
     bssy_at = None
@@ -372,7 +372,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         if hoist and r in HZERO:
             body.append(mov_reg(phys(r), 255, 1)); continue              # a zero word
         if slim and r in RAYSLOT:
-            body.append(ldg_ca(phys(r), in_ptr, 4 * RAYSLOT[r]) if lean else field(field(field(ldg[r], 16, phys(r)), 24, in_ptr), 40, 4 * RAYSLOT[r], 24))
+            body.append(ldg_ca(phys(r), in_ptr, 4 * RAYSLOT[r]) if (lean or lean_ld) else field(field(field(ldg[r], 16, phys(r)), 24, in_ptr), 40, 4 * RAYSLOT[r], 24))
         elif slim:
             body.append(field(field(ldg[r], 16, phys(r)), 24, CP))
         else:
@@ -473,7 +473,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     if sr133:
         body.append(s2r_sr(89, 0x85))             # SR_TTU_TICKET_INFO after the group closed
         body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
-    if slim and lean:    # --lean: only hit flag (R3), primitive (R44), t (R45) and the rounds left are stored (slots 0, 1, 2, 13)
+    if slim and (lean or lean_st):    # --lean / --lean-st: only hit flag (R3), primitive (R44), t (R45) and the rounds left are stored (slots 0, 1, 2, 13)
         outputs = [3, 44, 45]
     elif slim:
         outputs = list(SLIM_OUT)
@@ -494,7 +494,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     else:
       for r in outputs:
         if slim:
-            body.append(field(field(stg[r], 32, phys(r)), 40, 4 * (outputs.index(r) if lean else SLIM_OUT.index(r)), 24))
+            body.append(field(field(stg[r], 32, phys(r)), 40, 4 * (outputs.index(r) if (lean or lean_st) else SLIM_OUT.index(r)), 24))
         else:
             body.append(field(stg[r], 32, phys(r)))
     if loop and not coal:   # rounds left (K - rounds run) to slot 13
@@ -554,6 +554,8 @@ if __name__ == '__main__':
     a.add_argument('--outer', type=int, default=0, help='persistent kernel: each lane runs OUTER records (record k of lane g = k x STRIDE words + g x 96), needs --loop')
     a.add_argument('--stride', type=int, default=0, help='with --outer: words between a lane\'s records = lanes in the grid x 96')
     a.add_argument('--lean', action='store_true', help='--slim: ray word loads L1 allocating (LDG.CA), only 3 result words + rounds left stored (less harness traffic)')
+    a.add_argument('--lean-ld', action='store_true', help='only the L1 allocating ray loads of --lean (stores as the default build)')
+    a.add_argument('--lean-st', action='store_true', help='only the 3 result words + rounds left of --lean (loads as the default build; host needs --lean)')
     a.add_argument('--hoist', action='store_true', help='ablation: constant input words loaded once before the outer loop (needs --loop --outer)')
     a.add_argument('--coal', action='store_true', help='ablation: one coalesced 16 byte STG.128 record per ray (host --coal)')
     a.add_argument('--alu', type=int, default=0, help='Throughput_4: N dependent IADD3 (stall 15) after the group, before the wait')
@@ -565,5 +567,5 @@ if __name__ == '__main__':
     a.add_argument('--preclk', action='store_true', help='diagnostic clock read into R88:R89 before the barrier')
     a.add_argument('--barnops', type=int, default=8, help='NOPs after the barrier: a warp issues a few instructions past BAR.SYNC before it stalls (8 measured enough at 20 warps)')
     x = a.parse_args()
-    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else '') + ('a%d' % x.alu if x.alu else '') + ('l' if x.slim else '') + ('L%d' % x.loop if x.loop else '') + ('o%ds%d' % (x.outer, x.stride) if x.outer else '') + ('N' if x.lean else '') + ('H' if x.hoist else '') + ('C' if x.coal else ''),
-          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean, x.hoist, x.coal)
+    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else '') + ('a%d' % x.alu if x.alu else '') + ('l' if x.slim else '') + ('L%d' % x.loop if x.loop else '') + ('o%ds%d' % (x.outer, x.stride) if x.outer else '') + ('N' if x.lean else '') + ('Nl' if x.lean_ld else '') + ('Ns' if x.lean_st else '') + ('H' if x.hoist else '') + ('C' if x.coal else ''),
+          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean, x.hoist, x.coal, x.lean_ld, x.lean_st)
