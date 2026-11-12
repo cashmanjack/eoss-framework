@@ -121,7 +121,7 @@ template <int TYPE>
 __device__ void compute_body(int parity, int limit, const volatile int *stop, unsigned long long *iters, unsigned long long *resident, const uint4 *buf, size_t nbuf)
 {
     __shared__ int ok; __shared__ unsigned my_sm;
-    if (threadIdx.x == 0) { const unsigned s = smid_(); my_sm = s; ok = parity < 0 || (int)(s & 1) == parity; if (ok && atomicAdd(&resident[s], 1ull) >= (unsigned long long)limit) { atomicAdd(&resident[s], 0xffffffffffffffffull); ok = 0; } }   // at most LIMIT resident blocks per SM: the rest exit at once
+    if (threadIdx.x == 0) { const unsigned s = smid_(); my_sm = s; ok = parity < 0 || (int)(s & 1) == parity; if (ok && atomicAdd(&resident[s], 1ull) >= (unsigned long long)limit) { atomicAdd(&resident[s], (unsigned long long)-1); ok = 0; } }   // at most LIMIT resident blocks per SM: the rest exit at once
     __syncthreads(); if (!ok) return;
     float x = 1.f + threadIdx.x * 1e-3f, y = 0.5f; unsigned long long it = 0; uint4 acc = make_uint4(0, 0, 0, 0);
     const size_t base = ((size_t)blockIdx.x * 2048) % (nbuf > 4096 ? nbuf - 2048 : 1);
