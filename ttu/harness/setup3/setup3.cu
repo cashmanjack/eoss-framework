@@ -71,6 +71,9 @@
 #include <optix_function_table_definition.h>
 #include <optix_stubs.h>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -111,6 +114,28 @@ extern "C" __global__ void ttu_one(const unsigned *in, unsigned *out)
 }
 
 // Plain kernel: read a large buffer so the L2 (96 MB) holds none of the BVH.
+
+// ---- TPC_1 (--compute TYPE:PLACE): a persistent plain CUDA compute kernel on a second stream; it owns SMs by parity (blocks on other SMs exit at once) ----
+__device__ static unsigned smid_() { unsigned s; asm volatile("mov.u32 %0, %%smid;" : "=r"(s)); return s; }
+template <int TYPE>
+__device__ void compute_body(int parity, int limit, const volatile int *stop, unsigned long long *iters, unsigned long long *resident, const uint4 *buf, size_t nbuf)
+{
+    __shared__ int ok; __shared__ unsigned my_sm;
+    if (threadIdx.x == 0) { const unsigned s = smid_(); my_sm = s; ok = parity < 0 || (int)(s & 1) == parity; if (ok && atomicAdd(&resident[s], 1ull) >= (unsigned long long)limit) { atomicAdd(&resident[s], 0xffffffffffffffffull); ok = 0; } }   // at most LIMIT resident blocks per SM: the rest exit at once
+    __syncthreads(); if (!ok) return;
+    float x = 1.f + threadIdx.x * 1e-3f, y = 0.5f; unsigned long long it = 0; uint4 acc = make_uint4(0, 0, 0, 0);
+    const size_t base = ((size_t)blockIdx.x * 2048) % (nbuf > 4096 ? nbuf - 2048 : 1);
+    size_t pos = ((size_t)blockIdx.x * blockDim.x + threadIdx.x) * 7919 % (nbuf ? nbuf : 1);
+    while (!*stop) {
+        if (TYPE == 0) { for (int k = 0; k < 1024; ++k) { x = fmaf(x, 1.0000001f, y); y = fmaf(y, 0.9999999f, x); } }
+        else if (TYPE == 1) { for (int k = 0; k < 32; ++k) { const uint4 v = buf[base + ((threadIdx.x + 256 * k) & 2047)]; acc.x += v.x; acc.y ^= v.y; acc.z += v.z; acc.w ^= v.w; } }
+        else { for (int k = 0; k < 32; ++k) { const uint4 v = buf[pos]; pos += 1024 * 256 + 1; if (pos >= nbuf) pos -= nbuf; acc.x += v.x; acc.y ^= v.y; acc.z += v.z; acc.w ^= v.w; } }
+        ++it; if (threadIdx.x == 0) atomicAdd(&iters[my_sm], 1ull);
+    }
+    if (x == 12345.f || acc.x == 0xdeadbeef) iters[1023] += 1;
+}
+template <int TYPE> __global__ void __maxnreg__(24) compute_k(int p, int lim, const volatile int *s, unsigned long long *i, unsigned long long *r, const uint4 *b, size_t n) { compute_body<TYPE>(p, lim, s, i, r, b, n); }
+
 extern "C" __global__ void flush_read(const uint4 *p, size_t n, unsigned *sink)
 {
     unsigned acc = 0;
@@ -215,7 +240,7 @@ int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
-    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
@@ -234,6 +259,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--loop")) loopk = 1;   // build_patch --loop binary: 14 result words (slot 13 = rounds left), results are final
         else if (!strcmp(argv[a], "--dump-final") && a + 1 < argc) dump_final = argv[++a];
         else if (!strcmp(argv[a], "--active") && a + 1 < argc) active = atoi(argv[++a]);
+        else if (!strcmp(argv[a], "--compute") && a + 1 < argc) compute_opt = argv[++a];   // TPC_1: TYPE:PLACE, TYPE alu|l1|mem, PLACE all (2 blocks of 384 threads on every SM) | odd (4 blocks on each odd SM); runs on a second stream during the ttu_one launches
         else if (!strcmp(argv[a], "--wactive") && a + 1 < argc) { char *s = argv[++a]; for (char *t = strtok(s, ","); t; t = strtok(nullptr, ",")) wact.push_back(atoi(t)); }   // Throughput_9: active lanes of warp w of every block = list[w mod size] (masked lanes need an --smfilter build)
         else if (!strcmp(argv[a], "--sched") && a + 1 < argc) sched = argv[++a];
         else if (!strcmp(argv[a], "--idle") && a + 1 < argc) idle = argv[++a];
@@ -678,18 +704,43 @@ int main(int argc, char **argv)
     std::vector<int> ran_blocks;
     fprintf(jf, ",\n \"blocks\": %d, \"sms\": [%u, %u],\n \"launches\": [", blocks, sm_a, sm_b);
     bool same_all = true;
+    // compute kernel on a second stream (TPC_1)
+    cudaStream_t sc = nullptr, ss = nullptr; int *dstop = nullptr; unsigned long long *diters = nullptr, *dres = nullptr; uint4 *dcbuf = nullptr; std::thread wdog; std::atomic<bool> cdone(false); bool comp = !compute_opt.empty();
+    double calone_s = 0; unsigned long long calone_it = 0; unsigned long long res_blocks[1024]; memset(res_blocks, 0, sizeof res_blocks);
+    auto csample = [&]() -> unsigned long long { if (!comp) return 0; unsigned long long a[1024]; CK(cudaMemcpyAsync(a, diters, 1024 * 8, cudaMemcpyDeviceToHost, ss)); CK(cudaStreamSynchronize(ss)); unsigned long long t = 0; for (int q = 0; q < 142; ++q) t += a[q]; return t; };
+    auto now_s = []() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
+    if (comp) {
+        const size_t colon = compute_opt.find(':'); const std::string ctype = compute_opt.substr(0, colon), cplace = compute_opt.substr(colon + 1);
+        const int tp = ctype == "alu" ? 0 : ctype == "l1" ? 1 : ctype == "mem" ? 2 : -1; if (tp < 0 || (cplace != "all" && cplace != "odd")) { fprintf(stderr, "--compute alu|l1|mem:all|odd\n"); return 2; }
+        CK(cudaStreamCreateWithFlags(&sc, cudaStreamNonBlocking)); CK(cudaStreamCreateWithFlags(&ss, cudaStreamNonBlocking));
+        const size_t nbuf = (size_t)1 << 26;   // 1 GB of uint4
+        CK(cudaMalloc((void **)&dstop, 4)); CK(cudaMemset(dstop, 0, 4)); CK(cudaMalloc((void **)&diters, 1024 * 8)); CK(cudaMemset(diters, 0, 1024 * 8)); CK(cudaMalloc((void **)&dres, 1024 * 8)); CK(cudaMemset(dres, 0, 1024 * 8));
+        CK(cudaMalloc((void **)&dcbuf, nbuf * 16)); CK(cudaMemset(dcbuf, 1, nbuf * 16));
+        const int parity = cplace == "odd" ? 1 : -1, lim = cplace == "odd" ? 4 : 2, grid = 142 * lim * 40;
+        if (tp == 0) compute_k<0><<<grid, 384, 0, sc>>>(parity, lim, dstop, diters, dres, dcbuf, nbuf); else if (tp == 1) compute_k<1><<<grid, 384, 0, sc>>>(parity, lim, dstop, diters, dres, dcbuf, nbuf); else compute_k<2><<<grid, 384, 0, sc>>>(parity, lim, dstop, diters, dres, dcbuf, nbuf);
+        CK(cudaGetLastError());
+        wdog = std::thread([&]() { for (int k = 0; k < 250 && !cdone; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(100)); int o = 1; cudaMemcpyAsync(dstop, &o, 4, cudaMemcpyHostToDevice, ss); });   // watchdog: stop the compute kernel after 25 s
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));   // blocks settle on their SMs
+        CK(cudaMemcpy(res_blocks, dres, 1024 * 8, cudaMemcpyDeviceToHost));
+        unsigned long long be = 0, bo = 0; for (int q = 0; q < 142; ++q) (q & 1 ? bo : be) += res_blocks[q];
+        printf("compute %s: resident blocks on even SMs %llu, odd SMs %llu\n", compute_opt.c_str(), be, bo);
+        { const unsigned long long a0 = csample(); const double t0 = now_s(); std::this_thread::sleep_for(std::chrono::milliseconds(300)); const unsigned long long a1 = csample(); calone_it = a1 - a0; calone_s = now_s() - t0; }   // compute alone, before any ttu_one launch
+    }
     for (int it = 0; it < repeat && e == cudaSuccess; ++it) {
         if (quick) CK(cudaMemset(dout, 0x77, out.size() * 4)); else CK(cudaMemcpy(dout, out.data(), out.size() * 4, cudaMemcpyHostToDevice));
         if (fn) { flush_read<<<142 * 8, 256>>>(fbuf, fn, sink); CK(cudaGetLastError()); }
         if (smem && it == 0) CK(cudaFuncSetAttribute(ttu_one, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+        const unsigned long long c_before = csample(); const double w_before = now_s();
         CK(cudaEventRecord(ev_a));
         ttu_one<<<blocks, LANES, smem>>>(din, dout);
         CK(cudaEventRecord(ev_b));
         e = cudaGetLastError();                     // launch errors (e.g. too many resources)
-        if (e == cudaSuccess) e = cudaDeviceSynchronize();
+        if (e == cudaSuccess) e = comp ? cudaEventSynchronize(ev_b) : cudaDeviceSynchronize();   // with the persistent compute kernel running, only wait for this launch
         if (e != cudaSuccess) break;
+        const double w_after = now_s(); const unsigned long long c_after = csample();
         float launch_ms = 0; CK(cudaEventElapsedTime(&launch_ms, ev_a, ev_b));
-        if (quick && it < repeat - 1) { fprintf(jf, "%s{\"ms\": %.6f}", it ? ", " : "", launch_ms); continue; }
+        char cinfo[160] = ""; if (comp) snprintf(cinfo, sizeof cinfo, ", \"citers\": %llu, \"cwin_s\": %.6f", c_after - c_before, w_after - w_before);
+        if (quick && it < repeat - 1) { fprintf(jf, "%s{\"ms\": %.6f%s}", it ? ", " : "", launch_ms, cinfo); continue; }
         std::vector<unsigned> o(out.size());
         if (coal) {   // compact records (4 words per ray): copy only those, then expand in place, last record first (record i is written at N i >= 4 i, never over a compact record still to be read)
             CK(cudaMemcpy(o.data(), dout, TOTAL * 16, cudaMemcpyDeviceToHost));
@@ -721,7 +772,7 @@ int main(int argc, char **argv)
                     same &= o[((size_t)b * LANES + i) * N + r] == first[((size_t)b * LANES + i) * N + r];
         same_all &= same;
         bool lanes_eq = true;
-        fprintf(jf, "%s{\"same_as_first\": %s, \"ran\": %zu, \"ms\": %.6f, \"per_block\": [", it ? ", " : "", same ? "true" : "false", rb.size(), launch_ms);
+        fprintf(jf, "%s{\"same_as_first\": %s, \"ran\": %zu, \"ms\": %.6f%s, \"per_block\": [", it ? ", " : "", same ? "true" : "false", rb.size(), launch_ms, cinfo);
         std::string wc0;
         for (size_t bi = 0; bi < rb.size(); ++bi) {
             const int b = rb[bi];
@@ -749,6 +800,12 @@ int main(int argc, char **argv)
     }
     TICK("launches done");
     fprintf(jf, "]");
+    if (comp) {   // stop the compute kernel; resident block counts per SM parity
+        cdone = true; int one = 1; CK(cudaMemcpyAsync(dstop, &one, 4, cudaMemcpyHostToDevice, ss)); CK(cudaStreamSynchronize(ss)); CK(cudaStreamSynchronize(sc)); wdog.join();
+        unsigned long long be = 0, bo = 0; for (int q = 0; q < 142; ++q) (q & 1 ? bo : be) += res_blocks[q];
+        fprintf(jf, ",\n \"compute_alone_iters\": %llu, \"compute_alone_s\": %.6f", calone_it, calone_s);
+        fprintf(jf, ",\n \"compute\": \"%s\", \"compute_blocks_even\": %llu, \"compute_blocks_odd\": %llu", compute_opt.c_str(), be, bo);
+    }
     if (dump_final && e == cudaSuccess) {   // per lane final words of the last launch: R3 R32 R33 R44 R45 R56..R61 R70 R71 R84 (15 u32)
         static const int DF[15] = {3, 32, 33, 44, 45, 56, 57, 58, 59, 60, 61, 70, 71, 84, 3};
         FILE *df = fopen(dump_final, "wb");
