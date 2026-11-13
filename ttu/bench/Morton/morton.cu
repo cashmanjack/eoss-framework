@@ -17,6 +17,10 @@
 #include <vector>
 #include "morton_params.h"
 #include <cub/device/device_radix_sort.cuh>
+#include <nvml.h>
+#include <chrono>
+#include <thread>
+static double now_s() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 // ---- GPU sort path (net Morton speedup): key generation, CUB radix sort, ray gather, result scatter ----
 __device__ static unsigned spread3(unsigned x[3], int k) { unsigned c = 0; for (int b = 0; b < k; ++b) for (int a = 0; a < 3; ++a) c |= ((x[a] >> b) & 1u) << (3 * b + a); return c; }
 __device__ static unsigned quant(float v, float lo, float hi, int k) { if (!(hi > lo) || k == 0) return 0; float f = (v - lo) / (hi - lo) * (float)(1 << k); int q = (int)f; return (unsigned)(q < 0 ? 0 : (q > (1 << k) - 1 ? (1 << k) - 1 : q)); }
@@ -52,6 +56,17 @@ __global__ void shade_kernel(const Ray8 *in, const RefOut *h, const float *tris,
 }
 #define CK(x) do { cudaError_t e_ = (x); if (e_ != cudaSuccess) { fprintf(stderr, "%s:%d %s: %s\n", __FILE__, __LINE__, #x, cudaGetErrorString(e_)); exit(2); } } while (0)
 #define OX(x) do { OptixResult r_ = (x); if (r_ != OPTIX_SUCCESS) { fprintf(stderr, "%s:%d %s: %d\n", __FILE__, __LINE__, #x, (int)r_); exit(2); } } while (0)
+
+// ---- energy windows (NVML total energy counter, 100 ms updates): the loop runs short launches back to back, synchronizing every 20 ----
+struct Egy { nvmlDevice_t nd; bool ok = false; unsigned long long e0 = 0; double t0 = 0; unsigned long long clk_sum = 0; int clk_n = 0; long long nl = 0;
+    void begin() { char bus[32]; CK(cudaDeviceGetPCIBusId(bus, sizeof bus, 0));
+        if (nvmlInit_v2() != NVML_SUCCESS || nvmlDeviceGetHandleByPciBusId_v2(bus, &nd) != NVML_SUCCESS) { fprintf(stderr, "NVML init failed\n"); exit(3); }
+        CK(cudaDeviceSynchronize()); if (nvmlDeviceGetTotalEnergyConsumption(nd, &e0) != NVML_SUCCESS) { fprintf(stderr, "NVML energy unavailable\n"); exit(3); } t0 = now_s(); clk_sum = 0; clk_n = 0; nl = 0; }
+    void sample() { unsigned c = 0; nvmlDeviceGetClockInfo(nd, NVML_CLOCK_SM, &c); clk_sum += c; ++clk_n; }
+    void end(const char *name, unsigned rays) { CK(cudaDeviceSynchronize()); const double t1 = now_s(); unsigned long long e1 = 0; unsigned smc = 0, mc = 0, pw = 0;
+        nvmlDeviceGetTotalEnergyConsumption(nd, &e1); nvmlDeviceGetClockInfo(nd, NVML_CLOCK_SM, &smc); nvmlDeviceGetClockInfo(nd, NVML_CLOCK_MEM, &mc); nvmlDeviceGetPowerUsage(nd, &pw);
+        printf("{\"mode\":\"%s\",\"rays\":%u,\"mJ\":%llu,\"s\":%.6f,\"launches\":%lld,\"sm_mhz_mean\":%.1f,\"sm_mhz_end\":%u,\"mem_mhz\":%u,\"power_mW_end\":%u}\n", name, rays, e1 - e0, t1 - t0, nl, clk_n ? (double)clk_sum / clk_n : 0.0, smc, mc, pw); fflush(stdout); nvmlShutdown(); }
+};
 struct Tri { float3 a, b, c; };
 static std::string read_file(const char *p) { std::ifstream f(p); if (!f) { fprintf(stderr, "cannot read %s\n", p); exit(2); } std::stringstream s; s << f.rdbuf(); return s.str(); }
 template <class T> static std::vector<T> read_bin(const char *p) { FILE *f = fopen(p, "rb"); if (!f) { fprintf(stderr, "cannot read %s\n", p); exit(2); } std::vector<T> v; T x; while (fread(&x, sizeof x, 1, f) == 1) v.push_back(x); fclose(f); return v; }
@@ -117,8 +132,23 @@ int main(int argc, char **argv)
     cudaEvent_t a0, a1; CK(cudaEventCreate(&a0)); CK(cudaEventCreate(&a1));
     for (size_t mi = 0; mi < modes.size(); ++mi) {
         const std::string &md = modes[mi]; int rg = 0;
-        if (md.rfind("gsort:", 0) == 0) {   // gsort:KO:KD:o|d  (key = origin code major / direction code major)
-            int ko, kd; char mj; if (sscanf(md.c_str(), "gsort:%d:%d:%c", &ko, &kd, &mj) != 3 || 3 * (ko + kd) > 32) { fprintf(stderr, "gsort mode\n"); return 2; }
+        if (md.rfind("egy", 0) == 0 && md.rfind("egysort", 0) != 0) {   // egyidle:S (nothing runs) | egy:S (plain trace of the loaded rays, S seconds; results of the last launch to OUT.k.bin)
+            double S = atof(md.c_str() + md.find(':') + 1); Egy ey; ey.begin();
+            if (md.rfind("egyidle", 0) == 0) { while (now_s() - ey.t0 < S) { std::this_thread::sleep_for(std::chrono::milliseconds(100)); if (++ey.nl % 10 == 0) ey.sample(); } ey.nl = 0; ey.end("egyidle", 0); continue; }
+            CK(cudaMemcpy((void *)dprm, &prm, sizeof prm, cudaMemcpyHostToDevice));
+            OptixShaderBindingTable sbt{}; sbt.raygenRecord = drec;
+            sbt.missRecordBase = drec + 3 * sizeof(Rec); sbt.missRecordStrideInBytes = sizeof(Rec); sbt.missRecordCount = 1;
+            sbt.hitgroupRecordBase = drec + 4 * sizeof(Rec); sbt.hitgroupRecordStrideInBytes = sizeof(Rec); sbt.hitgroupRecordCount = 1;
+            OX(optixLaunch(pipe, 0, dprm, sizeof prm, &sbt, NR, 1, 1)); CK(cudaDeviceSynchronize()); ey.begin();
+            while (now_s() - ey.t0 < S) { for (int q = 0; q < 20; ++q) { OX(optixLaunch(pipe, 0, dprm, sizeof prm, &sbt, NR, 1, 1)); ++ey.nl; } CK(cudaDeviceSynchronize()); if (ey.nl % 200 == 0) ey.sample(); }
+            ey.end("egy", NR);
+            std::vector<RefOut> out(NR); CK(cudaMemcpy(out.data(), prm.out, NR * sizeof(RefOut), cudaMemcpyDeviceToHost));
+            FILE *f = fopen((outp + "." + std::to_string(mi) + ".bin").c_str(), "wb"); fwrite(out.data(), sizeof(RefOut), NR, f); fclose(f); continue;
+        }
+        double egy_s = 0; std::string mdg = md;
+        if (md.rfind("egysort:", 0) == 0) { egy_s = atof(md.c_str() + 8); mdg = "gsort:" + md.substr(md.find(':', 8) + 1); }   // egysort:S:KO:KD:o  = energy window over the whole GPU sort pipeline
+        if (mdg.rfind("gsort:", 0) == 0) {   // gsort:KO:KD:o|d  (key = origin code major / direction code minor)
+            int ko, kd; char mj; if (sscanf(mdg.c_str(), "gsort:%d:%d:%c", &ko, &kd, &mj) != 3 || 3 * (ko + kd) > 32) { fprintf(stderr, "gsort mode\n"); return 2; }
             Bounds bd; for (int a = 0; a < 3; ++a) { bd.olo[a] = bd.dlo[a] = 1e30f; bd.ohi[a] = bd.dhi[a] = -1e30f; }
             for (auto &r : rays) for (int a = 0; a < 3; ++a) { bd.olo[a] = fminf(bd.olo[a], r.o[a]); bd.ohi[a] = fmaxf(bd.ohi[a], r.o[a]); bd.dlo[a] = fminf(bd.dlo[a], r.d[a]); bd.dhi[a] = fmaxf(bd.dhi[a], r.d[a]); }
             const int bits = 3 * (ko + kd); const unsigned thr = 256, blk = (NR + thr - 1) / thr;
@@ -134,6 +164,16 @@ int main(int argc, char **argv)
             sbt.hitgroupRecordBase = drec + 4 * sizeof(Rec); sbt.hitgroupRecordStrideInBytes = sizeof(Rec); sbt.hitgroupRecordCount = 1;
             cudaEvent_t e[6]; for (auto &x : e) CK(cudaEventCreate(&x));
             std::vector<float> tk, ts, tg, tt, tc;
+            if (egy_s > 0) {   // energy window: keygen, sort, gather, trace, scatter back to back
+                auto pipe_once = [&]() { keygen<<<blk, thr>>>(orig, k0, i0, NR, bd, ko, kd, mj == 'd'); cub::DeviceRadixSort::SortPairs(tmpb, tb, k0, k1, i0, i1, (int)NR, 0, bits); gather<<<blk, thr>>>(orig, i1, rs, NR);
+                    OX(optixLaunch(pipe, 0, dprm, sizeof pg, &sbt, NR, 1, 1)); scatter<<<blk, thr>>>(os, i1, origout, NR); };
+                pipe_once(); CK(cudaDeviceSynchronize()); Egy ey; ey.begin();
+                while (now_s() - ey.t0 < egy_s) { for (int q = 0; q < 20; ++q) { pipe_once(); ++ey.nl; } CK(cudaDeviceSynchronize()); if (ey.nl % 200 == 0) ey.sample(); }
+                ey.end(md.c_str(), NR);
+                std::vector<RefOut> out(NR); CK(cudaMemcpy(out.data(), origout, NR * sizeof(RefOut), cudaMemcpyDeviceToHost));
+                FILE *f = fopen((outp + "." + std::to_string(mi) + ".bin").c_str(), "wb"); fwrite(out.data(), sizeof(RefOut), NR, f); fclose(f);
+                for (auto &x : e) cudaEventDestroy(x); cudaFree(rs); cudaFree(os); cudaFree(k0); cudaFree(k1); cudaFree(i0); cudaFree(i1); cudaFree(tmpb); continue;
+            }
             for (int k = -1; k < repeat; ++k) {
                 CK(cudaEventRecord(e[0]));
                 keygen<<<blk, thr>>>(orig, k0, i0, NR, bd, ko, kd, mj == 'd'); CK(cudaEventRecord(e[1]));
