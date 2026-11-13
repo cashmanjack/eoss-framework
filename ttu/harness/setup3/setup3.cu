@@ -67,6 +67,7 @@
 // back. build_patch.py rewrites its body (stage 0: no TTU code; stage 1: one
 // TTU group). Run the patched copy only through run.py.
 #include <cuda_runtime.h>
+#include <nvml.h>
 #include <optix.h>
 #include <optix_function_table_definition.h>
 #include <optix_stubs.h>
@@ -246,11 +247,13 @@ int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
+    double energy_s = 0;
     bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
         else if (!strcmp(argv[a], "--repeat") && a + 1 < argc) repeat = atoi(argv[++a]);
+        else if (!strcmp(argv[a], "--energy") && a + 1 < argc) energy_s = atof(argv[++a]);   // after the checked launches: run the same launch (and flush) back to back for S seconds, NVML total energy before and after, clocks, launch count (stdout line ENERGY)
         else if (!strcmp(argv[a], "--passes") && a + 1 < argc) passes = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--smem") && a + 1 < argc) smem = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--optix-repeat") && a + 1 < argc) optix_repeat = atoi(argv[++a]);
@@ -812,6 +815,27 @@ int main(int argc, char **argv)
         if (it == repeat - 1) out = std::move(o);
     }
     TICK("launches done");
+    if (energy_s > 0 && e == cudaSuccess && !comp) {   // energy loop: same kernel, same inputs, no copies; synchronize every 20 launches (each launch is short: display watchdog)
+        char bus[32]; CK(cudaDeviceGetPCIBusId(bus, sizeof bus, 0));
+        nvmlDevice_t nd; unsigned long long e0 = 0, e1 = 0; unsigned smc0 = 0, smc1 = 0, mc1 = 0, pw = 0;
+        if (nvmlInit_v2() != NVML_SUCCESS || nvmlDeviceGetHandleByPciBusId_v2(bus, &nd) != NVML_SUCCESS) { fprintf(stderr, "NVML init failed\n"); return 3; }
+        CK(cudaDeviceSynchronize());
+        if (nvmlDeviceGetTotalEnergyConsumption(nd, &e0) != NVML_SUCCESS) { fprintf(stderr, "NVML energy counter unavailable\n"); return 3; }
+        const double t_a = now_s(); long long nl = 0; unsigned long long ms_sum = 0; int ns = 0;
+        while (now_s() - t_a < energy_s) {
+            for (int q = 0; q < 20; ++q) {
+                if (fn) { flush_read<<<NSM * 8, 256>>>(fbuf, fn, sink); }
+                ttu_one<<<blocks, LANES, smem>>>(din, dout); ++nl;
+            }
+            CK(cudaGetLastError()); CK(cudaDeviceSynchronize());
+            if (nl % 400 == 0) { nvmlDeviceGetClockInfo(nd, NVML_CLOCK_SM, &smc1); ms_sum += smc1; ++ns; }
+        }
+        CK(cudaDeviceSynchronize()); const double t_b = now_s();
+        nvmlDeviceGetTotalEnergyConsumption(nd, &e1); nvmlDeviceGetClockInfo(nd, NVML_CLOCK_SM, &smc1); nvmlDeviceGetClockInfo(nd, NVML_CLOCK_MEM, &mc1); nvmlDeviceGetPowerUsage(nd, &pw); (void)smc0;
+        printf("ENERGY {\"mJ\": %llu, \"s\": %.6f, \"launches\": %lld, \"blocks\": %d, \"warps\": %d, \"flush_mb\": %g, \"sm_mhz_end\": %u, \"sm_mhz_mean\": %.1f, \"mem_mhz\": %u, \"power_mW_end\": %u}\n",
+               e1 - e0, t_b - t_a, nl, blocks, warps, flush_mb, smc1, ns ? (double)ms_sum / ns : 0.0, mc1, pw);
+        nvmlShutdown();
+    }
     fprintf(jf, "]");
     if (comp) {   // stop the compute kernel; resident block counts per SM parity
         cdone = true; int one = 1; CK(cudaMemcpyAsync(dstop, &one, 4, cudaMemcpyHostToDevice, ss)); CK(cudaStreamSynchronize(ss)); CK(cudaStreamSynchronize(sc)); wdog.join();
