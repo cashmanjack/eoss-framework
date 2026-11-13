@@ -1,4 +1,4 @@
-"""Run a patched setup3 binary on GPU 1, only if check_seq.py passed on this exact file.
+"""Run a patched setup3 binary on the first idle GPU, only if check_seq.py passed on this exact file.
 
     run.py BIN RAYS FILL OUT.json [--no-ttu] [--repeat N] [--ncu METRICS --ncu-out CSV [--ncu-skip K]] [--inject TOOL.so]
 
@@ -6,12 +6,11 @@
 clocks left alone (--cache-control none --clock-control none), one CSV row per ttu_one launch.
 
 Refuses if: BIN.checked is missing or holds another sha256, any process is on
-GPU 1, or the driver is not 580.178.04. Runs under `timeout -k 2 30` (one process, all repeats inside it).
+the chosen GPU, or the driver has no validated TTU group (ttu/config/profiles.json). Runs under `timeout -k 2 30` (one process, all repeats inside it).
 """
 import hashlib, os, subprocess, sys
-
-DRIVER = '580.178.04'
-OPTIX_LIB = os.path.expanduser('~/opt/nvoptix-580.178.04')
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'config'))
+import gpucfg  # noqa: E402  (one config per GPU: index, driver, OptiX library, SM count)
 
 
 def smi(*a):
@@ -40,20 +39,17 @@ def main():
     chk = binp + '.checked'
     if not os.path.exists(chk) or open(chk).read().strip() != sha:
         sys.exit('refused: check_seq.py has not passed on this binary (%s)' % sha)
-    if smi('--query-gpu=driver_version', '--format=csv,noheader').split('\n')[0] != DRIVER:
-        sys.exit('refused: driver changed')
-    procs = smi('-i', '1', '--query-compute-apps=pid', '--format=csv,noheader')
-    if procs:
-        sys.exit('refused: GPU 1 busy: %s' % procs)
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES='1', **({'CUDA_INJECTION64_PATH': inject} if inject else {}),
-               LD_LIBRARY_PATH=OPTIX_LIB + ':' + os.environ.get('LD_LIBRARY_PATH', ''))
+    cfg = gpucfg.load()   # first idle GPU (TTU_GPU overrides); refuses a driver without a validated TTU group
+    cfg.check_idle()
+    GPU = cfg.index
+    env = cfg.env(dict(os.environ, **({'CUDA_INJECTION64_PATH': inject} if inject else {})))
     ptx = os.path.join(os.path.dirname(binp), 'setup3_dev.ptx')
     cmd = ['timeout', '-k', '2', '30'] + ncu + [binp, ptx, os.path.join(os.path.dirname(binp), 'words.txt'), rays, fill, out] + extra
     print('sha256', sha)
     r = subprocess.run(cmd, env=env)
     print('exit', r.returncode)
-    print('GPU 1 after:', smi('-i', '1', '--query-gpu=utilization.gpu,memory.used', '--format=csv,noheader'),
-          '| procs:', smi('-i', '1', '--query-compute-apps=pid', '--format=csv,noheader') or 'none')
+    print('GPU %d after:' % GPU, smi('-i', str(GPU), '--query-gpu=utilization.gpu,memory.used', '--format=csv,noheader'),
+          '| procs:', smi('-i', str(GPU), '--query-compute-apps=pid', '--format=csv,noheader') or 'none')
     sys.exit(r.returncode)
 
 

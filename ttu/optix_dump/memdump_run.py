@@ -25,19 +25,21 @@ EXE = os.path.join(HERE, 'memdump')
 OUT = '/dev/shm/memdump'
 STATE = os.path.join(OUT, 'state.json')
 CACHE = os.path.expanduser('/var/tmp/OptixCache_%s/optix7cache.db' % os.environ.get('USER', ''))
-ENV = dict(os.environ, CUDA_VISIBLE_DEVICES='1',
-           LD_LIBRARY_PATH=os.path.expanduser('~/opt/nvoptix-580.178.04') + ':' + os.environ.get('LD_LIBRARY_PATH', ''))
+sys.path.insert(0, os.path.join(HERE, '..', 'config'))
+import gpucfg  # noqa: E402
+CFG = gpucfg.load()    # first idle GPU (TTU_GPU overrides), its OptiX library and driver
+ENV = CFG.env()
 
 
-def gpu1_idle():
-    r = subprocess.run(['nvidia-smi', '-i', '1', '--query-compute-apps=pid', '--format=csv,noheader'],
+def gpu1_idle():   # name kept: now "the chosen GPU is idle"
+    r = subprocess.run(['nvidia-smi', '-i', str(CFG.index), '--query-compute-apps=pid', '--format=csv,noheader'],
                        capture_output=True, text=True)
     return r.returncode == 0 and r.stdout.strip() == ''
 
 
 def run(args, prefix=()):
     if not gpu1_idle():
-        sys.exit('GPU 1 is in use by someone else; not running')
+        sys.exit('the chosen GPU is in use by someone else; not running')
     cmd = ['timeout', '-k', '2', '30', *prefix, EXE, *args]
     print('$', ' '.join(cmd))
     r = subprocess.run(cmd, env=ENV, capture_output=True, text=True)

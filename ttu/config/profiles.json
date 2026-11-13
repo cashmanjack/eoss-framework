@@ -1,0 +1,11 @@
+{
+ "arch": {
+  "sm89": {
+   "sms_per_tpc": 2,
+   "encodings": "ttu_sm89.json",
+   "note": "Ada. Two SMs per TPC (even/odd pair, SM 2k and 2k+1), one traversal unit per TPC (Throughput_8, Memory_5: measured on RTX 6000 Ada). Block placement with one block per SM: block b on SM 2b for b < SMs/2, then the odd SMs (measured on RTX 6000 Ada; re-measured per GPU by probe_placement.cu before any use)."
+  }
+ },
+ "cufunction_offset": {"580": "0x68"},
+ "validated_drivers": ["580.178.04"]
+}

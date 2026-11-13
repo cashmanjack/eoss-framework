@@ -100,6 +100,7 @@ int main(int argc, char **argv)
     std::mt19937 rng(7); std::shuffle(perm.begin() + 1, perm.end(), rng);
     std::vector<unsigned> h(words, 0);
     for (size_t i = 0; i < lines; ++i) h[(size_t)perm[i] * 32] = perm[(i + 1) % lines] * 32;
+    int nsm = 0; { int dv = 0; CK(cudaGetDevice(&dv)); CK(cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dv)); }
     unsigned *a, *sink; unsigned long long *cyc;
     CK(cudaMalloc(&a, words * 4)); CK(cudaMalloc(&sink, 8)); CK(cudaMalloc(&cyc, 8));
     CK(cudaMemcpy(a, h.data(), words * 4, cudaMemcpyHostToDevice));
@@ -127,7 +128,7 @@ int main(int argc, char **argv)
     for (int rep = 0; rep < 11; ++rep) {
         unsigned start = 0;
         if (cross) { chase<false><<<1, 1>>>(a, 0, 0, warm, cyc, sink); CK(cudaGetLastError()); CK(cudaDeviceSynchronize()); }
-        if (cold) { flush_read<<<142 * 8, 256>>>(fbuf, fn, sink); CK(cudaGetLastError()); CK(cudaDeviceSynchronize()); }
+        if (cold) { flush_read<<<nsm * 8, 256>>>(fbuf, fn, sink); CK(cudaGetLastError()); CK(cudaDeviceSynchronize()); }
         const unsigned w = (cross || cold) ? 0 : warm;
         if (thr) chase_thrash<<<1, 32>>>(a, warm, n, tb, kl, cyc, sink);
         else if (ev) chase_evict<<<1, 1>>>(a, eb, warm, ewalk, n, cyc, sink);
