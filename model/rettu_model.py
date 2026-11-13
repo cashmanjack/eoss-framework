@@ -62,3 +62,9 @@ def predict_gpu(x1, F, G):
             per_gpc[SM_GPC(2 * (b - N_TPC) + 1)] += SIBLING_GAIN * x1  # sibling adds 4%
     per_gpc = np.minimum(per_gpc, GPC_CEIL / F)            # per GPC sector limit
     return min(per_gpc.sum(), L2_CEIL / F)                 # whole L2 sector limit
+
+
+# L2 capacity term (2026-11-13): hit rate falls as the working set passes the L2 size.
+# See l2_capacity.py: cyclic access h = 1 up to C(1-d), 0 from C(1+d); d = 1/6 from triton's chase interval.
+# Use it to split a ray's L2 reads F into L2 hits and DRAM misses when the touched bytes exceed the L2.
+from l2_capacity import hit_cyclic, hit_random  # noqa: E402,F401
