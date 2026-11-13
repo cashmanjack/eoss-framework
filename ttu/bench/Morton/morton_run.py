@@ -14,13 +14,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'Memory_4'))
 import prep  # noqa: E402
 
-M = '/dev/shm/m1'
-ENV = dict(os.environ, CUDA_VISIBLE_DEVICES='1', LD_LIBRARY_PATH=os.path.expanduser('~/opt/nvoptix-580.178.04') + ':' + os.environ.get('LD_LIBRARY_PATH', ''))
+sys.path.insert(0, os.path.join(HERE, '..', '..', 'config'))
+import gpucfg  # noqa: E402  (one config per GPU; TTU_GPU overrides the pick)
+CFG = gpucfg.load()
+M = os.environ.get('MORTON_DIR', '/dev/shm/m1')
+ENV = CFG.env()
 
 
 def gpu_free():
-    p = subprocess.run(['nvidia-smi', '-i', '1', '--query-compute-apps=pid', '--format=csv,noheader'], capture_output=True, text=True).stdout.strip()
-    if p: sys.exit('GPU 1 busy: ' + p)
+    p = subprocess.run(['nvidia-smi', '-i', str(CFG.index), '--query-compute-apps=pid', '--format=csv,noheader'], capture_output=True, text=True).stdout.strip()
+    if p: sys.exit('GPU %d busy: %s' % (CFG.index, p))
 
 
 def host(scene_n, rays, out, modes, extra=()):
