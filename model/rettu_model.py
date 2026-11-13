@@ -65,6 +65,6 @@ def predict_gpu(x1, F, G):
 
 
 # L2 capacity term (2026-11-13): hit rate falls as the working set passes the L2 size.
-# See l2_capacity.py: cyclic access h = 1 up to C(1-d), 0 from C(1+d); d = 1/6 from triton's chase interval.
+# See l2_capacity.py: cyclic access h = 1 up to 0.97 C, 0 from 1.05 C (4070 Ti ramp points); the symmetric d = 1/6 version is hit_cyclic_sym.
 # Use it to split a ray's L2 reads F into L2 hits and DRAM misses when the touched bytes exceed the L2.
 from l2_capacity import hit_cyclic, hit_random  # noqa: E402,F401

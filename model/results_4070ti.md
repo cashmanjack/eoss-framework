@@ -42,3 +42,13 @@ Fit on triton (C = 96 MB): chase hits at 1 to 64 MB (292 to 298), DRAM at 512 MB
 | 96, 128 | 660, 661 | 285 | 658 | 658 | 472, 518 |
 
 The 64 MB miss is now predicted (it was the miss in Finding 104). 48 MB (= the L2 size) is the one soft point: measured hit rate 0.63 (d = 1/6 predicts 0.5, the step predicts 1). Cyclic is the right form for a chase; the random formula underestimates the slowdown for a cyclic walk and is for random ray access. The width d is not identified by triton, and the 4070 Ti only gives d <= 1/6 (40 MB still hits, 56 MB already misses); the partial point at 48 MB (0.63) cannot fix d for a symmetric ramp (it gives 0.5 for any d), so the ramp is probably asymmetric. More points between 40 and 56 MB are needed (not measured). Limit: a real ray stream is neither cyclic nor uniform; its hit rate comes from the reuse histogram (Finding 100), the capacity term is the bound for the cyclic case.
+
+## L2 ramp points (2026-11-13 evening, chase 'ca', 3 repetitions each, notes/io/l2ramp)
+| MB | cycles per load (3 reps) | hit rate (285.4 hit, 656.3 DRAM) | v1 symmetric d 1/6 | v2 asymmetric 0.97 to 1.05 |
+|---|---|---|---|---|
+| 40 | 286.4, 286.5, 286.4 | 1.00 | 285 | 285 |
+| 44 | 287.2, 287.2, 287.2 | 0.995 | 378 (wrong) | 285 |
+| 48 | 423.8, 424.0, 423.6 | 0.63 | 471 | 425 |
+| 52 | 656.3, 656.3, 656.0 | 0.00 | 565 (wrong) | 658 |
+| 56 | 656.5, 656.3, 656.1 | 0.00 | 658 | 658 |
+The ramp is sharp and not symmetric: full hits at 44 MB, 63% at the L2 size, none at 52 MB. A straight ramp through 0.63 at 48 MB that is 1 at 44 and 0 at 52 does not exist (it would reach 0 at 55 MB), so it starts between 45.4 and 47.9 MB and ends between 48.5 and 52 MB. v2 (hit 1 up to 0.97 C, 0 from 1.05 C) is fitted on these points, so they are no longer a check; the symmetric v1 failed at 44 and 52 MB. No point at 46 or 50 MB: the shape between is assumed straight. Triton's equivalent ramp (if it scales with C, 93 to 101 MB) is not measured; a triton chase at 88, 92, 96, 100, 104 MB would test it.
