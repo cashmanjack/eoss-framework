@@ -61,6 +61,10 @@
 //     --slim         for a build_patch --slim binary: the lane's 8 ray words go to slots 8..15 of its record, the
 //                    13 stored result words (slots 0..12 of its out record) are mapped back to the standard
 //                    register layout after every launch; per launch GPU time (CUDA events) is in "ms"
+//     --ias          BVH_4 / F91: the GAS goes under one instance (identity transform, visibility 255) in an IAS (single level instancing pipeline); the OptiX reference
+//                    traces the IAS handle; the register image is the one of the IAS group (build_patch.py --ias): ray words in R10..R17, store 0 / 0x80 words from
+//                    WORDS (ias_words.py: R2 R3 R48 R49 then R52 R53 R48 R49), R6:R7 = IAS + the word at IAS+0x20 with 0x10000000 added to the high word, R24:R25 = 0,
+//                    R90 = 0 (P0 true: a fresh query). Plain launches only (no slim, sched, resume, start options).
 //     --no-ttu       stop after the OptiX reference
 //
 // ttu_one as compiled here only loads 96 words into registers and stores them
@@ -248,9 +252,10 @@ int main(int argc, char **argv)
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
     double energy_s = 0;
-    bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool ias = false; bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
+        else if (!strcmp(argv[a], "--ias")) ias = true;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
         else if (!strcmp(argv[a], "--repeat") && a + 1 < argc) repeat = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--energy") && a + 1 < argc) energy_s = atof(argv[++a]);   // after the checked launches: run the same launch (and flush) back to back for S seconds, NVML total energy before and after, clocks, launch count (stdout line ENERGY)
@@ -333,9 +338,24 @@ int main(int argc, char **argv)
         FILE *f = fopen(dump, "wb"); fwrite(b.data(), 1, b.size(), f); fclose(f);
     }
 
+    if (ias && (slim || !sched.empty() || resume || start_off >= 0 || use_path || start_file || loopk || outer != 1 || !compute_opt.empty() || thrash || !wact.empty() || active != 32 || passes != 1 || energy_s > 0)) { fprintf(stderr, "--ias: plain launches only\n"); return 2; }
+    // --ias: one instance of the GAS (identity transform) under an IAS
+    CUdeviceptr iasbuf = 0; OptixTraversableHandle ih = 0; size_t ias_size = 0; unsigned long long ias_off = 0;
+    if (ias) {
+        OptixInstance inst{}; const float idm[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}; memcpy(inst.transform, idm, sizeof idm);
+        inst.instanceId = 0; inst.sbtOffset = 0; inst.visibilityMask = 255; inst.flags = OPTIX_INSTANCE_FLAG_NONE; inst.traversableHandle = h;
+        CUdeviceptr dinst; CK(cudaMalloc((void **)&dinst, sizeof inst)); CK(cudaMemcpy((void *)dinst, &inst, sizeof inst, cudaMemcpyHostToDevice));
+        OptixBuildInput ib{}; ib.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES; ib.instanceArray.instances = dinst; ib.instanceArray.numInstances = 1;
+        OptixAccelBufferSizes ibs{}; OX(optixAccelComputeMemoryUsage(ctx, &ao, &ib, 1, &ibs));
+        CUdeviceptr itmp; CK(cudaMalloc((void **)&itmp, ibs.tempSizeInBytes)); CK(cudaMalloc((void **)&iasbuf, ibs.outputSizeInBytes)); ias_size = ibs.outputSizeInBytes;
+        OX(optixAccelBuild(ctx, 0, &ao, &ib, 1, itmp, ibs.tempSizeInBytes, iasbuf, ibs.outputSizeInBytes, &ih, nullptr, 0));
+        CK(cudaDeviceSynchronize()); CK(cudaFree((void *)itmp));
+        CK(cudaMemcpy(&ias_off, (void *)(iasbuf + 0x20), 8, cudaMemcpyDeviceToHost));
+    }
+
     // ---- pipeline -------------------------------------------------------------
     OptixModuleCompileOptions mo{}; OptixPipelineCompileOptions po{};
-    po.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
+    po.traversableGraphFlags = ias ? OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING : OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
     po.numPayloadValues = 7; po.numAttributeValues = 2;
     po.pipelineLaunchParamsVariableName = "params";
     po.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE;
@@ -426,7 +446,7 @@ int main(int argc, char **argv)
         const float l = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
         rays[i] = {{o.x, o.y, o.z}, 0.f, {d.x / l, d.y / l, d.z / l}, 1e16f};
     }
-    Params prm{}; prm.handle = h; prm.n = NR;
+    Params prm{}; prm.handle = ias ? ih : h; prm.n = NR; prm.ias = ias ? 1u : 0u;
     CK(cudaMalloc((void **)&prm.rays, NR * sizeof(Ray8)));
     CK(cudaMemcpy((void *)prm.rays, rays.data(), NR * sizeof(Ray8), cudaMemcpyHostToDevice));
     CK(cudaMalloc((void **)&prm.out, NR * sizeof(RefOut))); CK(cudaMalloc((void **)&prm.inst, 18 * 8));
@@ -450,13 +470,14 @@ int main(int argc, char **argv)
     // ---- checks before anything is handed to ttu_one -----------------------------
     const unsigned long long A = inst[0];
     const unsigned ident[16] = {0, 1, 0, 0, 0x3f800000, 0, 0, 0, 0, 0x3f800000, 0, 0, 0, 0, 0x3f800000, 0};
-    bool inst_ok = true; for (int k = 0; k < 16; ++k) inst_ok &= (unsigned)inst[1 + k] == ident[k];
+    bool inst_ok = true; for (int k = 0; k < 16 && !ias; ++k) inst_ok &= (unsigned)inst[1 + k] == ident[k];   // --ias: the node A of a GAS only pipeline is not read
     const unsigned c3_34 = (unsigned)inst[17];
     const bool c3_ok = c3_34 == 0x00011000u;   // the store words were computed for this value
     unsigned long long off = 0; CK(cudaMemcpy(&off, (void *)(gas + 0x20), 8, cudaMemcpyDeviceToHost));
     const unsigned long long root = (unsigned long long)gas + off;
-    const bool handle_ok = (h & ~0x3fULL) == (unsigned long long)gas && (h & 0x3f) == 0xc && (gas & 0x7f) == 0;
-    const bool align_ok = (A & 0x3f) == 0 && (root & 0x7f) == 0;
+    const unsigned long long iroot = (unsigned long long)iasbuf + ias_off;
+    const bool handle_ok = ias ? ((ih & ~0x3fULL) == (unsigned long long)iasbuf && (ih & 0x3f) == 0x4 && (iasbuf & 0x7f) == 0) : ((h & ~0x3fULL) == (unsigned long long)gas && (h & 0x3f) == 0xc && (gas & 0x7f) == 0);
+    const bool align_ok = ias ? ((iroot & 0x7f) == 0 && ias_off != 0 && ias_off < ias_size) : ((A & 0x3f) == 0 && (root & 0x7f) == 0);
     std::vector<unsigned char> G;
     auto walk_path = [&](const std::string &path) -> long long {   // slot path from the root -> byte offset, -1 if invalid
         if (G.empty()) { G.resize(bs.outputSizeInBytes); CK(cudaMemcpy(G.data(), (void *)gas, G.size(), cudaMemcpyDeviceToHost)); }
@@ -502,6 +523,7 @@ int main(int argc, char **argv)
             ray.o[0], ray.o[1], ray.o[2], ray.d[0], ray.d[1], ray.d[2]);
     fprintf(jf, " \"gas\": \"0x%llx\", \"gas_size\": %zu, \"handle\": \"0x%llx\", \"root_off\": \"0x%llx\", \"root\": \"0x%llx\",\n",
             (unsigned long long)gas, (size_t)bs.outputSizeInBytes, (unsigned long long)h, off, root);
+    fprintf(jf, " \"ias\": %d, \"ias_addr\": \"0x%llx\", \"ias_handle\": \"0x%llx\", \"ias_root_off\": \"0x%llx\", \"ias_size\": %zu,\n", ias ? 1 : 0, (unsigned long long)iasbuf, (unsigned long long)ih, ias_off, ias_size);
     fprintf(jf, " \"inst\": \"0x%llx\", \"inst_ok\": %s, \"c3_34\": \"0x%08x\", \"handle_ok\": %s, \"align_ok\": %s,\n", A,
             inst_ok ? "true" : "false", c3_34, handle_ok ? "true" : "false", align_ok ? "true" : "false");
     fprintf(jf, " \"optix_ms\": [");
@@ -680,6 +702,15 @@ int main(int argc, char **argv)
         if (slim) {   // ray words to slots 8..15 (one 32 byte sector); the other slots stay lane invariant
             const unsigned tmp[8] = {R[12], R[13], R[14], R[15], R[16], R[17], R[82], R[83]};
             for (int k = 0; k < 8; ++k) R[8 + k] = tmp[k];
+        }
+        if (ias) {   // register image of the IAS group (build_patch.py --ias): see the option text
+            for (int k = 0; k < N; ++k) R[k] = 0;
+            R[10] = fbits(y.o[0]); R[11] = fbits(y.o[1]); R[12] = fbits(y.o[2]); R[13] = fbits(y.tmin);   // 0x40
+            R[14] = fbits(y.d[0]); R[15] = fbits(y.d[1]); R[16] = fbits(y.d[2]); R[17] = fbits(y.tmax);   // 0x50
+            R[2] = words[0]; R[3] = words[1]; R[48] = words[2]; R[49] = words[3];                          // 0
+            R[52] = words[4]; R[53] = words[5];                                                            // 0x80 (high pair = R48:R49 again)
+            if (words[6] != words[2] || words[7] != words[3]) { fprintf(stderr, "--ias: words 6, 7 must equal words 2, 3 (R48:R49 serve stores 0 and 0x80)\n"); exit(2); }
+            R[6] = (unsigned)iroot; R[7] = (unsigned)(iroot >> 32) + 0x10000000u;                          // 0x200 low pair; R24:R25 (its high pair), R90 stay 0
         }
         R[18] = sm_a; R[19] = sm_b;   // used only by --smfilter builds
         if (!smset.empty()) { const unsigned bb = (unsigned)((i % ((size_t)blocks * LANES)) / LANES), sm = SMOF(bb); R[18] = R[19] = smset.count(sm) ? sm : 0xffffffffu; }

@@ -14,3 +14,12 @@ Stage 0 has no TTU instruction (the group slot is NOPs). Stage 1 copies one fuse
 TTU group from a private dump at build time. Patched binaries contain NVIDIA code:
 keep them in /dev/shm and delete them after a run; never commit them. run.py only
 runs a binary whose sha256 passed check_seq.py, on an idle GPU 1, under a 30 s timeout.
+
+## IAS (BVH_4, F91, F114)
+
+    nvcc ... -o /dev/shm/t9i/setup3 setup3.cu -lcuda -lnvidia-ml          # host with --ias
+    python ias_words.py IAS_DUMP.bin /dev/shm/t9i/words.txt               # store 0 and 0x80 words, computed from the dump's straight line code
+    python build_patch.py --stage 0|1 --bin /dev/shm/t9i/setup3 --dump IAS_DUMP.bin --ias --out /dev/shm/t9i/ias_s<stage>
+    python check_seq.py /dev/shm/t9i/ias_s<stage> IAS_DUMP.bin            # shape (A4, A12, A13: offsets, predicates, fuse 15) and, with --remap, A10
+    python run.py /dev/shm/t9i/ias_s0 hit zero OUT.json --ias             # stage 0 only; analyze.py reads "ias" from the JSON
+Stage 1 IAS builds are checked but not run (the .checked marker is deleted).

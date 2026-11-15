@@ -13,11 +13,15 @@ from ref import intersect, RAYS
 INPUTS = [2, 3, 12, 13, 14, 15, 16, 17, 30, 31, 32, 33, 34, 35, 44, 45, 46, 47,
           52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 68, 69, 70, 71, 82, 83, 90]
 LD_DEST = [32, 33, 44, 45, 68, 69, 30, 31, 2, 3, 62, 63, 34, 35, 58, 59, 56, 57, 70, 71, 60, 61]
+IAS_INPUTS = [2, 3, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 24, 25, 26, 27, 28, 29, 40, 41, 48, 49, 50, 51, 52, 53, 90]   # build_patch.py --ias
+IAS_LD_DEST = [24, 25, 6, 7, 26, 27, 2, 3, 44, 45, 42, 43, 48, 49, 46, 47, 52, 53, 50, 51]
 f = lambda u: struct.unpack('<f', struct.pack('<I', u))[0]
 
 
 def main(path, stage):
     j = json.load(open(path)); ok = True
+    global INPUTS, LD_DEST
+    if j.get('ias'): INPUTS, LD_DEST = IAS_INPUTS, IAS_LD_DEST   # IAS group registers (setup3 --ias)
     if 'ray' in j:
         o, d = j['ray']
     else:
@@ -48,7 +52,7 @@ def main(path, stage):
         return ok
     print('ttu_one status:', j['ttu_status']); ok &= j['ttu_status'] == 'no error'
     ins, outs = j['in'], j['out']
-    keep = sorted(set(INPUTS) | set(LD_DEST))
+    keep = sorted(set(INPUTS) | (set(LD_DEST) if stage else set()))   # stage 0: IAS load destinations that are not inputs hold leftovers
     lanes_same = all(outs[i][r] == outs[0][r] for i in range(32) for r in keep)
     print('input and TTULD registers identical in all lanes:', lanes_same)
     if stage == 0:

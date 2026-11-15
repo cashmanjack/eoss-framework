@@ -63,7 +63,15 @@ def check(path):
             ok(tag + 'A5 instruction after the group is not TTU', low12(body[gi + 2 + n]) not in TTU)
             kinds = [low12(b) for b in grp]
             shape = [ST] * 10 + [GO] + [ST] * 10 + [GO] + [LD] * 6 if meta.get('dualgo') else [ST] * 10 + [GO] + [LD] * 6
-            ok(tag + ('A4 group is 10 ST, GO, 10 ST, GO, 6 LD (dualgo)' if meta.get('dualgo') else 'A4 group is 10 ST, then 1 GO, then 6 LD'), kinds == shape, kinds)
+            if meta.get('ias'): shape = [ST] * 8 + [GO] + [LD] * 6   # F91 IAS group: fuse count 15
+            ok(tag + ('A4 group is 10 ST, GO, 10 ST, GO, 6 LD (dualgo)' if meta.get('dualgo') else 'A4 group is 8 ST, GO, 6 LD (IAS)' if meta.get('ias') else 'A4 group is 10 ST, then 1 GO, then 6 LD'), kinds == shape, kinds)
+            if meta.get('ias'):   # A13 (IAS only): the F91 shape, in the harness's own (possibly remapped) registers: store and load offsets, which stores are predicated and how
+                offs = lambda b: (W(b) >> 40) & 0xffff
+                ok(tag + 'A13 IAS store offsets 0, 0x40, 0x50, 0x80, 0x100, 0x180, 0x190, 0x200', [offs(b) for b in grp[:8]] == [0, 0x40, 0x50, 0x80, 0x100, 0x180, 0x190, 0x200], [hex(offs(b)) for b in grp[:8]])
+                ok(tag + 'A13 IAS load offsets 0x300 0x310 0x320 0x380 0x3C0 0x3D0', [offs(b) for b in grp[9:]] == [0x300, 0x310, 0x320, 0x380, 0x3c0, 0x3d0], [hex(offs(b)) for b in grp[9:]])
+                ok(tag + 'A13 IAS predicates: four stores unpredicated, then three @!P0 (0x100, 0x180, 0x190) and one @P0 (0x200); GO and loads unpredicated',
+                   [pred(b) for b in grp[:8]] == [(7, 0)] * 4 + [(0, 1)] * 3 + [(0, 0)] and all(pred(b) == (7, 0) for b in grp[8:]), [pred(b) for b in grp])
+                ok(tag + 'A13 IAS fuse count is 15', n == 15, n)
             lds = [i for i, b in enumerate(grp) if low12(b) == LD]
             close = [i for i in lds if bit(grp[i], 74)]
             ok(tag + 'A6 exactly one TTULD with bit 74, and it is last', close == [n - 1] and lds[-1] == n - 1, close)
@@ -87,10 +95,10 @@ def check(path):
         ok('A6 no other TTU anywhere in the binary', len(hits) == total, (len(hits), total))
         if meta.get('remap') and len(sys.argv) > 2:   # A10 with remap: only register fields may differ
             d = open(sys.argv[2], 'rb').read()
-            dump = [d[0x14000 - 0xfb50 + 16 * k:0x14000 - 0xfb50 + 16 * k + 16] for k in range(19)]
+            dump = [d[0xbb60 + 16 * k:0xbb60 + 16 * k + 16] for k in range(17)] if meta.get('ias') else [d[0x14000 - 0xfb50 + 16 * k:0x14000 - 0xfb50 + 16 * k + 16] for k in range(19)]
             regmask = lambda b: W(b) & ~((0xff << 16) | (0xff << 32) | (0xff << 64)) if low12(b) in (ST, LD) else W(b)
             for gi in groups:
-                same = all(regmask(a) == regmask(b) for a, b in zip(body[gi:gi + 19], dump))
+                same = all(regmask(a) == regmask(b) for a, b in zip(body[gi:gi + len(dump)], dump))
                 ok('A10 remapped group equals the OptiX group except register fields (session at %d)' % gi, same)
             pm = {int(k): v for k, v in meta['regmap'].items()}
             ok('A10 register map is a pair aligned one to one map', len(set(pm.values())) == len(pm) and all(pm[k] % 2 == k % 2 for k in pm))

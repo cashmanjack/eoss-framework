@@ -9,7 +9,7 @@ extern "C" __constant__ Params params;
 extern "C" __global__ void __raygen__rg()
 {
     const unsigned i = optixGetLaunchIndex().x;
-    if (i == 0) {
+    if (i == 0 && !params.ias) {
         // OptiX's launch constants sit below params in the same constant bank;
         // the word 0x58 into the bank points 0x100 past the instance node.
         const unsigned long long t =
@@ -19,6 +19,7 @@ extern "C" __global__ void __raygen__rg()
             params.inst[1 + k] = ((const volatile unsigned *)(t - 0x100))[k];
         params.inst[17] = ((const volatile unsigned *)&params)[(int)(0x34 - PARAMS_C3_OFFSET) / 4];
     }
+    if (i == 0 && params.ias) params.inst[17] = ((const volatile unsigned *)&params)[(int)(0x34 - PARAMS_C3_OFFSET) / 4];
     if (i >= params.n) return;
     const Ray8 r = params.rays[i];
     unsigned hit = 0, tb = 0, prim = 0, u = 0, v = 0, front = 0, gi = 0;

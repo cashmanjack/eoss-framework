@@ -27,6 +27,14 @@ ISETP_AT = -0xfd10          # ISETP.NE.AND P0, PT, R46, 0xC0000, PT
 INPUTS = [2, 3, 12, 13, 14, 15, 16, 17, 30, 31, 32, 33, 34, 35, 44, 45, 46, 47,
           52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 68, 69, 70, 71, 82, 83, 90]
 OUTPUTS = [2, 3] + list(range(6, 96))
+# --ias (BVH_4 / F91): the IAS traversal group read from the private IAS pipeline dump (memdump launch --ias): 17 instructions
+# (OPEN.DUAL, FUSE 0xF, 8 ST of which 4 predicated, GO, 6 LD), and the pipeline's own ISETP (P0 = R24 != 1, fresh query: true).
+# Registers the stores read (logical slot k = register k; the host fills them, see setup3.cu --ias): store 0 R2:R3 / R48:R49, 0x40 R10:R11 / R12:R13,
+# 0x50 R14:R15 / R16:R17, 0x80 R52:R53 / R48:R49, 0x200 R6:R7 (pointer) / R24:R25 (zero), and the predicated off stores' sources.
+IAS_GROUP_AT = 0xbb60       # dump file offset of TTUOPEN.DUAL
+IAS_ISETP_AT = 0xbab0       # ISETP.NE.AND P0, PT, R24, 1, PT
+IAS_GROUP_LEN = 17
+IAS_INPUTS = [2, 3, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 24, 25, 26, 27, 28, 29, 40, 41, 48, 49, 50, 51, 52, 53, 90]
 IN_PTR = 92
 ALU_REG = 91                  # --alu: accumulator (plain layout R91; with --remap it is R45, free in that layout)
 
@@ -236,14 +244,24 @@ def ttuccttl_bytes():
 
 
 def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out=95, preclk=False, barnops=1,
-          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False, lean_ld=False, lean_st=False, cctl=False):
+          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False, lean_ld=False, lean_st=False, cctl=False, ias=False):
+    global INPUTS, GROUP_LEN
     d = open(dump, 'rb').read()
-    at = lambda o: d[DUMP_BASE + o:DUMP_BASE + o + 16]
-    group = [at(GROUP_AT + 16 * k) for k in range(GROUP_LEN)]
-    isetp = at(ISETP_AT)
-    assert low12(group[0]) == 0x3d0 and low12(group[1]) == 0x9d4, 'group not at expected place'
-    assert low12(isetp) == 0x80c and (W(isetp) >> 24) & 0xff == 46
-    isetp = field(isetp, 24, 90)                      # compare R90 instead of R46
+    if ias:
+        assert not (slim or loop or outer or dualgo or sr133 or smfilter or thrash or hoist or coal or sleepb), '--ias: plain builds only (stage 0 and the checked shape; no slim, loop, outer, smfilter ...)'
+        INPUTS, GROUP_LEN = IAS_INPUTS, IAS_GROUP_LEN
+        group = [d[IAS_GROUP_AT + 16 * k:IAS_GROUP_AT + 16 * k + 16] for k in range(GROUP_LEN)]
+        isetp = d[IAS_ISETP_AT:IAS_ISETP_AT + 16]
+        assert low12(group[0]) == 0x3d0 and low12(group[1]) == 0x9d4 and (W(group[1]) >> 40) & 0x1f == GROUP_LEN - 2, 'IAS group not at expected place'
+        assert low12(isetp) == 0x80c and (W(isetp) >> 24) & 0xff == 24 and (W(isetp) >> 32) & 0xffffffff == 1
+        isetp = field(isetp, 24, 90)                  # compare R90 (= 0) instead of R24: P0 true, the 0x200 path of a fresh query
+    else:
+        at = lambda o: d[DUMP_BASE + o:DUMP_BASE + o + 16]
+        group = [at(GROUP_AT + 16 * k) for k in range(GROUP_LEN)]
+        isetp = at(ISETP_AT)
+        assert low12(group[0]) == 0x3d0 and low12(group[1]) == 0x9d4, 'group not at expected place'
+        assert low12(isetp) == 0x80c and (W(isetp) >> 24) & 0xff == 46
+        isetp = field(isetp, 24, 90)                  # compare R90 instead of R46
 
     # --remap: move the group's 18 register pairs to R8..R43 (pair aligned, in order of first
     # use), P0's operand to R44, clocks to R46..R49, input pointer to R6:R7. Loads and stores
@@ -541,7 +559,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     p.save(out)
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
     top_reg = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5] + ([LCNT + 1] if loop else []))
-    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'loop': loop, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0, 'lean': lean, 'hoist': hoist, 'coal': coal, 'outer': outer, 'outer_at': outer_at, 'stride': stride, 'cctl': cctl,
+    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'loop': loop, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0, 'lean': lean, 'hoist': hoist, 'coal': coal, 'outer': outer, 'outer_at': outer_at, 'stride': stride, 'cctl': cctl, 'ias': ias,
             'inputs': INPUTS, 'outputs': outputs, 'in_ptr': in_ptr}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
     used = g0 + GROUP_LEN + 1 + int(clock) + len(outputs) + 2
@@ -559,6 +577,7 @@ if __name__ == '__main__':
     a.add_argument('--sync', action='store_true', help='BAR.SYNC before the group (with --clock: before the start read)')
     a.add_argument('--regs', type=int, help='declared register count of ttu_one (>= 96)')
     a.add_argument('--max-out', type=int, default=95, help='store registers only up to this one')
+    a.add_argument('--ias', action='store_true', help='BVH_4: the IAS traversal group (F91, 17 instructions) from an IAS pipeline dump (--dump notes/q3/ias/ias_a.bin) instead of the GAS group; plain builds only; the host needs --ias')
     a.add_argument('--cctl', action='store_true', help='Interface_7 (with --twice): TTUCCTL.IVALL between the two sessions (stage 1 only; stage 0 has a NOP there)')
     a.add_argument('--twice', action='store_true', help='two full sessions with the same ray; time the second')
     a.add_argument('--compact-out', action='store_true', help='store only input and clock registers')
@@ -582,5 +601,5 @@ if __name__ == '__main__':
     a.add_argument('--preclk', action='store_true', help='diagnostic clock read into R88:R89 before the barrier')
     a.add_argument('--barnops', type=int, default=8, help='NOPs after the barrier: a warp issues a few instructions past BAR.SYNC before it stalls (8 measured enough at 20 warps)')
     x = a.parse_args()
-    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else '') + ('a%d' % x.alu if x.alu else '') + ('l' if x.slim else '') + ('L%d' % x.loop if x.loop else '') + ('o%ds%d' % (x.outer, x.stride) if x.outer else '') + ('N' if x.lean else '') + ('Nl' if x.lean_ld else '') + ('Ns' if x.lean_st else '') + ('H' if x.hoist else '') + ('C' if x.coal else ''),
-          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean, x.hoist, x.coal, x.lean_ld, x.lean_st, x.cctl)
+    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else '') + ('a%d' % x.alu if x.alu else '') + ('l' if x.slim else '') + ('L%d' % x.loop if x.loop else '') + ('o%ds%d' % (x.outer, x.stride) if x.outer else '') + ('N' if x.lean else '') + ('Nl' if x.lean_ld else '') + ('Ns' if x.lean_st else '') + ('H' if x.hoist else '') + ('C' if x.coal else '') + ('I' if x.ias else ''),
+          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean, x.hoist, x.coal, x.lean_ld, x.lean_st, x.cctl, x.ias)

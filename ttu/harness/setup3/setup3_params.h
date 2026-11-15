@@ -14,4 +14,5 @@ struct Params {
     OptixTraversableHandle handle;
     unsigned long long *inst;   // [0] node address, [1..16] its first 16 words, [17] c[3][0x34]
     unsigned n;
+    unsigned ias;               // 1: the handle is an IAS; the raygen does not read OptiX's instance node (the GAS only pipeline has one at c[3][0x58] - 0x100)
 };
