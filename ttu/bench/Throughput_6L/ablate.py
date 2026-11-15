@@ -19,7 +19,7 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 S3 = os.path.join(HERE, '..', '..', 'harness', 'setup3')
-sys.path.insert(0, os.path.join(HERE, '..', 'Memory_4')); sys.path.insert(0, S3)
+sys.path.insert(0, os.path.join(HERE, '..', '..', 'config')); sys.path.insert(0, os.path.join(HERE, '..', 'Memory_4')); sys.path.insert(0, S3)
 from prep import make_rays  # noqa: E402
 from resume_check import closest  # noqa: E402
 
@@ -27,7 +27,7 @@ D = '/dev/shm/t8/abl'
 BASE = D + '/setup3'
 VENV = os.path.expanduser('~/eoss/.venv/bin/python')
 NCU = os.path.expanduser('~/opt/cuda-12.8/bin/ncu')
-G = 142
+G = __import__('gpucfg').load().sm_count   # one block per SM (was 142)
 K = 32
 SCENE = 'soup:100000'
 SAMPLE = 200
@@ -144,7 +144,7 @@ def run_ncu_optix():
     cmd = ['timeout', '-k', '2', '60', NCU, '--target-processes', 'all', '-k', 'regex:optix', '--cache-control', 'none', '--clock-control', 'none', '--metrics', NCU_METRICS, '--csv',
            '--page', 'raw', '--log-file', csvf, b0, D + '/setup3_dev.ptx', D + '/words.txt', 'file:' + rays, 'zero', csvf + '.json', '--scene', SCENE, '--warps', '28', '--blockrays',
            '--slim', '--loop', '--blocks', str(G), '--outer', str(R), '--no-ttu', '--quick', '--optix-repeat', '1']
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES='1', LD_LIBRARY_PATH=os.path.expanduser('~/opt/nvoptix-580.178.04') + ':' + os.environ.get('LD_LIBRARY_PATH', ''))
+    env = __import__('gpucfg').load().env()
     p = subprocess.run(cmd, env=env, capture_output=True, text=True)
     v, kn = NC.metrics_of(csvf, lambda rows: rows[-1])
     v['rays'] = n

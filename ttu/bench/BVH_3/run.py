@@ -6,9 +6,11 @@
 Same gates as the harness: driver 580.178.04, GPU 1 idle, 30 s timeout.
 """
 import json, os, statistics as st, subprocess, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'config'))
+import gpucfg  # one config per GPU (TTU_GPU overrides the pick)
+CFG = gpucfg.load()
 
 NS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 1024, 4096, 16384]
-OPTIX_LIB = os.path.expanduser('~/opt/nvoptix-580.178.04')
 
 
 def smi(*a):
@@ -17,14 +19,13 @@ def smi(*a):
 
 def run(bd, work):
     os.makedirs(work, exist_ok=True)
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES='1', LD_LIBRARY_PATH=OPTIX_LIB + ':' + os.environ.get('LD_LIBRARY_PATH', ''))
+    env = CFG.env()
     for mode in ('s', 'o'):
         for n in NS:
             for kind, cnt in (('tri', 0), ('aabb', 0), ('aabb', 1)):
-                if smi('--query-gpu=driver_version', '--format=csv,noheader').split('\n')[0] != '580.178.04':
+                if not CFG.driver_validated:
                     sys.exit('driver changed')
-                if smi('-i', '1', '--query-compute-apps=pid', '--format=csv,noheader'):
-                    sys.exit('GPU 1 busy')
+                CFG.check_idle()
                 out = os.path.join(work, '%s_%s_%d_c%d.json' % (kind, mode, n, cnt))
                 p = subprocess.run(['timeout', '-k', '2', '30', os.path.join(bd, 'bvh3'), os.path.join(bd, 'bvh3_dev.ptx'), kind, str(n), mode, str(cnt), out],
                                    env=env, capture_output=True, text=True)

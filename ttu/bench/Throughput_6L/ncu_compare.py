@@ -36,7 +36,7 @@ def parse(path):
 
 
 def ncu_optix(binp, rays, scene, metrics, csv_out, name_re):
-    env = dict(os.environ, CUDA_VISIBLE_DEVICES='1', LD_LIBRARY_PATH=os.path.expanduser('~/opt/nvoptix-580.178.04') + ':' + os.environ.get('LD_LIBRARY_PATH', ''))
+    import sys as _s, os as _o; _s.path.insert(0, _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'config')); import gpucfg as _g; env = _g.load().env()
     ptx = os.path.join(os.path.dirname(binp), 'setup3_dev.ptx')
     cmd = ['timeout', '-k', '2', '60', NCU, '--target-processes', 'all', '-k', 'regex:' + name_re, '--cache-control', 'none', '--clock-control', 'none', '--metrics', metrics,
            '--csv', '--page', 'raw', '--log-file', csv_out, binp, ptx, os.path.join(os.path.dirname(binp), 'words.txt'), 'file:' + rays, 'zero', csv_out + '.json',

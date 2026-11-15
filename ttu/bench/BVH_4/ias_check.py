@@ -10,8 +10,8 @@ HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.jo
 import prep  # noqa: E402
 work, soup, K, mode, nr = sys.argv[1:6]; K = int(K); nr = int(nr); os.makedirs(work, exist_ok=True)
 R = prep.make_rays(nr); rf = work + '/rays.bin'; R.tofile(rf); pre = work + '/ias_%s_%d_%s' % (soup, K, mode)
-env = dict(os.environ, CUDA_VISIBLE_DEVICES='1', LD_LIBRARY_PATH=os.path.expanduser('~/opt/nvoptix-580.178.04') + ':' + os.environ.get('LD_LIBRARY_PATH', ''))
-if subprocess.run(['nvidia-smi', '-i', '1', '--query-compute-apps=pid', '--format=csv,noheader'], capture_output=True, text=True).stdout.strip(): sys.exit('GPU 1 busy')
+import sys as _s, os as _o; _s.path.insert(0, _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'config')); import gpucfg as _g
+_c = _g.load(); env = _c.env(); _c.check_idle()
 r = subprocess.run(['timeout', '-k', '2', '60', '/dev/shm/b4/ias', '/dev/shm/b4/ias_dev.ptx', soup, str(K), mode, rf, pre], env=env, capture_output=True, text=True)
 if r.returncode: sys.exit('host failed %d\n%s\n%s' % (r.returncode, r.stdout, r.stderr[-1500:]))
 print(r.stdout.strip())
