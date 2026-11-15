@@ -102,8 +102,21 @@ static void instrument(CUcontext ctx, CUfunction f, int nth) {
         const char *name = nvbit_get_func_name(ctx, fn); if (!strstr(name, kernel.c_str())) continue;
         const std::vector<Instr *> &ins = nvbit_get_instrs(ctx, fn); int gk = -1;
         for (size_t k = 0; k + 1 < ins.size(); ++k) if (ins[k + 1]->getOffset() - ins[k]->getOffset() > 16) gk = gk == -1 ? (int)k : -2;
-        if (gk < 0) { fprintf(out, "  %s: %s\n", name, gk == -1 ? "no hidden instructions" : "more than one gap: refusing to instrument"); continue; }
-        Instr *before = ins[gk], *after = ins[gk + 1];
+        // BITTU_MODE=empty: the stage 0 twin has NOPs where the group is (no gap). The same probes go at the same offsets (BITTU_GROUP_OFF / LEN), with the register lists decoded from the
+        // stage 1 group bytes (BITTU_GROUP_FILE), so the probe pair is identical and only the group is missing: its window is the probe overhead to subtract.
+        const bool empty_mode = getenv("BITTU_MODE") && !strcmp(getenv("BITTU_MODE"), "empty");
+        Instr *before = nullptr, *after = nullptr;
+        if (empty_mode) {
+            const char *e1 = getenv("BITTU_GROUP_OFF"), *e2 = getenv("BITTU_GROUP_LEN");
+            if (!e1 || !e2) { fprintf(out, "  empty mode needs BITTU_GROUP_OFF and BITTU_GROUP_LEN\n"); continue; }
+            const uint32_t e0 = strtoul(e1, 0, 0), en = strtoul(e2, 0, 0);
+            if (gk != -1) { fprintf(out, "  %s: has a hidden gap, not an empty twin: refusing\n", name); continue; }
+            for (Instr *x : ins) { if (x->getOffset() + 16 == e0) before = x; if (x->getOffset() == e0 + 16 * en) after = x; }
+            if (!before || !after) { fprintf(out, "  %s: empty mode, offsets 0x%x + %u slots not found\n", name, e0, en); continue; }
+        } else {
+            if (gk < 0) { fprintf(out, "  %s: %s\n", name, gk == -1 ? "no hidden instructions" : "more than one gap: refusing to instrument"); continue; }
+            before = ins[gk]; after = ins[gk + 1];
+        }
         const uint32_t g0 = before->getOffset() + 16, glen = (after->getOffset() - g0) / 16;
         const char *gf = getenv("BITTU_GROUP_FILE"), *eo = getenv("BITTU_GROUP_OFF"), *el = getenv("BITTU_GROUP_LEN");
         if (!gf || !eo || !el || strtoul(eo, 0, 0) != g0 || strtoul(el, 0, 0) != glen) { fprintf(out, "  %s: gap +0x%x, %u instructions does not match BITTU_GROUP_OFF/LEN/FILE: refusing to instrument\n", name, g0, glen); continue; }
