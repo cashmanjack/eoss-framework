@@ -96,7 +96,7 @@ int main(int argc, char **argv)
     ls.resize(NL + 1); fread(ls.data(), 4, NL + 1, f); lt.resize(ls[NL]); fread(lt.data(), 4, lt.size(), f); tr.resize((size_t)NT * 9); fread(tr.data(), 4, tr.size(), f); fclose(f);
     const long nr = atol(argv[3]); std::vector<Ray8> rays(nr); f = fopen(argv[2], "rb"); fread(rays.data(), sizeof(Ray8), nr, f); fclose(f);
     std::vector<int32_t> order(nr); f = fopen(argv[4], "rb"); fread(order.data(), 4, nr, f); fclose(f);
-    const int WRES = argc > 6 ? atoi(argv[6]) : 13, J = argc > 7 ? atoi(argv[7]) : 52, WARM = argc > 8 ? atoi(argv[8]) : 13, NSM = 142;
+    const int WRES = argc > 6 ? atoi(argv[6]) : 13, J = argc > 7 ? atoi(argv[7]) : 52, WARM = argc > 8 ? atoi(argv[8]) : 13, NSM = getenv("NSM") ? atoi(getenv("NSM")) : 142;
     const long nw = nr / 32; const long Ps[2] = {nw / 3, 2 * nw / 3};
     // histograms: [unit 0 sm, 1 tpc][variant 0 nodes, 1 nodes+leaves][dedupe 0 raw, 1 dedupe]
     Hist H[2][2][2]; std::vector<int32_t> last(NN + NL + 1, -1);
