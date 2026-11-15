@@ -27,13 +27,13 @@ Run 2026-11-13. "match" = within the stated range. All TTU runs exit 0, 0 wrong 
 | 10 | Memory_5 B after A on the sibling | 782/827/867 | 782/827/867 | exact |
 | 10 | Memory_5 B after A in another TPC | 1682/1956/2385 | 1569/1863/2169 | -7%/-5%/-9%, match; A alone 1602/1912/2258 |
 
-Not run (not in the core set, v1 has no formula from SM count): random ray plateau (L2 and per GPC sector ceilings), Throughput_6 random rays.
+Not run (not in the core set, the model had no formula from SM count): random ray plateau (L2 and per GPC sector ceilings), Throughput_6 random rays.
 
 ## L2 capacity term (2026-11-13, CPU model, model/l2_capacity.py)
 Cyclic access (a pointer chase, or a loop over the same lines): L2 hit rate h = 1 up to C(1-d), 0 from C(1+d), linear between; random access h = min(1, C/W). Latency = h * L2 + (1-h) * DRAM.
 Fit on triton (C = 96 MB): chase hits at 1 to 64 MB (292 to 298), DRAM at 512 MB (652). Triton has no point between 64 and 512 MB, so d is only bounded: 64 <= 96 (1-d) gives d in [0, 1/3]. Chosen d = 1/6 (middle). The 4070 Ti (C = 48 MB) is a check, not a fit:
 
-| MB | measured | v1 without term | step (d 0) | d = 1/6 | random formula |
+| MB | measured | before the L2 term | step (d 0) | d = 1/6 | random formula |
 |---|---|---|---|---|---|
 | 24, 32, 40 | 284, 284, 286 | 285 | 285 | 285 | 285 |
 | 48 | 424 | 285 | 285 | 471 (+11%) | 285 |
@@ -44,7 +44,7 @@ Fit on triton (C = 96 MB): chase hits at 1 to 64 MB (292 to 298), DRAM at 512 MB
 The 64 MB miss is now predicted (it was the miss in Finding 104). 48 MB (= the L2 size) is the one soft point: measured hit rate 0.63 (d = 1/6 predicts 0.5, the step predicts 1). Cyclic is the right form for a chase; the random formula underestimates the slowdown for a cyclic walk and is for random ray access. The width d is not identified by triton, and the 4070 Ti only gives d <= 1/6 (40 MB still hits, 56 MB already misses); the partial point at 48 MB (0.63) cannot fix d for a symmetric ramp (it gives 0.5 for any d), so the ramp is probably asymmetric. More points between 40 and 56 MB are needed (not measured). Limit: a real ray stream is neither cyclic nor uniform; its hit rate comes from the reuse histogram (Finding 100), the capacity term is the bound for the cyclic case.
 
 ## L2 ramp points (2026-11-13 evening, chase 'ca', 3 repetitions each, notes/io/l2ramp)
-| MB | cycles per load (3 reps) | hit rate (285.4 hit, 656.3 DRAM) | v1 symmetric d 1/6 | v2 asymmetric 0.97 to 1.05 |
+| MB | cycles per load (3 reps) | hit rate (285.4 hit, 656.3 DRAM) | symmetric d 1/6 (first version) | asymmetric 0.97 to 1.05 |
 |---|---|---|---|---|
 | 40 | 286.4, 286.5, 286.4 | 1.00 | 285 | 285 |
 | 44 | 287.2, 287.2, 287.2 | 0.995 | 378 (wrong) | 285 |
