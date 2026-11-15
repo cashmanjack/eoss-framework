@@ -32,7 +32,7 @@ static FILE *out = stderr;
 static int print_n = 64, off_mode = 0, launches = 0;
 static std::string kernel = "ttu_one";
 static std::set<CUfunction> done;
-static BittuRec *g_rec = nullptr; static int *g_nseen = nullptr; static int g_nth = 0; static bool g_ready = false; static CUfunction g_func = nullptr;
+static BittuRec *g_rec = nullptr, *h_rec = nullptr; static int *g_nseen = nullptr, *h_nseen = nullptr; static int g_nth = 0; static bool g_ready = false; static CUfunction g_func = nullptr;
 
 static uint64_t field(const Inst &i, TtuField f) {   // bits [hi:lo] of the 128 bit instruction
     if (f.hi < 0) return 0; uint64_t v = 0;
@@ -115,7 +115,7 @@ static void instrument(CUcontext ctx, CUfunction f, int nth) {
         fprintf(out, "  ray registers:"); for (int r : g.ray_regs) fprintf(out, " R%d", r); fprintf(out, "\n  result registers:"); for (int r : g.res_regs) fprintf(out, " R%d", r); fprintf(out, "\n");
         fprintf(out, "  probes: bittu_cal + bittu_pre after +0x%04x, bittu_post after +0x%04x\n", before->getOffset(), after->getOffset());
         const size_t nrec = (size_t)nth * BITTU_INST;
-        cudaMallocManaged(&g_rec, nrec * sizeof(BittuRec)); cudaMallocManaged(&g_nseen, (size_t)nth * sizeof(int)); g_nth = nth; g_func = fn;
+        cudaMalloc(&g_rec, nrec * sizeof(BittuRec)); cudaMalloc(&g_nseen, (size_t)nth * sizeof(int)); h_rec = (BittuRec *)malloc(nrec * sizeof(BittuRec)); h_nseen = (int *)malloc((size_t)nth * sizeof(int)); /* device memory, not managed: first touch page faults of managed memory cost 1.8 M cycles in the first probe */ g_nth = nth; g_func = fn;
         nvbit_insert_call(before, "bittu_cal", IPOINT_AFTER); nvbit_add_call_arg_guard_pred_val(before);
         nvbit_add_call_arg_const_val64(before, (uint64_t)g_rec); nvbit_add_call_arg_const_val64(before, (uint64_t)g_nseen); nvbit_add_call_arg_const_val32(before, nth);
         nvbit_insert_call(before, "bittu_pre", IPOINT_AFTER); nvbit_add_call_arg_guard_pred_val(before);
@@ -140,16 +140,17 @@ void nvbit_at_cuda_event(CUcontext ctx, int is_exit, nvbit_api_cuda_t cbid, cons
         if (mine) {
             if (!done.size() || !g_ready) instrument(ctx, f, nth);
             if (g_ready && nth > g_nth) { fprintf(out, "launch %d: %d threads > %d allocated at the first launch: not recording\n", launches, nth, g_nth); nvbit_enable_instrumented(ctx, f, false); return; }
-            if (g_ready) { cudaDeviceSynchronize(); memset(g_rec, 0, (size_t)g_nth * BITTU_INST * sizeof(BittuRec)); memset(g_nseen, 0, (size_t)g_nth * sizeof(int)); }
+            if (g_ready) { cudaDeviceSynchronize(); cudaMemset(g_rec, 0, (size_t)g_nth * BITTU_INST * sizeof(BittuRec)); cudaMemset(g_nseen, 0, (size_t)g_nth * sizeof(int)); cudaDeviceSynchronize(); }
         }
         nvbit_enable_instrumented(ctx, f, mine && g_ready);
     } else if (mine && g_ready) {
         cudaDeviceSynchronize();
+        cudaMemcpy(h_rec, g_rec, (size_t)g_nth * BITTU_INST * sizeof(BittuRec), cudaMemcpyDeviceToHost); cudaMemcpy(h_nseen, g_nseen, (size_t)g_nth * sizeof(int), cudaMemcpyDeviceToHost);
         std::vector<double> meas, ovh; long inst = 0, thr = 0, full = 0, bad_order = 0;
         for (int t = 0; t < g_nth; ++t) {
-            if (g_nseen[t]) ++thr;
-            for (int k = 0; k < g_nseen[t] && k < BITTU_INST; ++k) {
-                const BittuRec &r = g_rec[t * BITTU_INST + k]; ++inst; full += r.mask_pre == 0xffffffffu;
+            if (h_nseen[t]) ++thr;
+            for (int k = 0; k < h_nseen[t] && k < BITTU_INST; ++k) {
+                const BittuRec &r = h_rec[t * BITTU_INST + k]; ++inst; full += r.mask_pre == 0xffffffffu;
                 if (r.t1 < r.t0b || r.t0b < r.t0a) { ++bad_order; continue; }
                 meas.push_back((double)(r.t1 - r.t0b)); ovh.push_back((double)(r.t0b - r.t0a));
             }
@@ -158,8 +159,8 @@ void nvbit_at_cuda_event(CUcontext ctx, int is_exit, nvbit_api_cuda_t cbid, cons
         fprintf(out, "launch %d: %ld threads ran the group, %ld instances, %ld with a full warp mask, %ld with clocks out of order\n", launches, thr, inst, full, bad_order);
         fprintf(out, "  group cycles (t1 - t0b): median %.0f, probe overhead o (t0b - t0a): median %.0f, corrected %.0f\n", m, o, m - o);
         int shown = 0;
-        for (int t = 0; t < g_nth && shown < print_n; ++t) for (int k = 0; k < g_nseen[t] && k < BITTU_INST && shown < print_n; ++k, ++shown) {
-            const BittuRec &r = g_rec[t * BITTU_INST + k];
+        for (int t = 0; t < g_nth && shown < print_n; ++t) for (int k = 0; k < h_nseen[t] && k < BITTU_INST && shown < print_n; ++k, ++shown) {
+            const BittuRec &r = h_rec[t * BITTU_INST + k];
             fprintf(out, "  thread %d inst %d t0a %llu t0b %llu t1 %llu ray", t, k, (unsigned long long)r.t0a, (unsigned long long)r.t0b, (unsigned long long)r.t1);
             for (int i = 0; i < 8; ++i) fprintf(out, " %08x", r.ray[i]); fprintf(out, " res");
             for (int i = 0; i < BITTU_MAXR; ++i) fprintf(out, " %08x", r.res[i]); fprintf(out, "\n");
