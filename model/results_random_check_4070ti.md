@@ -1,0 +1,18 @@
+# Random ray check of the performance model on the 4070 Ti against the predictions of a93c71d (2026-11-15, io GPU 0, OptiX only)
+Predictions: model/predictions_random_check_4070ti.md (committed before any ordered launch was timed). Measured: ttu/bench/Morton/random_check.py measure, 8,388,608 random rays per scene, 10 launches per order, median, every result compared with the natural order (0 wrong in all 21 launch sets). Report: model/random_check_report.py (output notes/q10/check/report.txt).
+
+| scene (BVH, hit fraction) | order | predicted | measured | log error |
+|---|---|---|---|---|
+| soup 300,000 (18.6 MiB, 0.88) | Morton origin k5 / oracle d1 / d2 / d3 / d4 / full | 1.40 / 1.13 / 1.27 / 1.35 / 1.39 / 1.39 | 2.16 / 1.35 / 1.98 / 2.13 / 2.17 / 2.17 | -0.43 / -0.18 / -0.44 / -0.46 / -0.45 / -0.45 |
+| soup 1,500,000 (93.1 MiB, 0.93) | same | 1.51 / 1.09 / 1.24 / 1.40 / 1.46 / 1.51 | 2.36 / 1.23 / 1.68 / 2.11 / 2.26 / 2.31 | -0.44 / -0.13 / -0.31 / -0.41 / -0.44 / -0.43 |
+| Bistro Exterior (175.9 MiB, 0.35) | same | 0.95 / 1.06 / 1.25 / 1.26 / 1.27 / 1.27 | 1.22 / 1.21 / 1.27 / 1.30 / 1.32 / 1.32 | -0.25 / -0.13 / -0.02 / -0.03 / -0.04 / -0.04 |
+
+rms log error: 0.413 (soup 3e5), 0.376 (soup 1.5e6), 0.117 (Bistro), 0.330 over all 18. The rms of the measured log speedups (the spread to explain) is 0.697, 0.704, 0.244, 0.589.
+
+What held: the order of the grouping keys (gain grows with depth and saturates at depth 3 to 4), the Bistro numbers (within 12% rms, d2 to full within 4%), the hit and miss structure of the scene. What failed: on both soups every prediction is low, by 0.43 in log (a factor 1.5) at the deep keys: predicted gain stays at 1.39 and 1.51, measured 2.17 and 2.31. Same failure as on triton (Finding 100: at most 1.4 predicted where 2.2 to 2.3 measured), now on a chip and two scenes the model never saw.
+
+Why random rays were harder on triton (0.36) than the bounce rays here (0.087 and 0.103, Finding 113), checked against this data:
+1. The error follows the size of the gain, not the GPU or the scene. Relative to the spread it is the same on the soups (0.59 and 0.53 of the measured log speedup rms) and similar triton (0.36 against a spread of about 0.6 for Finding 100's 12 points, my estimate from its table); bounce rays gain only 1.1 to 1.3 and Bistro 1.2 to 1.3, so the same relative error is 0.09 to 0.12 in absolute terms. Random rays on a soup are the one case where grouping gives 2.2 to 2.4 times.
+2. The model cannot express that gain. Post hoc diagnostic (report.txt): no factor on the model's cache miss terms reaches the measured soup speedups (the equation has no solution: the order independent terms bound it), and removing the L1 sector request term only lifts the predictions to 1.5 to 1.7. About half of the natural time per ray sits in terms that do not depend on the order, mainly the occupancy term c_qW q W / 16 (48 of about 100 cycles per ray at 13 warps), which was fitted on our own harness kernel (Memory_4), where grouping gives only 8 to 13 percent because the kernel's own loads and stores dominate (the 2026-11-11 ablations). OptiX on random rays loses its time in node fetches and gains 2.2 times.
+3. So the earlier agreement on bounce rays was a result of small gains inside the range the fitted terms can reach, not evidence that the miss terms are right. The performance model needs its order independent terms refit on OptiX data (or a miss term fitted on OptiX) before it can be trusted on gains above about 1.5; this was not done (no refit, by the rules of the check).
+Not tested: other chips (triton), rays with a direction code in the Morton key, the 8M and 16M soups, the real scenes of Finding 102 with random rays other than Bistro, trace time only (no sort cost).
