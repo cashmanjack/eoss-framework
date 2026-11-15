@@ -108,6 +108,17 @@ def check(path):
             ok('B15 loop: no TTU instruction after the branch target other than the one group', len(hits) == 19, len(hits))
         else:
             ok('B15 no branch anywhere before EXIT', not brs)
+    if meta.get('cctl'):   # Interface_7: exactly one TTUCCTL.IVALL in stage 1 (none in stage 0), unpredicated, right after the first session's wait NOP, outside every session, followed by 4 stall 15 NOPs
+        cc = [i for i, b in enumerate(body) if low12(b) == 0x3d5]
+        g0 = groups[0]; GLc = meta.get('group_len', 19)
+        if meta['stage'] == 1:
+            ok('cctl: exactly one TTUCCTL, ivall bit 80 set, unpredicated', len(cc) == 1 and bit(body[cc[0]], 80) and pred(body[cc[0]]) == (7, 0), cc)
+            ok('cctl: right after the first session and its wait NOP, before the second TTUOPEN', cc == [g0 + GLc + 1] and cc[0] < groups[1], (cc, groups))
+            from build_patch import ttuccttl_bytes
+            ok('cctl: bytes equal the EoSS encoder output for TTUCCTL.IVALL', bytes(body[cc[0]]) == ttuccttl_bytes())
+            ok('cctl: followed by 4 NOPs with stall 15', all(low12(body[cc[0] + 1 + k]) == 0x918 and ((W(body[cc[0] + 1 + k][8:]) >> 41) & 0xf) == 15 for k in range(4)))
+        else:
+            ok('cctl: stage 0 has no TTUCCTL', not cc, cc)
     wt = lambda b: (W(b[8:]) >> 52) & 0x3f
     stall = lambda b: (W(b[8:]) >> 41) & 0xf
     nb = meta.get('barnops', 1) if meta.get('sync') else 0

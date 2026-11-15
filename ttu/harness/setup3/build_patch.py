@@ -225,8 +225,18 @@ def set_regcount(data, secname, regs):
     return old
 
 
+def ttuccttl_bytes():
+    """TTUCCTL.IVALL as the EoSS SM89 encoder builds it (class ttucctl_, ivall bit 80, control as the other TTU instructions: stall 1, yield, no scoreboards)."""
+    import struct
+    from eoss.enc.generator import Encoder
+    ins = Encoder(sm='89').build('ttucctl_', {'ftz': 1}, opex=17)
+    assert ins.valid, ins.failed_conditions
+    assert struct.unpack('<QQ', ins.bytes)[0] & 0xfff == 0x3d5
+    return ins.bytes
+
+
 def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out=95, preclk=False, barnops=1,
-          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False, lean_ld=False, lean_st=False):
+          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False, lean_ld=False, lean_st=False, cctl=False):
     d = open(dump, 'rb').read()
     at = lambda o: d[DUMP_BASE + o:DUMP_BASE + o + 16]
     group = [at(GROUP_AT + 16 * k) for k in range(GROUP_LEN)]
@@ -406,6 +416,10 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         groups.append(len(body))
         body += group if stage == 1 else [ctrl.NOP_BYTES] * GROUP_LEN
         body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))   # CLOSE done
+        if cctl:   # Interface_7: TTUCCTL.IVALL between two complete sessions (never inside one); stage 0 puts a NOP in its place. Then 4 NOPs with stall 15.
+            assert twice, '--cctl needs --twice'
+            body.append(ttuccttl_bytes() if stage == 1 else ctrl.NOP_BYTES)
+            body += [ctrl.write_control(ctrl.NOP_BYTES, stall=15)] * 4
         if thrash:   # same warp, same SM: N L1 allocating loads per lane, N x 4 KB of lines per warp
             assert remap, '--thrash needs --remap'
             for r in (THRASH_PTR, THRASH_PTR + 1):
@@ -527,7 +541,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     p.save(out)
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
     top_reg = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5] + ([LCNT + 1] if loop else []))
-    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'loop': loop, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0, 'lean': lean, 'hoist': hoist, 'coal': coal, 'outer': outer, 'outer_at': outer_at, 'stride': stride,
+    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'loop': loop, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0, 'lean': lean, 'hoist': hoist, 'coal': coal, 'outer': outer, 'outer_at': outer_at, 'stride': stride, 'cctl': cctl,
             'inputs': INPUTS, 'outputs': outputs, 'in_ptr': in_ptr}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
     used = g0 + GROUP_LEN + 1 + int(clock) + len(outputs) + 2
@@ -545,6 +559,7 @@ if __name__ == '__main__':
     a.add_argument('--sync', action='store_true', help='BAR.SYNC before the group (with --clock: before the start read)')
     a.add_argument('--regs', type=int, help='declared register count of ttu_one (>= 96)')
     a.add_argument('--max-out', type=int, default=95, help='store registers only up to this one')
+    a.add_argument('--cctl', action='store_true', help='Interface_7 (with --twice): TTUCCTL.IVALL between the two sessions (stage 1 only; stage 0 has a NOP there)')
     a.add_argument('--twice', action='store_true', help='two full sessions with the same ray; time the second')
     a.add_argument('--compact-out', action='store_true', help='store only input and clock registers')
     a.add_argument('--smfilter', action='store_true', help='blocks not on SM A or B (words 18, 19) exit before any TTU code')
@@ -568,4 +583,4 @@ if __name__ == '__main__':
     a.add_argument('--barnops', type=int, default=8, help='NOPs after the barrier: a warp issues a few instructions past BAR.SYNC before it stalls (8 measured enough at 20 warps)')
     x = a.parse_args()
     build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else '') + ('a%d' % x.alu if x.alu else '') + ('l' if x.slim else '') + ('L%d' % x.loop if x.loop else '') + ('o%ds%d' % (x.outer, x.stride) if x.outer else '') + ('N' if x.lean else '') + ('Nl' if x.lean_ld else '') + ('Ns' if x.lean_st else '') + ('H' if x.hoist else '') + ('C' if x.coal else ''),
-          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean, x.hoist, x.coal, x.lean_ld, x.lean_st)
+          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean, x.hoist, x.coal, x.lean_ld, x.lean_st, x.cctl)
