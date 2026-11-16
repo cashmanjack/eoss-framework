@@ -1,0 +1,10 @@
+# Queue 14: latency aware callback term, form fixed BEFORE any comparison of it with launch times (2026-11-15, 4070 Ti)
+Probes (clock64 at entry and exit of each callback program, the leader lane adds the elapsed cycles and one call per warp call; raygen start, before and after the trace, end) give per warp call latency L (SM cycles) of each callback program and the split of warp time. Third party code is patched in /dev/shm copies only (diffs in notes/q14, not in git).
+Callback time per launch, SM cycles per SM:
+- floor:   T_floor = sum over callback functions of calls x max(issue, memory) / 60   (Finding 131, unchanged; Arkade with the 19 cycle double precision instruction)
+- latency: T_lat   = L x N / (60 x W)   N = warp calls of the outermost callback programs (probe count; RTNN, kNN, Arkade: intersection program; kNN's any hit is inside it; BH: optixInvoke = closest hit or miss), L = mean probe cycles per call, W = ncu sm__warps_active.avg.per_cycle_active of the probed launch
+- model:   T_cb = max(T_floor, T_lat)
+Two versions of L: L_unl (the same workload launched with 1,920 queries = 60 warps = one warp per SM, probes on) which is a prediction input available without a loaded run, and L_ld (the loaded run, probes on), which already contains queueing and is therefore a consistency check, not a prediction.
+Launch time model otherwise as Finding 131: RTNN and kNN c0 (one parameter, refit on RTNN as before) + T_cb + the replay miss term; BH: traversal term (c 20) and T_cb, larger plus a quarter of the smaller; Arkade: T_cb alone (no replay miss term fitted for it). Clock 2.5 GHz as in Finding 131.
+Time breakdown: shares of summed warp time (raygen start to end): callbacks = outermost callback cycles, traversal = trace window minus callbacks (BH: optixTraverse windows), other = the rest (raygen code outside the trace, loop glue, first touch costs).
+Errors: log ratio predicted over measured, rms, against the probes off launch time. Probe overhead (probes on over off) reported next to it.
