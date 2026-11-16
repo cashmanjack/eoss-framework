@@ -42,7 +42,7 @@ ax.set_xlabel('cycles (blue: SM instruction and cache, orange: RT unit, red: han
 fig.text(.01, .01, 'Sources (Findings):\n instruction .25, L1 tag 1.0, L2 sector 2.9, double precision 19: F131 (4070 Ti microbenchmarks)\n candidate 4.9 per SM: F116 (RTNN slope; F127 gives 4 to 9)\n ray 7.4 at saturation: F24, F31 (5.7 to 7.4 per ray, one SM)\n BVH level 43 (L1): F25, F26; 337 (L2), 620 (DRAM): F26 ranges 270 to 400, 580 to 750; point values from fig1 slopes\n hand off 875 per warp call: F49 (850 to 900), used in F137', fontsize=7.4, color=K, va='bottom')
 save(fig, 'm3_per_element_cost.png', rect=(0, .2, 1, 1))
 
-# 4 node state capacity (F150, notes/q19/capacity_table.txt), sibling results F155 (notes/q20/sib_matrix.log medians; its json was overwritten by the F157 run) and F157 (notes/q20/sib_fence.json). TENTATIVE.
+# 4 node state capacity (F150, notes/q19/capacity_table.txt), sibling results F155 (notes/q20/sib_matrix.log medians; its json was overwritten by the F157 run) F157 (notes/q20/sib_fence.json) and F159 fence decomposition (notes/q21/fence2_stage1_20261116T133352.json). Measurement firm; interpretation (which state, which part of the fence) left open in the caption.
 rows = [l.split() for l in open(R + 'notes/q19/capacity_table.txt') if l.strip() and l.split()[0].isdigit()]
 kb = [float(r[2]) for r in rows]; sv = [float(r[7]) for r in rows]
 nm = 'single twice flag0 sib4 ctl4 sib16 ctl16 flag0p sib4p ctl4p'.split(); f155 = {}
@@ -50,6 +50,9 @@ for l in open(R + 'notes/q20/sib_matrix.log'):
     t = l.split('|')[0].split()
     if len(t) == 11 and t[0].isdigit(): f155[int(t[0])] = dict(zip(nm, map(int, t[1:])))
 fen = json.load(open(R + 'notes/q20/sib_fence.json'))
+fen2 = json.load(open(R + 'notes/q21/fence2_stage1_20261116T133352.json'))
+def med2(a, N): return st.median(c for x in fen2['%s|%d' % (a, N)] for c in x['cycles'])
+def sav2(a, N): return 1 - med2(a, N) / med2('single', N)
 def med(a, N): return st.median(c for x in fen['%s|%d' % (a, N)] for c in x['cycles'])
 Ns = [1024, 2048, 3072, 4096]; KB = [68, 132, 199, 263]
 fig, ax = plt.subplots(figsize=(7.6, 4.6)); ax.plot(kb, sv, 'o-', color=B, ms=4, label='second session, alone (F150)')
@@ -57,10 +60,12 @@ ax.plot(KB, [1 - f155[N]['sib4'] / f155[N]['single'] for N in Ns], 's--', color=
 ax.plot(KB, [1 - f155[N]['ctl4'] / f155[N]['single'] for N in Ns], '^:', color=G, ms=6, label='same block on another TPC (F155)')
 ax.plot(KB[:2], [1 - med('c1', N) / med('single', N) for N in (1024, 2048)], 'D', color=Rd, mfc='none', ms=8, label='sibling that only waits, then ONE fence (F157)')
 ax.plot(KB[:2], [1 - med('a1', N) / med('single', N) for N in (1024, 2048)], 'v', color='#7b3fa0', ms=8, label='sibling that only waits, no fence (F157)')
+for a_, mk, col, lab in (('e1', 'o', G, 'cta scope fence on the sibling SM (F159)'), ('f0', 'X', Or, 'gpu scope fence on the TTU warp\'s own SM (F159)'), ('g', 'P', 'k', 'gpu scope fences on both SMs of the TPC (F159)')):
+    ax.plot(KB[:2], [sav2(a_, N) for N in (1024, 2048)], mk, color=col, mfc=col if a_ != 'e1' else 'none', ms=9, label=lab)
 ax.axvspan(80, 96, color=K, alpha=.15); ax.text(88, .03, 'L1 cliff\n80 to 96 KB', ha='center', fontsize=8.5, color=K); ax.set_xscale('log')
 ax.set_xlabel('BVH size, GAS bytes read by one ray (KB)'); ax.set_ylabel('saving of the second session (1 minus second / first)'); ax.set_ylim(0, .75)
-ax.set_title('TENTATIVE: second session saving; a fence on the sibling SM removes it'); ax.legend(frameon=False, fontsize=8.2, loc='upper right', bbox_to_anchor=(1, .98))
-fig.text(.01, .005, 'Tentative: mechanism of the fence effect not separated (barrier or L1 invalidate); F157 measured at 68 and 132 KB only.', fontsize=7.5, color=K); save(fig, 'm4_node_state_capacity.png')
+ax.set_title('Second session saving: a gpu scope fence on either SM of the TPC removes\nabout 55 percent, on both removes all; a cta scope fence removes none',fontsize=10.5); ax.legend(frameon=False, fontsize=7.4, loc='upper right', bbox_to_anchor=(1, .98))
+fig.text(.01, .005, 'Fence tests at 68 and 132 KB only. Not separated: the gpu barrier against the L1 invalidate it comes with,\nand one L1 pool shared over the TPC against separate per SM state (F159).', fontsize=7.5, color=K); save(fig, 'm4_node_state_capacity.png', rect=(0, .05, 1, 1))
 
 # 5 BITTU against the harness clock (F122, notes/q11/timing_fix.json)
 j = json.load(open(R + 'notes/q11/timing_fix.json')); x = [v['harness_s1'] - v['harness_s0'] for v in j.values()]; y = [v['corrected'] for v in j.values()]
