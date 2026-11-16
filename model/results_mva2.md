@@ -11,7 +11,7 @@ Error = log(predicted / measured). L = loaded callback latency per warp call (pr
 | knn orig round 2 | 42599 | 20809 | 20791 | -0.72 | -0.72 | 0.979 | 0.424 | 0.424 | -0.84 | -0.84 |
 | knn orig round 3 | 42544 | 20422 | 20393 | -0.73 | -0.74 | 3.502 | 1.593 | 1.593 | -0.79 | -0.79 |
 | knn orig round 4 | 24085 | 12743 | 12656 | -0.64 | -0.64 | 11.016 | 5.658 | 5.666 | -0.67 | -0.66 |
-| arkade device buffer, io (60 SMs) | 86717 | 75983 | 75974 | -0.13 | -0.13 | 3.694 | 3.764 | 3.764 | +0.02 | +0.02 |
+| arkade device buffer, io (60 SMs) | 86859 | 75983 | 75974 | -0.13 | -0.13 | 3.700 | 3.764 | 3.764 | +0.02 | +0.02 |
 | arkade device buffer, triton (142 SMs) | 84000 | 75983 | 75974 | -0.10 | -0.10 | 1.963 | 1.590 | 1.590 | -0.21 | -0.21 |
 
 rms log error by kind: | kind | n | L issue only | L full | T issue only | T full |
