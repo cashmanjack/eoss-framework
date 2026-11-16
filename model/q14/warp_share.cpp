@@ -51,12 +51,13 @@ int main(int argc, char **argv)
     const int nb = atoi(argv[4]); std::vector<int32_t> cnt(nb); f = fopen(argv[3], "rb"); fread(cnt.data(), 4, nb, f); fclose(f);
     std::vector<long> off(nb + 1, 0); for (int i = 0; i < nb; ++i) off[i + 1] = off[i] + cnt[i];
     const int nw = nb / 32; int W0 = argc > 5 ? atoi(argv[5]) : 0, W1 = argc > 6 ? atoi(argv[6]) : nw;
-    FILE *fr = fopen(argv[2], "rb"); double raw_n = 0, raw_l = 0, lock_n = 0, lock_l = 0, iter_n = 0, iter_l = 0, warp_n = 0, warp_l = 0, trav = 0, raw_i = 0, lock_i = 0, iter_i = 0;
+    const long base = off[(long)W0 * 32]; FILE *fr = fopen(argv[2], "rb");   // RAYS holds the bodies from warp W0 on (BH_DUMP_W0 window)
+    double raw_n = 0, raw_l = 0, lock_n = 0, lock_l = 0, iter_n = 0, iter_l = 0, warp_n = 0, warp_l = 0, trav = 0, raw_i = 0, lock_i = 0, iter_i = 0;
     // instance node counted separately (id -1): raw_i = one per traversal; lock/iter/warp = merged
     for (int w = W0; w < W1; ++w) {
         std::vector<std::vector<std::vector<int>>> L(32);   // lane -> traversal -> ids
         int maxit = 0;
-        for (int l = 0; l < 32; ++l) { int b = w * 32 + l; fseek(fr, off[b] * 32L, SEEK_SET); std::vector<Ray8> rr(cnt[b]); fread(rr.data(), sizeof(Ray8), cnt[b], fr); L[l].resize(cnt[b]); for (int i = 0; i < cnt[b]; ++i) { int lv; fetches(rr[i], L[l][i], lv); } maxit = std::max(maxit, (int)cnt[b]); }
+        for (int l = 0; l < 32; ++l) { int b = w * 32 + l; fseek(fr, (off[b] - base) * 32L, SEEK_SET); std::vector<Ray8> rr(cnt[b]); fread(rr.data(), sizeof(Ray8), cnt[b], fr); L[l].resize(cnt[b]); for (int i = 0; i < cnt[b]; ++i) { int lv; fetches(rr[i], L[l][i], lv); } maxit = std::max(maxit, (int)cnt[b]); }
         std::set<int> wset_n, wset_l;
         for (int i = 0; i < maxit; ++i) {
             std::set<int> itn, itl; size_t maxs = 0; for (int l = 0; l < 32; ++l) if (i < (int)L[l].size()) maxs = std::max(maxs, L[l][i].size());
