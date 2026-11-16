@@ -12,6 +12,13 @@ __global__ void alu(float* o, long long* cyc, int n) {
   long long t1 = clock64(); o[blockIdx.x * blockDim.x + threadIdx.x] = a + c0 + c1 + c2;
   if ((threadIdx.x & 31) == 0) cyc[blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32] = t1 - t0;
 }
+__global__ void dp(double* o, long long* cyc, int n) {
+  double a = threadIdx.x, b = 1.0001, c0 = 0.5, c1 = 0.25, c2 = 0.125, c3 = 0.0625;
+  long long t0 = clock64();
+  for (int i = 0; i < n; i++) { a = fma(a, b, c0); c0 = fma(c0, b, c1); c1 = fma(c1, b, c2); c2 = fma(c2, b, c3); }
+  long long t1 = clock64(); o[blockIdx.x * blockDim.x + threadIdx.x] = a + c0 + c1 + c2;
+  if ((threadIdx.x & 31) == 0) cyc[blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32] = t1 - t0;
+}
 __global__ void mem(const char* base, unsigned long long wset, unsigned stride, float* o, long long* cyc, int n) {
   unsigned lane = threadIdx.x & 31, w = blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32; unsigned long long nl = wset / 128; float s = 0;
   unsigned long long h = 2654435761ull * (w + 1);
@@ -32,13 +39,13 @@ __global__ void mem(const char* base, unsigned long long wset, unsigned stride, 
 }
 int main(int argc, char** argv) {
   int dev = 0; cudaSetDevice(dev); cudaDeviceProp pr; cudaGetDeviceProperties(&pr, dev); int nsm = pr.multiProcessorCount;
-  int warps = argc > 4 ? atoi(argv[4]) : 32, n = 4096; float* o; long long* cyc; cudaMalloc(&o, (size_t)nsm * warps * 32 * 4); cudaMalloc(&cyc, (size_t)nsm * warps * 8);
+  int warps = argc > 4 ? atoi(argv[4]) : 32, n = 4096; float* o; long long* cyc; cudaMalloc(&o, (size_t)nsm * warps * 32 * 8); cudaMalloc(&cyc, (size_t)nsm * warps * 8);
   char* base = nullptr; unsigned long long wset = 0; unsigned stride = 0;
-  bool isalu = argv[1][0] == 'a';
+  bool isalu = argv[1][0] == 'a' || argv[1][0] == 'd'; bool isdp = argv[1][0] == 'd';
   if (!isalu) { stride = atoi(argv[2]); wset = strtoull(argv[3], 0, 10); cudaMalloc(&base, wset); cudaMemset(base, 1, wset); }
   for (int rep = 0; rep < 3; rep++) {
     cudaDeviceSynchronize();
-    if (isalu) alu<<<nsm, warps * 32>>>(o, cyc, n); else mem<<<nsm, warps * 32>>>(base, wset, stride, o, cyc, n);
+    if (isdp) dp<<<nsm, warps * 32>>>((double*)o, cyc, n); else if (isalu) alu<<<nsm, warps * 32>>>(o, cyc, n); else mem<<<nsm, warps * 32>>>(base, wset, stride, o, cyc, n);
     cudaDeviceSynchronize();
   }
   long long* h = (long long*)malloc((size_t)nsm * warps * 8); cudaMemcpy(h, cyc, (size_t)nsm * warps * 8, cudaMemcpyDeviceToHost);

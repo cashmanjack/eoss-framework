@@ -29,8 +29,9 @@ def functions(path):
     for r in rows[hi + 1:]:
         if len(r) < len(h) or not r[0].startswith('0x'): continue
         if cur is None and (r[1].strip() == 'NOP' or r[1].strip().startswith('BRA 0x')): continue
-        if cur is None: cur = dict(entry=num(r, 'Instructions Executed'), addr=r[0], ins=0, thr=0, gld=0, gst=0, lld=0, lst=0, tags=0, l2g=0, l2l=0, n=0, first=r[1].strip()); fs.append(cur)
+        if cur is None: cur = dict(entry=num(r, 'Instructions Executed'), addr=r[0], ins=0, thr=0, gld=0, gst=0, lld=0, lst=0, tags=0, l2g=0, l2l=0, dp=0, n=0, first=r[1].strip()); fs.append(cur)
         e = num(r, 'Instructions Executed'); cur['ins'] += e; cur['thr'] += num(r, 'Thread Instructions Executed'); cur['n'] += 1
+        if ([t for t in r[1].split() if not t.startswith('@')] or [''])[0].split('.')[0] in ('DADD', 'DMUL', 'DFMA', 'DSETP', 'DMNMX', 'DSQRT', 'DRCP'): cur['dp'] += e
         sp, op = r[ix['Address Space']], r[ix['Access Operation']]
         if sp == 'Global': cur['gld' if op == 'Load' else 'gst'] += e
         elif sp == 'Local': cur['lld' if op == 'Load' else 'lst'] += e
@@ -41,7 +42,7 @@ def functions(path):
         c = f['entry']
         if c <= 0: continue
         out.append(dict(addr=f['addr'][-6:], calls=c, n_sass=f['n'], ins=f['ins'] / c, thr=f['thr'] / c, gld=f['gld'] / c, gst=f['gst'] / c, lld=f['lld'] / c, lst=f['lst'] / c,
-                        tags=f['tags'] / c, l2g=f['l2g'] / c, l2l=f['l2l'] / c, ins_total=f['ins']))
+                        dp=f['dp'] / c, tags=f['tags'] / c, l2g=f['l2g'] / c, l2l=f['l2l'] / c, ins_total=f['ins']))
     return out
 
 

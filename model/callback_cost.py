@@ -15,6 +15,7 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import callback_counts as CC
 C_I, C_TAG, C_X = 0.25, 1.00, 1.90
+C_DP = 19.0   # SM cycles per warp double precision instruction (DFMA chain, cbcost dp: 19.0); added in queue 13 after Arkade (its L2 build calls pow on doubles)
 NSM = 60
 
 
@@ -30,7 +31,7 @@ def term(d, warps, form='max'):
     f, h, t = load(d); tot = 0.0; parts = []
     for x in f:
         if x['calls'] <= 1.5 * warps: continue
-        iss = x['ins'] * C_I; mem = (x['tags'] + x['lld'] + x['lst']) * C_TAG + (1 - h) * x['l2g'] * C_X
+        iss = (x['ins'] - x.get('dp', 0)) * C_I + x.get('dp', 0) * C_DP; mem = (x['tags'] + x['lld'] + x['lst']) * C_TAG + (1 - h) * x['l2g'] * C_X
         c = max(iss, mem) if form == 'max' else iss + mem
         tot += x['calls'] * c / NSM; parts.append((x['addr'], x['calls'], x['ins'], iss, mem, c))
     return dict(cycles=tot, h=h, ncu_ns=t, parts=parts)
