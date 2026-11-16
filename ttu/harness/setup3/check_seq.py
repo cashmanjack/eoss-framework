@@ -118,6 +118,10 @@ def check(path):
             off = lambda b: (W(b) >> 32) & 0xffffffff
             tgt = [i + 1 + ((off(body[i]) - (1 << 32 if off(body[i]) >> 31 else 0)) // 16) for i in brs]
             g1 = groups[0]
+            if meta.get('sibccctl'):   # (h): the one extra branch in the main code is the forward @P1 BRA to the B path; the backward spin test below is about the rest
+                fw = meta['sibccctl_bra']
+                ok('B15 sibccctl: one forward @P1 BRA right after the smfilter EXIT, target = the B path after the main EXIT', fw in brs and pred(body[fw]) == (1, 0) and tgt[brs.index(fw)] == meta['bpath'] and meta['bpath'] > ex + 1, (fw, brs, tgt, meta['bpath'], ex))
+                brs = [i for i in brs if i != fw]; tgt = [t for i, t in zip([i for i in range(len(body[:ex])) if low12(body[i]) in (0x947, 0x949, 0x943)], tgt) if i != fw]
             ok('B15 sibling: exactly one backward BRA (@!P6) between the sessions, to the spin load, no TTU instruction in the loop',
                len(brs) == 1 and low12(body[brs[0]]) == 0x947 and g1 + 18 < tgt[0] < brs[0] < groups[1] and ((W(body[brs[0]]) >> 12) & 0xf) == 0xe
                and low12(body[tgt[0]]) == 0x981 and not any(low12(body[i]) in TTU for i in range(tgt[0], brs[0] + 1)), (brs, tgt, groups))
@@ -143,6 +147,20 @@ def check(path):
             ok('cctl: followed by 4 NOPs with stall 15', all(low12(body[cc[0] + 1 + k]) == 0x918 and ((W(body[cc[0] + 1 + k][8:]) >> 41) & 0xf) == 15 for k in range(4)))
         else:
             ok('cctl: stage 0 has no TTUCCTL', not cc, cc)
+    if meta.get('sibccctl'):   # q22 (h): the B path (after the main EXIT and BRA self): no session, no OPEN/FUSE/ST/GO/LD, exactly one TTUCCTL.IVALL (stage 1; NOP in stage 0), after its spin on flag1, never predicated
+        bp = meta['bpath']; last = max(i for i in range(bp, len(body)) if low12(body[i]) == 0x947); tail = body[bp:last + 1]   # the section after the B path is NOP padding
+        cc = [bp + i for i, b in enumerate(tail) if low12(b) == 0x3d5]
+        ok('(h) B path starts after the main EXIT and BRA self, ends with EXIT and BRA self', bp == ex + 2 and low12(body[last - 1]) == 0x94d and pred(body[last - 1]) == (7, 0) and all(low12(b) == 0x918 for b in body[last + 1:]), (bp, ex, last))
+        ok('(h) B path has no TTUOPEN, TTUMACROFUSE, TTUST, TTUGO or TTULD', not [b for b in tail if low12(b) in TTU])
+        ok('(h) B path in the whole binary: exactly one TTUCCTL.IVALL in stage 1, none in stage 0, unpredicated, ivall bit 80', (len(cc) == 1 and bit(body[cc[0]], 80) and pred(body[cc[0]]) == (7, 0)) if meta['stage'] == 1 else not cc, cc)
+        if meta['stage'] == 1:
+            from build_patch import ttuccttl_bytes
+            ok('(h) TTUCCTL bytes equal the EoSS encoder output', bytes(body[cc[0]]) == ttuccttl_bytes())
+            ok('(h) no TTUCCTL anywhere else in the kernel', len([1 for b in body if low12(b) == 0x3d5]) == 1)
+            bra = [i for i in range(bp, last) if low12(body[i]) == 0x947]
+            ok('(h) TTUCCTL comes after the one backward spin BRA (flag1) and is followed by 4 stall 15 NOPs', len(bra) == 1 and bra[0] < cc[0] and all(low12(body[cc[0] + 1 + k]) == 0x918 and ((W(body[cc[0] + 1 + k][8:]) >> 41) & 0xf) == 15 for k in range(4)), (bra, cc))
+        stg_ = [bp + i for i, b in enumerate(tail) if low12(b) == 0x986]
+        ok('(h) B path stores exactly once (flag2 at +128)', len(stg_) == 1 and ((W(body[stg_[0]]) >> 40) & 0xffffff) == 128, stg_)
     wt = lambda b: (W(b[8:]) >> 52) & 0x3f
     stall = lambda b: (W(b[8:]) >> 41) & 0xf
     nb = meta.get('barnops', 1) if meta.get('sync') else 0

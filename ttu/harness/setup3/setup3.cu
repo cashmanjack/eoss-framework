@@ -314,7 +314,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--ias")) ias = true;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
         else if (!strcmp(argv[a], "--thrash-gas")) thrash_gas = true;
-        else if (!strcmp(argv[a], "--sibling") && a + 1 < argc) { if (sscanf(argv[++a], "%d:%d:%d:%u:%u", &sib_sm, &sib_kb, &sib_passes, &sib_poll, &sib_mode) < 3 || sib_mode > 4 || sib_sm < 0 || sib_kb < 1 || sib_passes < 0) { fprintf(stderr, "--sibling SM:KB:PASSES[:POLLNS]\n"); return 2; } }   // q20: needs build_patch --sibling --smfilter and --sms A,A (the block that lands on SM A runs, the others leave)
+        else if (!strcmp(argv[a], "--sibling") && a + 1 < argc) { if (sscanf(argv[++a], "%d:%d:%d:%u:%u", &sib_sm, &sib_kb, &sib_passes, &sib_poll, &sib_mode) < 3 || sib_mode > 5 || sib_sm < 0 || sib_kb < 1 || sib_passes < 0) { fprintf(stderr, "--sibling SM:KB:PASSES[:POLLNS]\n"); return 2; } }   // q20: needs build_patch --sibling --smfilter and --sms A,A (the block that lands on SM A runs, the others leave)
         else if (!strcmp(argv[a], "--thrash-near")) thrash_near = true;   // (with --thrash) words 26, 27 = a 64 KB buffer allocated right after the GAS (same 2 MB chunk if it prints so): warms the translation of the BVH page, no BVH line
         else if (!strcmp(argv[a], "--tlbflush") && a + 1 < argc) tlbpages = (size_t)atoll(argv[++a]);   // q18: before every timed launch (after --flush) touch one line in each of P 2 MB pages of a P x 2 MB buffer
         else if (!strcmp(argv[a], "--thrash-node")) thrash_node = true;   // q18 (with --thrash): lane 31 loads the OptiX instance node line (address A) instead of GAS line 31
@@ -887,11 +887,12 @@ int main(int argc, char **argv)
         if (sib_sm >= 0) {   // reset the flags, start the plain block on the target SM, wait until it is resident (it then spins on flag1), then launch the TTU warp
             CK(cudaMemset(sib_flags, 0, 4096)); CK(cudaDeviceSynchronize());
             memset((void *)sib_st, 0, sizeof(SibStat));
-            if (sib_mode) sib_fence<<<NSM, 384, 0, ssib>>>((unsigned)sib_sm, sib_mode, getenv("SIB_WAITNS") ? strtoull(getenv("SIB_WAITNS"), 0, 10) : 8000000ull, sib_flags, sib_st_d, getenv("SIB_SM2") ? atoi(getenv("SIB_SM2")) : -1);
+            if (sib_mode == 5) { /* q22 (h): no plain block; the second TTU block (build_patch --sibccctl, --sms A,B --blocks NSM) is the sibling */ }
+            else if (sib_mode) sib_fence<<<NSM, 384, 0, ssib>>>((unsigned)sib_sm, sib_mode, getenv("SIB_WAITNS") ? strtoull(getenv("SIB_WAITNS"), 0, 10) : 8000000ull, sib_flags, sib_st_d, getenv("SIB_SM2") ? atoi(getenv("SIB_SM2")) : -1);
             else sib_thrash<<<NSM * (getenv("SIB_GRIDX") ? atoi(getenv("SIB_GRIDX")) : 1), getenv("SIB_THREADS") ? atoi(getenv("SIB_THREADS")) : 384, 0, ssib>>>((unsigned)sib_sm, sib_buf, (unsigned)((size_t)sib_kb * 1024 / sizeof(uint4)), sib_passes, sib_flags, sib_st_d, sib_poll);
             CK(cudaGetLastError());
-            for (int w = 0; w < 100000 && !(sib_st->ready && (!getenv("SIB_SM2") || sib_st->ready2)); ++w) std::this_thread::sleep_for(std::chrono::microseconds(50));
-            if (!(sib_st->ready && (!getenv("SIB_SM2") || sib_st->ready2))) { fprintf(stderr, "--sibling: no block landed on SM %d, ttu_one not launched\n", sib_sm); return 3; }
+            if (sib_mode != 5) for (int w = 0; w < 100000 && !(sib_st->ready && (!getenv("SIB_SM2") || sib_st->ready2)); ++w) std::this_thread::sleep_for(std::chrono::microseconds(50));
+            if (sib_mode != 5 && !(sib_st->ready && (!getenv("SIB_SM2") || sib_st->ready2))) { fprintf(stderr, "--sibling: no block landed on SM %d, ttu_one not launched\n", sib_sm); return 3; }
             std::this_thread::sleep_for(std::chrono::milliseconds(2));   // the other thrash blocks have left their SMs
         }
         const unsigned long long c_before = csample(); const double w_before = now_s();
