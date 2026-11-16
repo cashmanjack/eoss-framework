@@ -132,6 +132,17 @@ def check(path):
                    len(fl) == 3 and fl[1] == fl[0] + 1 and fl[2] == fl[0] + 2 and g1 + 18 < fl[0] and fl[2] < tgt[0] and [low12(body[i]) for i in fl] == [0x992, 0x9ab, 0x98f] and all(pred(body[i]) == (7, 0) for i in fl), (fl, tgt, groups))
             else:
                 ok('B15 no fence instruction in the TTU kernel unless --ownfence', not fl, fl)
+            if meta.get('ownccctl'):   # q22 (i): exactly one TTUCCTL.IVALL (stage 1; NOP in stage 0) after the first CLOSE, before the spin, outside every session, followed by 4 stall 15 NOPs
+                from build_patch import ttuccttl_bytes
+                cc = [i for i, b in enumerate(body) if low12(b) == 0x3d5]
+                if meta['stage'] == 1:
+                    ok('B15 ownccctl: exactly one TTUCCTL.IVALL, ivall bit 80, unpredicated, bytes = encoder output, after the first session and before the spin, before the second TTUOPEN',
+                       len(cc) == 1 and bit(body[cc[0]], 80) and pred(body[cc[0]]) == (7, 0) and bytes(body[cc[0]]) == ttuccttl_bytes() and g1 + 18 < cc[0] < tgt[0] and cc[0] < groups[1], (cc, tgt, groups))
+                    ok('B15 ownccctl: followed by 4 NOPs with stall 15', all(low12(body[cc[0] + 1 + k]) == 0x918 and ((W(body[cc[0] + 1 + k][8:]) >> 41) & 0xf) == 15 for k in range(4)))
+                else:
+                    ok('B15 ownccctl: stage 0 has no TTUCCTL', not cc, cc)
+            else:
+                ok('B15 no TTUCCTL in the sibling kernel unless --ownccctl', not [i for i, b in enumerate(body) if low12(b) == 0x3d5])
         else:
             ok('B15 no branch anywhere before EXIT', not brs)
     if meta.get('cctl'):   # Interface_7: exactly one TTUCCTL.IVALL in stage 1 (none in stage 0), unpredicated, right after the first session's wait NOP, outside every session, followed by 4 stall 15 NOPs
