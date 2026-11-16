@@ -121,6 +121,12 @@ def check(path):
             ok('B15 sibling: exactly one backward BRA (@!P6) between the sessions, to the spin load, no TTU instruction in the loop',
                len(brs) == 1 and low12(body[brs[0]]) == 0x947 and g1 + 18 < tgt[0] < brs[0] < groups[1] and ((W(body[brs[0]]) >> 12) & 0xf) == 0xe
                and low12(body[tgt[0]]) == 0x981 and not any(low12(body[i]) in TTU for i in range(tgt[0], brs[0] + 1)), (brs, tgt, groups))
+            fl = [i for i, b in enumerate(body[:ex]) if low12(b) in (0x992, 0x9ab, 0x98f)]   # MEMBAR, ERRBAR, CCTL (this build's only memory fence opcodes)
+            if meta.get('ownfence'):
+                ok('B15 ownfence: exactly MEMBAR.ALL.GPU, ERRBAR, CCTL.IVALL in a row, unpredicated, after the first CLOSE and before the spin, outside every session',
+                   len(fl) == 3 and fl[1] == fl[0] + 1 and fl[2] == fl[0] + 2 and g1 + 18 < fl[0] and fl[2] < tgt[0] and [low12(body[i]) for i in fl] == [0x992, 0x9ab, 0x98f] and all(pred(body[i]) == (7, 0) for i in fl), (fl, tgt, groups))
+            else:
+                ok('B15 no fence instruction in the TTU kernel unless --ownfence', not fl, fl)
         else:
             ok('B15 no branch anywhere before EXIT', not brs)
     if meta.get('cctl'):   # Interface_7: exactly one TTUCCTL.IVALL in stage 1 (none in stage 0), unpredicated, right after the first session's wait NOP, outside every session, followed by 4 stall 15 NOPs
