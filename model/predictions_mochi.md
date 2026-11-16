@@ -39,3 +39,6 @@ Committed time statements:
 
 ## What can fail
 Candidates beyond the 1.006 factor (a refit tree may behave differently from a freshly built one, as the replay uses the dumped, refit boxes); the time lower bound (the recorder adds a globaltimer read and two atomics per ray); the clock assumption 2.5 GHz (the card allows 3.1 GHz).
+
+## Correction note (added 2026-11-16 after the measured run; the table above is unchanged)
+The column "exact box hits (incl. self)" is too high by 1: the replay's hit count already contains the particle itself and the script added 1 again. True values: frame 0 to 4 1.00, frame 5 1.88, frame 6 1.91, frame 7 2.15, frame 8 2.28, frame 9 2.42. Nothing else in this file uses that column; the predictions are the other columns and the statements above.
