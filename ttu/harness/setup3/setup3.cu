@@ -174,6 +174,27 @@ extern "C" __global__ void sib_thrash(unsigned target, const uint4 *buf, unsigne
     if (threadIdx.x == 0) { st->t1 = gtimer_(); __threadfence(); flags[32] = 1; __threadfence_system(); }
 }
 
+// q20b --sibling ...:MODE (1..3): the plain block with NO fence of its own and a chosen wait. mode 1: waits on %globaltimer only (SIB_WAITNS, no loads or stores while waiting);
+// mode 2: polls flag1 with ld.relaxed.gpu, no fence; mode 3: as 2, then exactly one fence.acq_rel.gpu; then flag2 by st.relaxed.gpu. No timestamps or counters are written (thrash_ns stays 0).
+extern "C" __global__ void sib_fence(unsigned target, unsigned mode, unsigned long long waitns, volatile unsigned *flags, SibStat *st)
+{
+    __shared__ int go;
+    if (threadIdx.x == 0) { go = 0; if (smid_() == target && atomicAdd((unsigned *)&flags[64], 1u) == 0) go = 1; }
+    __syncthreads(); if (!go) return;
+    if (threadIdx.x == 0) {
+        st->sm = smid_(); st->ready = 1;
+        const unsigned long long t = gtimer_(); unsigned v = 0;
+        if (mode == 1) { while (gtimer_() - t < waitns) { } }
+        else {
+            for (;;) { asm volatile("ld.relaxed.gpu.global.u32 %0, [%1];" : "=r"(v) : "l"(flags) : "memory"); if (v || gtimer_() - t > 3000000000ull) break; }
+            st->timedout = v == 0;
+            if (mode == 3) asm volatile("fence.acq_rel.gpu;" ::: "memory");
+        }
+        asm volatile("st.relaxed.gpu.global.u32 [%0], %1;" :: "l"(flags + 32), "r"(1u) : "memory");
+    }
+    __syncthreads();
+}
+
 extern "C" __global__ void flush_read(const uint4 *p, size_t n, unsigned *sink)
 {
     unsigned acc = 0;
@@ -283,14 +304,14 @@ int main(int argc, char **argv)
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
     double energy_s = 0;
-    int sib_sm = -1, sib_kb = 4096, sib_passes = 4; unsigned sib_poll = 0;
+    int sib_sm = -1, sib_kb = 4096, sib_passes = 4; unsigned sib_poll = 0, sib_mode = 0;
     bool ias = false; bool decoy = false, thrash_near = false, thrash_node = false; size_t tlbpages = 0; bool run_ttu = true, thrash = false, thrash_gas = false; unsigned thrash_lane = 128; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--ias")) ias = true;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
         else if (!strcmp(argv[a], "--thrash-gas")) thrash_gas = true;
-        else if (!strcmp(argv[a], "--sibling") && a + 1 < argc) { if (sscanf(argv[++a], "%d:%d:%d:%u", &sib_sm, &sib_kb, &sib_passes, &sib_poll) < 3 || sib_sm < 0 || sib_kb < 1 || sib_passes < 0) { fprintf(stderr, "--sibling SM:KB:PASSES[:POLLNS]\n"); return 2; } }   // q20: needs build_patch --sibling --smfilter and --sms A,A (the block that lands on SM A runs, the others leave)
+        else if (!strcmp(argv[a], "--sibling") && a + 1 < argc) { if (sscanf(argv[++a], "%d:%d:%d:%u:%u", &sib_sm, &sib_kb, &sib_passes, &sib_poll, &sib_mode) < 3 || sib_mode > 3 || sib_sm < 0 || sib_kb < 1 || sib_passes < 0) { fprintf(stderr, "--sibling SM:KB:PASSES[:POLLNS]\n"); return 2; } }   // q20: needs build_patch --sibling --smfilter and --sms A,A (the block that lands on SM A runs, the others leave)
         else if (!strcmp(argv[a], "--thrash-near")) thrash_near = true;   // (with --thrash) words 26, 27 = a 64 KB buffer allocated right after the GAS (same 2 MB chunk if it prints so): warms the translation of the BVH page, no BVH line
         else if (!strcmp(argv[a], "--tlbflush") && a + 1 < argc) tlbpages = (size_t)atoll(argv[++a]);   // q18: before every timed launch (after --flush) touch one line in each of P 2 MB pages of a P x 2 MB buffer
         else if (!strcmp(argv[a], "--thrash-node")) thrash_node = true;   // q18 (with --thrash): lane 31 loads the OptiX instance node line (address A) instead of GAS line 31
@@ -863,7 +884,8 @@ int main(int argc, char **argv)
         if (sib_sm >= 0) {   // reset the flags, start the plain block on the target SM, wait until it is resident (it then spins on flag1), then launch the TTU warp
             CK(cudaMemset(sib_flags, 0, 4096)); CK(cudaDeviceSynchronize());
             memset((void *)sib_st, 0, sizeof(SibStat));
-            sib_thrash<<<NSM * (getenv("SIB_GRIDX") ? atoi(getenv("SIB_GRIDX")) : 1), getenv("SIB_THREADS") ? atoi(getenv("SIB_THREADS")) : 384, 0, ssib>>>((unsigned)sib_sm, sib_buf, (unsigned)((size_t)sib_kb * 1024 / sizeof(uint4)), sib_passes, sib_flags, sib_st_d, sib_poll);
+            if (sib_mode) sib_fence<<<NSM, 384, 0, ssib>>>((unsigned)sib_sm, sib_mode, getenv("SIB_WAITNS") ? strtoull(getenv("SIB_WAITNS"), 0, 10) : 8000000ull, sib_flags, sib_st_d);
+            else sib_thrash<<<NSM * (getenv("SIB_GRIDX") ? atoi(getenv("SIB_GRIDX")) : 1), getenv("SIB_THREADS") ? atoi(getenv("SIB_THREADS")) : 384, 0, ssib>>>((unsigned)sib_sm, sib_buf, (unsigned)((size_t)sib_kb * 1024 / sizeof(uint4)), sib_passes, sib_flags, sib_st_d, sib_poll);
             CK(cudaGetLastError());
             for (int w = 0; w < 100000 && !sib_st->ready; ++w) std::this_thread::sleep_for(std::chrono::microseconds(50));
             if (!sib_st->ready) { fprintf(stderr, "--sibling: no block landed on SM %d, ttu_one not launched\n", sib_sm); return 3; }
