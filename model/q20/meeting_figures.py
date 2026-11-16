@@ -64,10 +64,13 @@ for a_, mk, col, lab in (('e1', 'o', G, 'cta scope fence on the sibling SM (F159
     ax.plot(KB[:2], [sav2(a_, N) for N in (1024, 2048)], mk, color=col, mfc=col if a_ != 'e1' else 'none', ms=9, label=lab)
 medh = lambda a, N: st.median(c for x in fenh['%s|%d' % (a, N)] for c in x['cycles'])
 ax.plot(KB[:2], [1 - medh('h', N) / medh('single', N) for N in (1024, 2048)], '*', color=Rd, ms=13, label='TTUCCTL alone on the sibling SM, no memory barrier (F161)')
+feni = json.load(open(sorted(glob.glob('/home/min/a/cashman3/eoss/notes/q22/fence_i_stage1_*.json'))[-1]))
+medi = lambda a, N: st.median(c for x in feni['%s|%d' % (a, N)] for c in x['cycles'])
+ax.plot(KB[:2], [1 - medi('i', N) / medi('single', N) for N in (1024, 2048)], 'd', color=Rd, mfc='none', ms=10, label='TTUCCTL on the TTU warp\'s own SM, no memory barrier (F162)')
 ax.axvspan(80, 96, color=K, alpha=.15); ax.text(88, .03, 'L1 cliff\n80 to 96 KB', ha='center', fontsize=8.5, color=K); ax.set_xscale('log')
 ax.set_xlabel('BVH size, GAS bytes read by one ray (KB)'); ax.set_ylabel('saving of the second session (1 minus second / first)'); ax.set_ylim(0, .75)
-ax.set_title('Second session saving: a gpu fence on either SM of the TPC removes about 55 percent,\non both all; a TTUCCTL on the sibling SM alone removes all; a cta fence none',fontsize=9.5); ax.legend(frameon=False, fontsize=8, loc='upper center', bbox_to_anchor=(.5, -.14), ncol=1)
-fig.text(.01, .005, 'Fence tests at 68 and 132 KB only. Not separated: the gpu barrier against the L1 invalidate it comes with,\nand one L1 pool shared over the TPC against separate per SM state (F159). F161: TTUCCTL on the sibling removes the whole saving.', fontsize=7.5, color=K); save(fig, 'm4_node_state_capacity.png', rect=(0, .04, 1, 1))
+ax.set_title('Second session saving: a gpu fence on either SM of the TPC removes about 55 percent,\non both all; a TTUCCTL alone on either SM removes all; a cta fence none',fontsize=9.5); ax.legend(frameon=False, fontsize=8, loc='upper center', bbox_to_anchor=(.5, -.14), ncol=1)
+fig.text(.01, .005, 'Fence tests at 68 and 132 KB only. Not separated: the gpu barrier against the L1 invalidate it comes with,\nand one L1 pool shared over the TPC against separate per SM state (F159). F161, F162: TTUCCTL on the sibling or on the TTU warp own SM removes the whole saving.', fontsize=7.5, color=K); save(fig, 'm4_node_state_capacity.png', rect=(0, .04, 1, 1))
 
 # 5 BITTU against the harness clock (F122, notes/q11/timing_fix.json)
 j = json.load(open(R + 'notes/q11/timing_fix.json')); x = [v['harness_s1'] - v['harness_s0'] for v in j.values()]; y = [v['corrected'] for v in j.values()]
