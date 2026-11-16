@@ -34,6 +34,7 @@ int main(int argc, char **argv)
     std::vector<int32_t> ls(NL + 1); fread(ls.data(), 4, NL + 1, f);
     std::vector<int32_t> lt(ls[NL]); fread(lt.data(), 4, lt.size(), f);
     std::vector<float> tr((size_t)NT * 9); fread(tr.data(), 4, tr.size(), f); fclose(f);
+    const bool firsthit = getenv("FIRSTHIT") != nullptr;
     const long nr = atol(argv[3]); const int order = atoi(argv[4]);
     std::vector<Ray8> rays(nr); f = fopen(argv[2], "rb"); fread(rays.data(), sizeof(Ray8), nr, f); fclose(f);
     std::vector<int32_t> out(nr * 8); std::vector<int32_t> pq3; if (argc > 6) pq3.assign((size_t)nr * 24, 0);
@@ -69,6 +70,7 @@ int main(int argc, char **argv)
                     if (t < r.tmin || t >= best) continue;
                     best = t; bestp = p; improved = true;
                 }
+                if (improved && firsthit) { ++hits; while (!empty()) pop(); continue; }   // FIRSTHIT=1: terminate on first hit (OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT), nothing resumed
                 if (improved) {   // hardware returns after a leaf that improved the hit: does the traversal have to be resumed?
                     ++hits; bool anyA = !empty(), anyB = false;
                     if (anyA) { if (order) { anyB = pq.top().t <= best; } else { for (auto &x : st) if (x.t <= best) { anyB = true; break; } } }
