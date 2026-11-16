@@ -1,0 +1,12 @@
+# Mochi time gap: form fixed BEFORE the probe run (2026-11-16, triton GPU 1; follows model/q14/FORM.md and model/q15/FORM_handoff.md)
+
+Gap to explain (F165, F166): with the true leaf slot counts the F127 form (fixed 110 cycles plus 4.9 per candidate and one, per SM, 142 SMs at 2.5 GHz assumed) gives 0.034 to 0.048 ms; the measured in kernel span of a launch is 0.099 to 0.106 ms (frames 0 to 4) and 0.239 ms at frame 9.
+
+Probes (clock64 in the intersection program, the leader lane of the active mask adds elapsed cycles and one call to a per warp record; raygen start, before and after the trace, end; patched copy /dev/shm/mochi, diff to notes/q27) on the full launch of the last substep of every frame, and on an extra small launch of 4,544 queries (one warp per SM, 142 warps) at the same state, forces going to a scratch buffer so the trajectory is not changed (3 repetitions). Not a prediction: the callback cost is MEASURED and fed in, as in F137 and F160.
+
+Per frame: L_ld = mean probe cycles per warp call of the full launch; L_unl = the same from the small launch (a prediction input available without a loaded run); N = warp calls of the intersection program (probe count; the replay's Σ over warps of the maximum candidates of the lanes as a second source); W = warps in flight per SM implied by the probes: Σ over warps of raygen cycles / (142 x span in cycles), span from the global timer and the SM clock taken as the 2.5 GHz of F127 (the implied clock is reported); no ncu on this machine.
+- T_cb = L x N / (142 x W) SM cycles per SM; T_hand = 875 x N / (142 x W) (F137, not refitted; the round trip of a custom primitive).
+- Launch span model: T = T_rt (F127 form on the true replay counts) + T_cb + T_hand, with L_ld (consistency: it contains queueing, so T_cb is close to the callback share of warp time) and with L_unl (the prediction version). Variant max(T_rt, T_cb) as in F131 reported next to it.
+- Split of summed raygen warp time into callbacks (probe cycles), traversal (trace window minus callbacks) and other, per frame (F134 style).
+
+Success rule (set now): the span model with L_unl is within 25 percent (log error at most 0.22) of the measured median span in frames 0 to 4 and 9. If it is not, the report says by how much and in which direction, the callback share of warp time, and what was ruled out (hand off term, clock assumption, probe overhead on the span: spans with probes on against the F165 run B spans of 0.099 to 0.106 ms in frames 0 to 4). Not tuned afterwards; any refit is labelled.
