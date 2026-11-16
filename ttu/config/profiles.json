@@ -7,5 +7,6 @@
   }
  },
  "cufunction_offset": {"580": "0x68"},
- "validated_drivers": ["580.178.04"]
+ "validated_drivers": ["580.178.04", "580.196.07"],
+ "validated_note": {"580.196.07": "triton 2026-11-16: live OptiX code (memdump) byte identical to 580.178.04 for the GAS traversal group and the IAS prelude, group and following code; system libnvoptix matches the driver"}
 }
