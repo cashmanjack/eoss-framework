@@ -145,6 +145,13 @@ __device__ void compute_body(int parity, int limit, const volatile int *stop, un
 }
 template <int TYPE> __global__ void __maxnreg__(24) compute_k(int p, int lim, const volatile int *s, unsigned long long *i, unsigned long long *r, const uint4 *b, size_t n, unsigned wm) { compute_body<TYPE>(p, lim, s, i, r, b, n, wm); }
 
+extern "C" __global__ void tlb_touch(const uint4 *p, size_t pages, unsigned *sink)   // q18: one line in each 2 MB page of a big buffer (translation pressure, almost no L2 traffic)
+{
+    unsigned acc = 0; const size_t step = (2u << 20) / sizeof(uint4);
+    for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < pages; i += (size_t)gridDim.x * blockDim.x) { const uint4 v = p[i * step]; acc ^= v.x; }
+    if (acc == 0x12345678u) sink[0] = acc;
+}
+
 extern "C" __global__ void flush_read(const uint4 *p, size_t n, unsigned *sink)
 {
     unsigned acc = 0;
@@ -248,17 +255,22 @@ static double t_start = now_s();
 // SM count and block placement come from the device (was 142 / 71, the RTX 6000 Ada): block b lands on SM 2b for b < NSM/2, then on the odd SMs (verified per GPU by ttu/config/probe_placement.cu)
 static int NSM = 0, HALF = 0;
 #define SMOF(b) ((unsigned)((b) < HALF ? 2 * (b) : 2 * ((b) - HALF) + 1))
+__global__ void copy_node(const unsigned *s, unsigned *d, int n) { for (int i = threadIdx.x; i < n; i += blockDim.x) d[i] = s[i]; }
 int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
     double energy_s = 0;
-    bool ias = false; bool run_ttu = true, thrash = false, thrash_gas = false; unsigned thrash_lane = 128; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool ias = false; bool decoy = false, thrash_near = false, thrash_node = false; size_t tlbpages = 0; bool run_ttu = true, thrash = false, thrash_gas = false; unsigned thrash_lane = 128; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--ias")) ias = true;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
         else if (!strcmp(argv[a], "--thrash-gas")) thrash_gas = true;
+        else if (!strcmp(argv[a], "--thrash-near")) thrash_near = true;   // (with --thrash) words 26, 27 = a 64 KB buffer allocated right after the GAS (same 2 MB chunk if it prints so): warms the translation of the BVH page, no BVH line
+        else if (!strcmp(argv[a], "--tlbflush") && a + 1 < argc) tlbpages = (size_t)atoll(argv[++a]);   // q18: before every timed launch (after --flush) touch one line in each of P 2 MB pages of a P x 2 MB buffer
+        else if (!strcmp(argv[a], "--thrash-node")) thrash_node = true;   // q18 (with --thrash): lane 31 loads the OptiX instance node line (address A) instead of GAS line 31
+        else if (!strcmp(argv[a], "--decoy")) decoy = true;   // q18: a second one triangle GAS (z = 3, hit by the same ray); words 36..39 = its instance node and root words (build_patch --decoy loads them into the first session only)
         else if (!strcmp(argv[a], "--thrash-lane") && a + 1 < argc) thrash_lane = (unsigned)atoi(argv[++a]);   // bytes between the lanes' pointers (default 128: a line per lane; 4: one line for the whole warp)
         else if (!strcmp(argv[a], "--repeat") && a + 1 < argc) repeat = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--energy") && a + 1 < argc) energy_s = atof(argv[++a]);   // after the checked launches: run the same launch (and flush) back to back for S seconds, NVML total energy before and after, clocks, launch count (stdout line ENERGY)
@@ -331,10 +343,19 @@ int main(int argc, char **argv)
     if (dump_tris) { FILE *f = fopen(dump_tris, "wb"); fwrite(all.data(), sizeof(Tri), all.size(), f); fclose(f); }
     OptixAccelBuildOptions ao{}; ao.buildFlags = OPTIX_BUILD_FLAG_NONE; ao.operation = OPTIX_BUILD_OPERATION_BUILD;
     OptixAccelBufferSizes bs{}; OX(optixAccelComputeMemoryUsage(ctx, &ao, bis.data(), ng, &bs));
-    CUdeviceptr tmp, gas; CK(cudaMalloc((void **)&tmp, bs.tempSizeInBytes)); CK(cudaMalloc((void **)&gas, bs.outputSizeInBytes));
+    CUdeviceptr tmp, gas, nearbuf = 0; CK(cudaMalloc((void **)&tmp, bs.tempSizeInBytes)); CK(cudaMalloc((void **)&gas, bs.outputSizeInBytes));
+    if (thrash_near) { CK(cudaMalloc((void **)&nearbuf, 65536)); CK(cudaMemset((void *)nearbuf, 0, 65536)); printf("near buffer 0x%llx gas 0x%llx same 2MB chunk: %d\n", (unsigned long long)nearbuf, (unsigned long long)gas, (int)((nearbuf >> 21) == (gas >> 21))); }
     OptixTraversableHandle h;
     OX(optixAccelBuild(ctx, 0, &ao, bis.data(), ng, tmp, bs.tempSizeInBytes, gas, bs.outputSizeInBytes, &h, nullptr, 0));
     CK(cudaDeviceSynchronize()); CK(cudaFree((void *)tmp));
+    CUdeviceptr gas2 = 0; OptixTraversableHandle h2 = 0;
+    if (decoy) {   // q18 decoy: one triangle at z = 3, its own GAS
+        const Tri dt{{-0.5f, -0.5f, 3.f}, {0.5f, -0.5f, 3.f}, {0.f, 0.5f, 3.f}}; CUdeviceptr dv; CK(cudaMalloc((void **)&dv, sizeof dt)); CK(cudaMemcpy((void *)dv, &dt, sizeof dt, cudaMemcpyHostToDevice));
+        OptixBuildInput bi2{}; bi2.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES; bi2.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3; bi2.triangleArray.numVertices = 3;
+        bi2.triangleArray.vertexBuffers = &dv; bi2.triangleArray.flags = &gflags; bi2.triangleArray.numSbtRecords = 1;
+        OptixAccelBufferSizes bs2{}; OX(optixAccelComputeMemoryUsage(ctx, &ao, &bi2, 1, &bs2)); CUdeviceptr tmp2; CK(cudaMalloc((void **)&tmp2, bs2.tempSizeInBytes)); CK(cudaMalloc((void **)&gas2, bs2.outputSizeInBytes));
+        OX(optixAccelBuild(ctx, 0, &ao, &bi2, 1, tmp2, bs2.tempSizeInBytes, gas2, bs2.outputSizeInBytes, &h2, nullptr, 0)); CK(cudaDeviceSynchronize()); CK(cudaFree((void *)tmp2));
+    }
     if (dump) {
         std::vector<char> b(bs.outputSizeInBytes);
         CK(cudaMemcpy(b.data(), (void *)gas, b.size(), cudaMemcpyDeviceToHost));
@@ -454,6 +475,18 @@ int main(int argc, char **argv)
     CK(cudaMemcpy((void *)prm.rays, rays.data(), NR * sizeof(Ray8), cudaMemcpyHostToDevice));
     CK(cudaMalloc((void **)&prm.out, NR * sizeof(RefOut))); CK(cudaMalloc((void **)&prm.inst, 18 * 8));
     CUdeviceptr dprm; CK(cudaMalloc((void **)&dprm, sizeof prm)); CK(cudaMemcpy((void *)dprm, &prm, sizeof prm, cudaMemcpyHostToDevice));
+    unsigned long long inst2[18] = {0}; RefOut ref2{}; unsigned long long root2 = 0, A2 = 0;
+    if (decoy) {   // the decoy handle through the same pipeline first: its own instance node address and root
+        Params prm2 = prm; prm2.handle = h2; CK(cudaMalloc((void **)&prm2.out, NR * sizeof(RefOut))); CK(cudaMalloc((void **)&prm2.inst, 18 * 8));
+        CUdeviceptr dprm2; CK(cudaMalloc((void **)&dprm2, sizeof prm2)); CK(cudaMemcpy((void *)dprm2, &prm2, sizeof prm2, cudaMemcpyHostToDevice));
+        OX(optixLaunch(pipe, 0, dprm2, sizeof prm2, &sbt, NR, 1, 1)); CK(cudaDeviceSynchronize());
+        CK(cudaMemcpy(&ref2, prm2.out, sizeof ref2, cudaMemcpyDeviceToHost)); CK(cudaMemcpy(inst2, prm2.inst, sizeof inst2, cudaMemcpyDeviceToHost));
+        { unsigned *dn; CK(cudaMalloc((void **)&dn, 1024)); CK(cudaMemset(dn, 0, 1024)); copy_node<<<1, 64>>>((const unsigned *)inst2[0], dn, 64); CK(cudaGetLastError()); CK(cudaDeviceSynchronize());
+          unsigned nd[64]; CK(cudaMemcpy(nd, dn, 256, cudaMemcpyDeviceToHost)); printf("NODE2 (decoy node, copied by a plain kernel):"); for (int k = 0; k < 64; ++k) printf("%s%08x", k % 8 ? " " : "\n  ", nd[k]); printf("\n");
+          inst2[0] = (unsigned long long)dn; A2 = inst2[0]; }
+        unsigned long long off2 = 0; CK(cudaMemcpy(&off2, (void *)(gas2 + 0x20), 8, cudaMemcpyDeviceToHost)); root2 = (unsigned long long)gas2 + off2;
+        printf("decoy: gas2 0x%llx root2 0x%llx inst2 0x%llx optix hit %u t %g\n", (unsigned long long)gas2, root2, A2, ref2.hit, ref2.t);
+    }
     OX(optixLaunch(pipe, 0, dprm, sizeof prm, &sbt, NR, 1, 1));
     CK(cudaDeviceSynchronize());
     std::vector<float> optix_ms;
@@ -475,6 +508,16 @@ int main(int argc, char **argv)
     const unsigned ident[16] = {0, 1, 0, 0, 0x3f800000, 0, 0, 0, 0, 0x3f800000, 0, 0, 0, 0, 0x3f800000, 0};
     bool inst_ok = true; for (int k = 0; k < 16 && !ias; ++k) inst_ok &= (unsigned)inst[1 + k] == ident[k];   // --ias: the node A of a GAS only pipeline is not read
     const unsigned c3_34 = (unsigned)inst[17];
+    if (decoy) {
+        bool ok2 = A2 != 0 && A2 != A && ref2.hit == 1 && (A2 & 0x3f) == 0 && (root2 & 0x7f) == 0 && (unsigned)inst2[17] == 0x00011000u;
+        for (int k = 0; k < 16; ++k) ok2 &= (unsigned)inst2[1 + k] == ident[k];
+        { unsigned *dn1, n1[64], n2[64]; CK(cudaMalloc((void **)&dn1, 1024)); copy_node<<<1, 64>>>((const unsigned *)A, dn1, 64); CK(cudaGetLastError()); CK(cudaDeviceSynchronize());
+          CK(cudaMemcpy(n1, dn1, 256, cudaMemcpyDeviceToHost)); CK(cudaMemcpy(n2, (void *)A2, 256, cudaMemcpyDeviceToHost));
+          printf("NODE1 (main node, after the main launch):"); for (int k = 0; k < 64; ++k) printf("%s%08x", k % 8 ? " " : "\n  ", n1[k]); printf("\n");
+          printf("node words differing between main and decoy copy:"); for (int k = 0; k < 64; ++k) if (n1[k] != n2[k]) printf(" %d", k); printf("\n"); }
+        printf("decoy: A 0x%llx A2 (own copy) 0x%llx c3_34(2) 0x%x ok %d\n", A, A2, (unsigned)inst2[17], (int)ok2);
+        if (!ok2) { fprintf(stderr, "decoy check failed, ttu_one not launched\n"); return 3; }
+    }
     const bool c3_ok = c3_34 == 0x00011000u;   // the store words were computed for this value
     unsigned long long off = 0; CK(cudaMemcpy(&off, (void *)(gas + 0x20), 8, cudaMemcpyDeviceToHost));
     const unsigned long long root = (unsigned long long)gas + off;
@@ -715,6 +758,7 @@ int main(int argc, char **argv)
             if (words[6] != words[2] || words[7] != words[3]) { fprintf(stderr, "--ias: words 6, 7 must equal words 2, 3 (R48:R49 serve stores 0 and 0x80)\n"); exit(2); }
             R[6] = (unsigned)iroot; R[7] = (unsigned)(iroot >> 32) + 0x10000000u;                          // 0x200 low pair; R24:R25 (its high pair), R90 stay 0
         }
+        if (decoy) { R[36] = (unsigned)(A2 >> 6); R[37] = ((((unsigned)(A2 >> 32) >> 6) | 0x402800u) & 0x1ffffffu) | 0x2000000u; R[38] = (unsigned)(root2 >> 7); R[39] = ((unsigned)(root2 >> 32) >> 7) | start_flags; }
         R[18] = sm_a; R[19] = sm_b;   // used only by --smfilter builds
         if (!smset.empty()) { const unsigned bb = (unsigned)((i % ((size_t)blocks * LANES)) / LANES), sm = SMOF(bb); R[18] = R[19] = smset.count(sm) ? sm : 0xffffffffu; }
         if ((int)(i % 32) >= (wact.empty() ? active : wact[(i / 32 % warps) % wact.size()])) {
@@ -729,14 +773,16 @@ int main(int argc, char **argv)
     if (thrash) {
         CK(cudaMalloc((void **)&tbuf, 4u << 20)); CK(cudaMemset(tbuf, 0, 4u << 20));
         for (size_t i = 0; i < TOTAL; ++i) {
-            const unsigned long long a = (thrash_gas ? (unsigned long long)gas : (unsigned long long)tbuf) + (unsigned long long)thrash_lane * (i % 32);
-            in[i * N + 26] = (unsigned)a; in[i * N + 27] = (unsigned)(a >> 32);
+            const unsigned long long a = (thrash_near ? (unsigned long long)nearbuf : thrash_gas ? (unsigned long long)gas : (unsigned long long)tbuf) + (unsigned long long)thrash_lane * (i % 32);
+            const unsigned long long a2 = (thrash_node && i % 32 == 31) ? (A & ~127ULL) : a;
+            in[i * N + 26] = (unsigned)a2; in[i * N + 27] = (unsigned)(a2 >> 32);
         }
     }
     unsigned *din, *dout, *sink; uint4 *fbuf = nullptr; size_t fn = (size_t)(flush_mb * 1048576.0) / sizeof(uint4);
     CK(cudaMalloc((void **)&din, in.size() * 4)); CK(cudaMalloc((void **)&dout, out.size() * 4)); CK(cudaMalloc((void **)&sink, 4));
     CK(cudaMemcpy(din, in.data(), in.size() * 4, cudaMemcpyHostToDevice));
     if (fn) { CK(cudaMalloc((void **)&fbuf, fn * sizeof(uint4))); CK(cudaMemset(fbuf, 1, fn * sizeof(uint4))); }
+    uint4 *tbig = nullptr; if (tlbpages) CK(cudaMalloc((void **)&tbig, tlbpages * (2u << 20)));
 
     // Each launch: one group per lane. Clock words R84:R85 (before TTUOPEN) and R86:R87
     // (after all results), global timer R22:R23 / R24:R25, SM id R20, if patched in.
@@ -779,6 +825,7 @@ int main(int argc, char **argv)
     for (int it = 0; it < repeat && e == cudaSuccess; ++it) {
         if (quick) CK(cudaMemset(dout, 0x77, out.size() * 4)); else CK(cudaMemcpy(dout, out.data(), out.size() * 4, cudaMemcpyHostToDevice));
         if (fn) { flush_read<<<NSM * 8, 256>>>(fbuf, fn, sink); CK(cudaGetLastError()); }
+        if (tlbpages) { tlb_touch<<<NSM, 256>>>(tbig, tlbpages, sink); CK(cudaGetLastError()); }
         if (smem && it == 0) CK(cudaFuncSetAttribute(ttu_one, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
         const unsigned long long c_before = csample(); const double w_before = now_s();
         CK(cudaEventRecord(ev_a));

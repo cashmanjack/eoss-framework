@@ -244,7 +244,7 @@ def ttuccttl_bytes():
 
 
 def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out=95, preclk=False, barnops=1,
-          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False, lean_ld=False, lean_st=False, cctl=False, ias=False, prewarm=0, l1t=0, l1t_nofirst=False, sectors=1, bypass=False):
+          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False, lean_ld=False, lean_st=False, cctl=False, ias=False, prewarm=0, l1t=0, l1t_nofirst=False, sectors=1, bypass=False, decoy=False, bypass_first=False):
     global INPUTS, GROUP_LEN
     d = open(dump, 'rb').read()
     if ias:
@@ -392,7 +392,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     bssy_at = None
     if outer:   # the lanes of a warp leave the resume loop at different rounds: reconverge after it (as nvcc does around a divergent loop) so the next ray starts with a full warp
         bssy_at = len(body); body.append(NOP_PLACEHOLDER)
-    def warm_batch(n):   # n pages: per lane n x `sectors` ordinary L1 allocating loads (page k = 4096 bytes apart, sector s = 32 bytes apart: all four sectors of a 128 byte line with --sectors 4), results to junk registers, then wait
+    def warm_batch(n, bypass=bypass):   # n pages: per lane n x `sectors` ordinary L1 allocating loads (page k = 4096 bytes apart, sector s = 32 bytes apart: all four sectors of a 128 byte line with --sectors 4), results to junk registers, then wait
         j = 0
         for k in range(n):
             for s in range(sectors):
@@ -402,10 +402,13 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         if j % 32:
             body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
     if prewarm:   # --prewarm N: before anything else (inputs are loaded after, over the junk registers)
-        assert remap and not (twice or slim or loop or outer), '--prewarm: single session plain remap builds'
+        assert remap and not ((twice and not decoy) or slim or loop or outer), '--prewarm: single session plain remap builds (or --twice --decoy)'
         for r in (THRASH_PTR, THRASH_PTR + 1):
             body.append(field(field(ldg[r], 16, phys(r)), 24, in_ptr))
         body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
+        if bypass_first:   # q18: first the same lines with non L1 allocating loads (they fill L2), then with L1 allocating loads (they now fill L1 from L2)
+            assert not bypass, '--bypass-first is for an L1 allocating --prewarm'
+            warm_batch(prewarm, True)
         warm_batch(prewarm)
     for r in INPUTS:
         if hoist and r in HKEEP:
@@ -420,6 +423,10 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
             body.append(field(field(ldg[r], 16, phys(r)), 24, CP))
         else:
             body.append(field(field(ldg[r], 16, phys(r)), 24, in_ptr))
+    if decoy:   # q18: the FIRST session runs on a different tiny GAS: R34:R35 (0x100 instance node) and R70:R71 (0x180 root) come from record words 36..39; the second (timed) session reloads every input below
+        assert twice and remap and not (cctl or l1t or thrash or slim or loop or outer or ias or smfilter), '--decoy: --twice --remap (plain, optional --prewarm)'
+        for src, dst in ((36, 34), (37, 35), (38, 70), (39, 71)):
+            body.append(field(field(ldg[src], 16, phys(dst)), 24, in_ptr))
     if smfilter:
         for r in (SM_A, SM_B):
             body.append(field(field(ldg[r], 16, phys(r)), 24, in_ptr))
@@ -587,7 +594,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     p.save(out)
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
     top_reg = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5] + ([LCNT + 1] if loop else []))
-    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'loop': loop, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0, 'lean': lean, 'hoist': hoist, 'coal': coal, 'outer': outer, 'outer_at': outer_at, 'stride': stride, 'cctl': cctl, 'ias': ias, 'l1t': l1t, 'prewarm': prewarm, 'sectors': sectors, 'bypass': bypass,
+    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'loop': loop, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0, 'lean': lean, 'hoist': hoist, 'coal': coal, 'outer': outer, 'outer_at': outer_at, 'stride': stride, 'cctl': cctl, 'ias': ias, 'l1t': l1t, 'prewarm': prewarm, 'sectors': sectors, 'bypass': bypass, 'decoy': decoy, 'bypass_first': bypass_first,
             'inputs': INPUTS, 'outputs': outputs, 'in_ptr': in_ptr}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
     used = g0 + GROUP_LEN + 1 + int(clock) + len(outputs) + 2
@@ -614,6 +621,8 @@ if __name__ == '__main__':
     a.add_argument('--l1t', type=int, default=0, help='with --twice --remap --clock: N loads per lane, [TTUCCTL with --cctl], the same N loads timed; session 2 untimed')
     a.add_argument('--l1t-nofirst', action='store_true', help='--l1t without the first loads (the timed loads find L1 cold)')
     a.add_argument('--sectors', type=int, default=1, choices=[1, 2, 4], help='--prewarm / --l1t / --thrash: loads per line (32 byte sectors, 4 = the whole 128 byte line; a 4 byte load fetches one sector only)')
+    a.add_argument('--decoy', action='store_true', help='q18 (with --twice --remap): the first session uses a second one triangle GAS (host --decoy: record words 36..39 into R34, R35, R70, R71), the timed second session the target GAS')
+    a.add_argument('--bypass-first', action='store_true', help='q18 (with --prewarm, not --bypass): the prewarm loads twice, first non L1 allocating (L2 fill), then L1 allocating')
     a.add_argument('--bypass', action='store_true', help='--prewarm / --l1t / --thrash: use the template (non L1 allocating, STRONG.SYS) load instead of the L1 allocating one: warms L2 and the TLB, not L1')
     a.add_argument('--thrash', type=int, default=0, help='with --twice --remap: N L1 allocating loads per lane between the two sessions (N x 4 KB per warp)')
     a.add_argument('--slim', action='store_true', help='Throughput_6/7: ray words from one sector, other inputs broadcast from a shared record, 13 result words stored, no clock or image stores')
@@ -634,5 +643,5 @@ if __name__ == '__main__':
     a.add_argument('--preclk', action='store_true', help='diagnostic clock read into R88:R89 before the barrier')
     a.add_argument('--barnops', type=int, default=8, help='NOPs after the barrier: a warp issues a few instructions past BAR.SYNC before it stalls (8 measured enough at 20 warps)')
     x = a.parse_args()
-    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else '') + ('a%d' % x.alu if x.alu else '') + ('l' if x.slim else '') + ('L%d' % x.loop if x.loop else '') + ('o%ds%d' % (x.outer, x.stride) if x.outer else '') + ('N' if x.lean else '') + ('Nl' if x.lean_ld else '') + ('Ns' if x.lean_st else '') + ('H' if x.hoist else '') + ('C' if x.coal else '') + ('I' if x.ias else '') + ('W%d' % x.prewarm if x.prewarm else '') + ('T%d' % x.l1t if x.l1t else '') + ('n' if x.l1t_nofirst else '') + ('S%d' % x.sectors if x.sectors != 1 else '') + ('Y' if x.bypass else ''),
-          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean, x.hoist, x.coal, x.lean_ld, x.lean_st, x.cctl, x.ias, x.prewarm, x.l1t, x.l1t_nofirst, x.sectors, x.bypass)
+    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else '') + ('a%d' % x.alu if x.alu else '') + ('l' if x.slim else '') + ('L%d' % x.loop if x.loop else '') + ('o%ds%d' % (x.outer, x.stride) if x.outer else '') + ('N' if x.lean else '') + ('Nl' if x.lean_ld else '') + ('Ns' if x.lean_st else '') + ('H' if x.hoist else '') + ('C' if x.coal else '') + ('I' if x.ias else '') + ('W%d' % x.prewarm if x.prewarm else '') + ('T%d' % x.l1t if x.l1t else '') + ('n' if x.l1t_nofirst else '') + ('S%d' % x.sectors if x.sectors != 1 else '') + ('Y' if x.bypass else '') + ('D' if x.decoy else '') + ('B' if x.bypass_first else ''),
+          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean, x.hoist, x.coal, x.lean_ld, x.lean_st, x.cctl, x.ias, x.prewarm, x.l1t, x.l1t_nofirst, x.sectors, x.bypass, x.decoy, x.bypass_first)
