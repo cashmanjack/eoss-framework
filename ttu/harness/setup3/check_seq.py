@@ -121,7 +121,10 @@ def check(path):
         g0 = groups[0]; GLc = meta.get('group_len', 19)
         if meta['stage'] == 1:
             ok('cctl: exactly one TTUCCTL, ivall bit 80 set, unpredicated', len(cc) == 1 and bit(body[cc[0]], 80) and pred(body[cc[0]]) == (7, 0), cc)
-            ok('cctl: right after the first session and its wait NOP, before the second TTUOPEN', cc == [g0 + GLc + 1] and cc[0] < groups[1], (cc, groups))
+            if meta.get('l1t'):   # --l1t: only ordinary loads (LDG 0x981) and NOPs between the first session's wait NOP and the TTUCCTL
+                ok('cctl (l1t): after the first session and its wait NOP, only LDG and NOP before it, before the second TTUOPEN', len(cc) == 1 and g0 + GLc + 1 <= cc[0] < groups[1] and all(low12(body[k]) in (0x981, 0x918) for k in range(g0 + GLc + 1, cc[0])), (cc, groups))
+            else:
+                ok('cctl: right after the first session and its wait NOP, before the second TTUOPEN', cc == [g0 + GLc + 1] and cc[0] < groups[1], (cc, groups))
             from build_patch import ttuccttl_bytes
             ok('cctl: bytes equal the EoSS encoder output for TTUCCTL.IVALL', bytes(body[cc[0]]) == ttuccttl_bytes())
             ok('cctl: followed by 4 NOPs with stall 15', all(low12(body[cc[0] + 1 + k]) == 0x918 and ((W(body[cc[0] + 1 + k][8:]) >> 41) & 0xf) == 15 for k in range(4)))
@@ -130,7 +133,8 @@ def check(path):
     wt = lambda b: (W(b[8:]) >> 52) & 0x3f
     stall = lambda b: (W(b[8:]) >> 41) & 0xf
     nb = meta.get('barnops', 1) if meta.get('sync') else 0
-    c = (1 if meta.get('clock') else 0) + ((1 + nb) if meta.get('sync') else 0) + (1 if meta.get('preclk') else 0) + (1 if meta.get('gtime') else 0) + (1 if meta.get('sr133') else 0) + (1 if meta.get('sleepb') else 0)
+    CLK = meta.get('clock') and not meta.get('l1t')   # --l1t: the clock window is the timed reload between the sessions, not the group
+    c = (1 if CLK else 0) + ((1 + nb) if meta.get('sync') else 0) + (1 if meta.get('preclk') else 0) + (1 if meta.get('gtime') else 0) + (1 if meta.get('sr133') else 0) + (1 if meta.get('sleepb') else 0)
     GL = meta.get('group_len', 19)
     NA = meta.get('alu', 0)
     if NA:   # Throughput_4: exactly NA IADD3 right after the group, none of them TTU, then the wait NOP
@@ -147,7 +151,10 @@ def check(path):
     ok('B12 ISETP P0 then a NOP with stall 15 before the group',
        low12(body[g - 2 - c]) == 0x80c and low12(body[g - 1 - c]) == 0x918 and stall(body[g - 1 - c]) == 15)
     ok('B13 NOP after the group waits on all scoreboards', low12(body[g + GL]) == 0x918 and wt(body[g + GL]) == 0x3f)
-    if meta.get('clock'):
+    if meta.get('l1t'):
+        cl = [i for i, b in enumerate(body) if is_clk(b, cs) or is_clk(b, ce)]
+        ok('l1t: exactly two CS2R SR_CLOCKLO (start, end), both between the sessions, no TTU instruction between them', len(cl) == 2 and groups[0] + GL < cl[0] < cl[1] < groups[1] and not [i for i in range(cl[0], cl[1]) if low12(body[i]) in TTU], cl)
+    if CLK:
         ok('clock: CS2R SR_CLOCKLO right before TTUOPEN', is_clk(body[g - 1], cs), cs)
         ok('clock: CS2R SR_CLOCKLO right after the wait NOP', is_clk(body[g + GL + 1], ce), ce)
     if meta.get('sr133'):   # S2R SR_TTU_TICKET_INFO (0x85): one before the start clock, one after the end clock, both outside the group

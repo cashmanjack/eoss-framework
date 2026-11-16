@@ -244,7 +244,7 @@ def ttuccttl_bytes():
 
 
 def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out=95, preclk=False, barnops=1,
-          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False, lean_ld=False, lean_st=False, cctl=False, ias=False):
+          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False, lean_ld=False, lean_st=False, cctl=False, ias=False, prewarm=0, l1t=0, l1t_nofirst=False, sectors=1, bypass=False):
     global INPUTS, GROUP_LEN
     d = open(dump, 'rb').read()
     if ias:
@@ -288,7 +288,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         P[ALU_REG] = 45
         P[84], P[85], P[86], P[87] = 46, 47, 48, 49
         P[SM_A], P[SM_B], P[SM_ID] = 50, 51, 52                       # --smfilter
-        if thrash: P[THRASH_PTR], P[THRASH_PTR + 1] = 58, 59                # --thrash buffer pointer
+        if thrash or prewarm or l1t: P[THRASH_PTR], P[THRASH_PTR + 1] = 58, 59                # --thrash buffer pointer
         P[GT_START], P[GT_START + 1], P[GT_END], P[GT_END + 1] = 54, 55, 56, 57   # --gtime
         def remap_ttu(b):
             op = low12(b)
@@ -392,6 +392,21 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     bssy_at = None
     if outer:   # the lanes of a warp leave the resume loop at different rounds: reconverge after it (as nvcc does around a divergent loop) so the next ray starts with a full warp
         bssy_at = len(body); body.append(NOP_PLACEHOLDER)
+    def warm_batch(n):   # n pages: per lane n x `sectors` ordinary L1 allocating loads (page k = 4096 bytes apart, sector s = 32 bytes apart: all four sectors of a 128 byte line with --sectors 4), results to junk registers, then wait
+        j = 0
+        for k in range(n):
+            for s in range(sectors):
+                body.append(field(field(field(ldg[32], 16, 8 + (j % 32)), 24, phys(THRASH_PTR)), 40, 4096 * k + 32 * s, 24) if bypass else ldg_ca(8 + (j % 32), phys(THRASH_PTR), 4096 * k + 32 * s)); j += 1
+                if j % 32 == 0:
+                    body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
+        if j % 32:
+            body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
+    if prewarm:   # --prewarm N: before anything else (inputs are loaded after, over the junk registers)
+        assert remap and not (twice or slim or loop or outer), '--prewarm: single session plain remap builds'
+        for r in (THRASH_PTR, THRASH_PTR + 1):
+            body.append(field(field(ldg[r], 16, phys(r)), 24, in_ptr))
+        body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
+        warm_batch(prewarm)
     for r in INPUTS:
         if hoist and r in HKEEP:
             continue                                                     # loaded once before the outer loop
@@ -434,7 +449,23 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         groups.append(len(body))
         body += group if stage == 1 else [ctrl.NOP_BYTES] * GROUP_LEN
         body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))   # CLOSE done
-        if cctl:   # Interface_7: TTUCCTL.IVALL between two complete sessions (never inside one); stage 0 puts a NOP in its place. Then 4 NOPs with stall 15.
+        if l1t:   # --l1t N: ordinary loads of N lines per lane (4 KB apart), optional TTUCCTL, then the same loads timed (clock window = the reload only; session 2 is not timed)
+            assert twice and remap and clock and not thrash, '--l1t: --twice --remap --clock'
+            for r in (THRASH_PTR, THRASH_PTR + 1):
+                body.append(field(field(ldg[r], 16, phys(r)), 24, in_ptr))
+            body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
+            if not l1t_nofirst:
+                warm_batch(l1t)
+            if cctl:
+                body.append(ttuccttl_bytes() if stage == 1 else ctrl.NOP_BYTES)
+            else:
+                body.append(ctrl.NOP_BYTES)
+            body += [ctrl.write_control(ctrl.NOP_BYTES, stall=15)] * 4
+            body.append(cs2r_clock(phys(CLK_START)))
+            warm_batch(l1t)
+            body.append(cs2r_clock(phys(CLK_END)))
+            body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
+        elif cctl:   # Interface_7: TTUCCTL.IVALL between two complete sessions (never inside one); stage 0 puts a NOP in its place. Then 4 NOPs with stall 15.
             assert twice, '--cctl needs --twice'
             body.append(ttuccttl_bytes() if stage == 1 else ctrl.NOP_BYTES)
             body += [ctrl.write_control(ctrl.NOP_BYTES, stall=15)] * 4
@@ -443,10 +474,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
             for r in (THRASH_PTR, THRASH_PTR + 1):
                 body.append(field(field(ldg[r], 16, phys(r)), 24, in_ptr))
             body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
-            for k in range(thrash):
-                body.append(ldg_ca(8 + (k % 32), phys(THRASH_PTR), 4096 * k))   # junk into group regs (reloaded below)
-                if k % 32 == 31 or k == thrash - 1:
-                    body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
+            warm_batch(thrash)   # junk into group regs (reloaded below); with --sectors 4 every sector of the lines
         # its TTULDs overwrite input registers: load the inputs again, same ray
         for r in INPUTS:
             body.append(field(field(ldg[r], 16, phys(r)), 24, in_ptr))
@@ -458,7 +486,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         body.append(s2r_sr(88, 0x85))             # SR_TTU_TICKET_INFO before TTUOPEN (waited on by the NOP after the group)
     if gtime:
         body.append(cs2r_globaltimer(phys(GT_START)))
-    if clock:
+    if clock and not l1t:
         body.append(cs2r_clock(phys(CLK_START)))
     if dualgo:   # Interface_5: OPEN, FUSE 28, 10 ST, GO, the same 10 ST, GO, 6 LD (CLOSE last): one ray submitted twice
         assert stage != 1 or (low12(group[12]) == 0x3d3 and all(low12(b) == 0x3d1 for b in group[2:12])), 'group shape'
@@ -498,7 +526,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         for lb, r in ((LB3, 3), (LB32, 32), (LB33, 33), (LB44, 44), (LB45, 45)):
             body.append(mov_reg(ph(r), lb, 1, pg=4))                                # @P4 final result = best hit
         body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=6))
-    if clock:
+    if clock and not l1t:
         body.append(cs2r_clock(phys(CLK_END)))
     if gtime:
         body.append(cs2r_globaltimer(phys(GT_END)))
@@ -559,7 +587,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     p.save(out)
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
     top_reg = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5] + ([LCNT + 1] if loop else []))
-    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'loop': loop, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0, 'lean': lean, 'hoist': hoist, 'coal': coal, 'outer': outer, 'outer_at': outer_at, 'stride': stride, 'cctl': cctl, 'ias': ias,
+    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'loop': loop, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0, 'lean': lean, 'hoist': hoist, 'coal': coal, 'outer': outer, 'outer_at': outer_at, 'stride': stride, 'cctl': cctl, 'ias': ias, 'l1t': l1t, 'prewarm': prewarm, 'sectors': sectors, 'bypass': bypass,
             'inputs': INPUTS, 'outputs': outputs, 'in_ptr': in_ptr}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
     used = g0 + GROUP_LEN + 1 + int(clock) + len(outputs) + 2
@@ -582,6 +610,11 @@ if __name__ == '__main__':
     a.add_argument('--twice', action='store_true', help='two full sessions with the same ray; time the second')
     a.add_argument('--compact-out', action='store_true', help='store only input and clock registers')
     a.add_argument('--smfilter', action='store_true', help='blocks not on SM A or B (words 18, 19) exit before any TTU code')
+    a.add_argument('--prewarm', type=int, default=0, help='N ordinary L1 allocating loads per lane (4 KB apart from slots 26, 27) before the first session; host --thrash --thrash-gas for BVH lines')
+    a.add_argument('--l1t', type=int, default=0, help='with --twice --remap --clock: N loads per lane, [TTUCCTL with --cctl], the same N loads timed; session 2 untimed')
+    a.add_argument('--l1t-nofirst', action='store_true', help='--l1t without the first loads (the timed loads find L1 cold)')
+    a.add_argument('--sectors', type=int, default=1, choices=[1, 2, 4], help='--prewarm / --l1t / --thrash: loads per line (32 byte sectors, 4 = the whole 128 byte line; a 4 byte load fetches one sector only)')
+    a.add_argument('--bypass', action='store_true', help='--prewarm / --l1t / --thrash: use the template (non L1 allocating, STRONG.SYS) load instead of the L1 allocating one: warms L2 and the TLB, not L1')
     a.add_argument('--thrash', type=int, default=0, help='with --twice --remap: N L1 allocating loads per lane between the two sessions (N x 4 KB per warp)')
     a.add_argument('--slim', action='store_true', help='Throughput_6/7: ray words from one sector, other inputs broadcast from a shared record, 13 result words stored, no clock or image stores')
     a.add_argument('--loop', type=int, default=0, help='Throughput_7 fair: resume loop in the kernel, up to K rounds (needs --slim --remap)')
@@ -601,5 +634,5 @@ if __name__ == '__main__':
     a.add_argument('--preclk', action='store_true', help='diagnostic clock read into R88:R89 before the barrier')
     a.add_argument('--barnops', type=int, default=8, help='NOPs after the barrier: a warp issues a few instructions past BAR.SYNC before it stalls (8 measured enough at 20 warps)')
     x = a.parse_args()
-    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else '') + ('a%d' % x.alu if x.alu else '') + ('l' if x.slim else '') + ('L%d' % x.loop if x.loop else '') + ('o%ds%d' % (x.outer, x.stride) if x.outer else '') + ('N' if x.lean else '') + ('Nl' if x.lean_ld else '') + ('Ns' if x.lean_st else '') + ('H' if x.hoist else '') + ('C' if x.coal else '') + ('I' if x.ias else ''),
-          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean, x.hoist, x.coal, x.lean_ld, x.lean_st, x.cctl, x.ias)
+    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else '') + ('a%d' % x.alu if x.alu else '') + ('l' if x.slim else '') + ('L%d' % x.loop if x.loop else '') + ('o%ds%d' % (x.outer, x.stride) if x.outer else '') + ('N' if x.lean else '') + ('Nl' if x.lean_ld else '') + ('Ns' if x.lean_st else '') + ('H' if x.hoist else '') + ('C' if x.coal else '') + ('I' if x.ias else '') + ('W%d' % x.prewarm if x.prewarm else '') + ('T%d' % x.l1t if x.l1t else '') + ('n' if x.l1t_nofirst else '') + ('S%d' % x.sectors if x.sectors != 1 else '') + ('Y' if x.bypass else ''),
+          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean, x.hoist, x.coal, x.lean_ld, x.lean_st, x.cctl, x.ias, x.prewarm, x.l1t, x.l1t_nofirst, x.sectors, x.bypass)

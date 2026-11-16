@@ -29,6 +29,7 @@
 //     --flush MB     before every ttu_one launch, a plain kernel reads MB megabytes (L2 eviction)
 //     --dump-gas F   write the GAS bytes to F
 //     --thrash       allocate a 4 MB buffer; words 26, 27 = buffer + 128 x lane (for build_patch --thrash)
+//     --thrash-gas   (with --thrash) words 26, 27 = the GAS start + 128 x lane instead (build_patch --prewarm / --thrash N then load the BVH lines with ordinary loads)
 //     --resume K     then up to K follow up queries per lane, built as OptiX's loop builds them
 //     --dump-tris F  write all triangles (9 floats each) to F, for the CPU reference
 //     --start OFF[:FLAGS]  first query starts at the node at GAS + OFF (hex, 128 byte aligned) instead
@@ -252,11 +253,13 @@ int main(int argc, char **argv)
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
     double energy_s = 0;
-    bool ias = false; bool run_ttu = true, thrash = false; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool ias = false; bool run_ttu = true, thrash = false, thrash_gas = false; unsigned thrash_lane = 128; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--ias")) ias = true;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
+        else if (!strcmp(argv[a], "--thrash-gas")) thrash_gas = true;
+        else if (!strcmp(argv[a], "--thrash-lane") && a + 1 < argc) thrash_lane = (unsigned)atoi(argv[++a]);   // bytes between the lanes' pointers (default 128: a line per lane; 4: one line for the whole warp)
         else if (!strcmp(argv[a], "--repeat") && a + 1 < argc) repeat = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--energy") && a + 1 < argc) energy_s = atof(argv[++a]);   // after the checked launches: run the same launch (and flush) back to back for S seconds, NVML total energy before and after, clocks, launch count (stdout line ENERGY)
         else if (!strcmp(argv[a], "--passes") && a + 1 < argc) passes = atoi(argv[++a]);
@@ -726,7 +729,7 @@ int main(int argc, char **argv)
     if (thrash) {
         CK(cudaMalloc((void **)&tbuf, 4u << 20)); CK(cudaMemset(tbuf, 0, 4u << 20));
         for (size_t i = 0; i < TOTAL; ++i) {
-            const unsigned long long a = (unsigned long long)tbuf + 128ull * (i % 32);
+            const unsigned long long a = (thrash_gas ? (unsigned long long)gas : (unsigned long long)tbuf) + (unsigned long long)thrash_lane * (i % 32);
             in[i * N + 26] = (unsigned)a; in[i * N + 27] = (unsigned)(a >> 32);
         }
     }
