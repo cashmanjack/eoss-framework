@@ -121,6 +121,7 @@ def check(path):
             if meta.get('sibccctl'):   # (h): the one extra branch in the main code is the forward @P1 BRA to the B path; the backward spin test below is about the rest
                 fw = meta['sibccctl_bra']
                 ok('B15 sibccctl: one forward @P1 BRA right after the smfilter EXIT, target = the B path after the main EXIT', fw in brs and pred(body[fw]) == (1, 0) and tgt[brs.index(fw)] == meta['bpath'] and meta['bpath'] > ex + 1, (fw, brs, tgt, meta['bpath'], ex))
+                ok('B15 sibccctl: the forward BRA has no sign extension bits (bits 64..81 zero: the offset is positive)', ((W(body[fw]) >> 64) & 0x3ffff) == 0, hex((W(body[fw]) >> 64) & 0x3ffff))
                 brs = [i for i in brs if i != fw]; tgt = [t for i, t in zip([i for i in range(len(body[:ex])) if low12(body[i]) in (0x947, 0x949, 0x943)], tgt) if i != fw]
             ok('B15 sibling: exactly one backward BRA (@!P6) between the sessions, to the spin load, no TTU instruction in the loop',
                len(brs) == 1 and low12(body[brs[0]]) == 0x947 and g1 + 18 < tgt[0] < brs[0] < groups[1] and ((W(body[brs[0]]) >> 12) & 0xf) == 0xe

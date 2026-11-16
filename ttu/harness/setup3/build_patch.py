@@ -165,6 +165,12 @@ def bra_back_neg(pg, off_bytes, stall=5):
     return _instr(0x0947 | (pg << 12) | (1 << 15) | ((off_bytes & 0xffffffff) << 32), 0x03ffff | (7 << 23), stall, 1, 7, 7, 0)
 
 
+def bra_fwd(pg, pp, off_bytes, stall=5):
+    """@Pg BRA Pp, target for a FORWARD (positive) byte offset: as bra_back, but the sign extension bits above bit 63 are 0 (bra_back sets them for a negative offset)."""
+    assert 0 <= off_bytes < (1 << 31)
+    return _instr(0x0947 | (pg << 12) | (off_bytes << 32), (pp << 23), stall, 1, 7, 7, 0)
+
+
 def bra_back(pg, pp, off_bytes, stall=5):
     """@Pg BRA Pp, target (nvcc 12.8: opcode 0x947, signed byte offset from the next instruction in bits 63:32, second
     predicate Pp in bits 89:87)."""
@@ -458,7 +464,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         if sibccctl:   # q22 (h): the block on SM B (P1 = SM is not A) jumps to its own path after the main code: spin on flag1, one TTUCCTL.IVALL, store flag2. No session on that block.
             assert sibling and twice and remap and clock and not (ownfence or cctl or l1t or thrash or prewarm or decoy or slim or loop or outer or ias), '--sibccctl: --smfilter --twice --remap --clock --sibling, plain'
             sibccctl_bra = len(body)
-            body.append(bra_back(1, 7, 0))   # offset patched below
+            body.append(bra_fwd(1, 7, 0))   # offset patched below
     body.append(isetp)
     body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=15))               # P0 ready
     if sleepb:   # Memory_5 timing: the block on SM B (P1 = SM is not A, from the SM filter) sleeps before its trace
@@ -635,7 +641,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         body.append(field(field(field(stg[3], 24, phys(THRASH_PTR)), 32, phys(THRASH_PTR)), 40, 128, 24)) # flag2 = nonzero
         body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
         body += [orig[ex[0]], orig[ex[0] + 1]]
-        body[sibccctl_bra] = bra_back(1, 7, (bpath - (sibccctl_bra + 1)) * 16)
+        body[sibccctl_bra] = bra_fwd(1, 7, (bpath - (sibccctl_bra + 1)) * 16)
     assert len(body) <= len(orig), (len(body), len(orig))
     body += [ctrl.NOP_BYTES] * (len(orig) - len(body))
     for (off, _), b in zip(ins, body):
