@@ -152,6 +152,28 @@ extern "C" __global__ void tlb_touch(const uint4 *p, size_t pages, unsigned *sin
     if (acc == 0x12345678u) sink[0] = acc;
 }
 
+// ---- q20 --sibling SM:KB:PASSES: a plain CUDA block on SM `target` (the TPC sibling or a control SM) that waits for flag1 (set by the patched TTU warp after its first session),
+// streams ordinary cached loads (ld.ca) over its own buffer PASSES times, then sets flag2 (the TTU warp waits for it before its second session). Flags: byte 0 flag1, byte 128 flag2, byte 256 ticket.
+struct SibStat { volatile unsigned ready, sm, timedout, pad; volatile unsigned long long t0, t1, acc; };
+__device__ static unsigned long long gtimer_() { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
+extern "C" __global__ void sib_thrash(unsigned target, const uint4 *buf, unsigned nvec, int passes, volatile unsigned *flags, SibStat *st, unsigned pollns)
+{
+    __shared__ int go;
+    if (threadIdx.x == 0) { go = 0; if (smid_() == target && atomicAdd((unsigned *)&flags[64], 1u) == 0) go = 1; }
+    __syncthreads(); if (!go) return;
+    if (threadIdx.x == 0) {
+        st->sm = smid_(); __threadfence_system(); st->ready = 1; __threadfence_system();
+        const unsigned long long t = gtimer_(); while (flags[0] == 0 && gtimer_() - t < 3000000000ull) { if (pollns) __nanosleep(pollns); }
+        st->timedout = flags[0] == 0; st->t0 = gtimer_();
+    }
+    __syncthreads();
+    uint4 acc = make_uint4(0, 0, 0, 0);
+    for (int p = 0; p < passes; ++p) for (unsigned i = threadIdx.x; i < nvec; i += blockDim.x) { const uint4 v = __ldca(buf + i); acc.x += v.x; acc.y ^= v.y; acc.z += v.z; acc.w ^= v.w; }
+    if (acc.x == 0x12345678u && acc.y == 0x9abcdef0u) st->acc = acc.z;
+    __syncthreads();
+    if (threadIdx.x == 0) { st->t1 = gtimer_(); __threadfence(); flags[32] = 1; __threadfence_system(); }
+}
+
 extern "C" __global__ void flush_read(const uint4 *p, size_t n, unsigned *sink)
 {
     unsigned acc = 0;
@@ -261,12 +283,14 @@ int main(int argc, char **argv)
     if (argc < 6) { fprintf(stderr, "usage: see header of setup3.cu\n"); return 2; }
     const bool random_fill = !strcmp(argv[4], "random");
     double energy_s = 0;
+    int sib_sm = -1, sib_kb = 4096, sib_passes = 4; unsigned sib_poll = 0;
     bool ias = false; bool decoy = false, thrash_near = false, thrash_node = false; size_t tlbpages = 0; bool run_ttu = true, thrash = false, thrash_gas = false; unsigned thrash_lane = 128; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--ias")) ias = true;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
         else if (!strcmp(argv[a], "--thrash-gas")) thrash_gas = true;
+        else if (!strcmp(argv[a], "--sibling") && a + 1 < argc) { if (sscanf(argv[++a], "%d:%d:%d:%u", &sib_sm, &sib_kb, &sib_passes, &sib_poll) < 3 || sib_sm < 0 || sib_kb < 1 || sib_passes < 0) { fprintf(stderr, "--sibling SM:KB:PASSES[:POLLNS]\n"); return 2; } }   // q20: needs build_patch --sibling --smfilter and --sms A,A (the block that lands on SM A runs, the others leave)
         else if (!strcmp(argv[a], "--thrash-near")) thrash_near = true;   // (with --thrash) words 26, 27 = a 64 KB buffer allocated right after the GAS (same 2 MB chunk if it prints so): warms the translation of the BVH page, no BVH line
         else if (!strcmp(argv[a], "--tlbflush") && a + 1 < argc) tlbpages = (size_t)atoll(argv[++a]);   // q18: before every timed launch (after --flush) touch one line in each of P 2 MB pages of a P x 2 MB buffer
         else if (!strcmp(argv[a], "--thrash-node")) thrash_node = true;   // q18 (with --thrash): lane 31 loads the OptiX instance node line (address A) instead of GAS line 31
@@ -778,6 +802,15 @@ int main(int argc, char **argv)
             in[i * N + 26] = (unsigned)a2; in[i * N + 27] = (unsigned)(a2 >> 32);
         }
     }
+    unsigned *sib_flags = nullptr; uint4 *sib_buf = nullptr; SibStat *sib_st = nullptr, *sib_st_d = nullptr; cudaStream_t ssib = nullptr;
+    if (sib_sm >= 0) {
+        CK(cudaMalloc((void **)&sib_flags, 4096)); CK(cudaMemset(sib_flags, 0, 4096));
+        CK(cudaMalloc((void **)&sib_buf, (size_t)sib_kb * 1024)); CK(cudaMemset(sib_buf, 1, (size_t)sib_kb * 1024));
+        CK(cudaHostAlloc((void **)&sib_st, sizeof(SibStat), cudaHostAllocMapped)); CK(cudaHostGetDevicePointer((void **)&sib_st_d, sib_st, 0));
+        CK(cudaStreamCreateWithFlags(&ssib, cudaStreamNonBlocking));
+        for (size_t i = 0; i < TOTAL; ++i) { in[i * N + 26] = (unsigned)(unsigned long long)sib_flags; in[i * N + 27] = (unsigned)((unsigned long long)sib_flags >> 32); }
+        printf("sibling: target SM %d, thrash %d KB x %d passes, flags %p\n", sib_sm, sib_kb, sib_passes, (void *)sib_flags);
+    }
     unsigned *din, *dout, *sink; uint4 *fbuf = nullptr; size_t fn = (size_t)(flush_mb * 1048576.0) / sizeof(uint4);
     CK(cudaMalloc((void **)&din, in.size() * 4)); CK(cudaMalloc((void **)&dout, out.size() * 4)); CK(cudaMalloc((void **)&sink, 4));
     CK(cudaMemcpy(din, in.data(), in.size() * 4, cudaMemcpyHostToDevice));
@@ -827,6 +860,15 @@ int main(int argc, char **argv)
         if (fn) { flush_read<<<NSM * 8, 256>>>(fbuf, fn, sink); CK(cudaGetLastError()); }
         if (tlbpages) { tlb_touch<<<NSM, 256>>>(tbig, tlbpages, sink); CK(cudaGetLastError()); }
         if (smem && it == 0) CK(cudaFuncSetAttribute(ttu_one, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+        if (sib_sm >= 0) {   // reset the flags, start the plain block on the target SM, wait until it is resident (it then spins on flag1), then launch the TTU warp
+            CK(cudaMemset(sib_flags, 0, 4096)); CK(cudaDeviceSynchronize());
+            memset((void *)sib_st, 0, sizeof(SibStat));
+            sib_thrash<<<NSM * (getenv("SIB_GRIDX") ? atoi(getenv("SIB_GRIDX")) : 1), getenv("SIB_THREADS") ? atoi(getenv("SIB_THREADS")) : 384, 0, ssib>>>((unsigned)sib_sm, sib_buf, (unsigned)((size_t)sib_kb * 1024 / sizeof(uint4)), sib_passes, sib_flags, sib_st_d, sib_poll);
+            CK(cudaGetLastError());
+            for (int w = 0; w < 100000 && !sib_st->ready; ++w) std::this_thread::sleep_for(std::chrono::microseconds(50));
+            if (!sib_st->ready) { fprintf(stderr, "--sibling: no block landed on SM %d, ttu_one not launched\n", sib_sm); return 3; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));   // the other thrash blocks have left their SMs
+        }
         const unsigned long long c_before = csample(); const double w_before = now_s();
         CK(cudaEventRecord(ev_a));
         ttu_one<<<blocks, LANES, smem>>>(din, dout);
@@ -892,7 +934,9 @@ int main(int argc, char **argv)
             fprintf(jf, "]}");
             if (bi == 0) wc0 = wc;
         }
-        fprintf(jf, "], \"warp_clk\": [%s], \"lanes_equal\": %s}", wc0.c_str(), lanes_eq ? "true" : "false");
+        fprintf(jf, "], \"warp_clk\": [%s], \"lanes_equal\": %s", wc0.c_str(), lanes_eq ? "true" : "false");
+        if (sib_sm >= 0) fprintf(jf, ", \"sib\": {\"sm\": %u, \"timedout\": %u, \"thrash_ns\": %llu}", sib_st->sm, sib_st->timedout, (unsigned long long)(sib_st->t1 - sib_st->t0));
+        fprintf(jf, "}");
         if (it == repeat - 1) out = std::move(o);
     }
     TICK("launches done");

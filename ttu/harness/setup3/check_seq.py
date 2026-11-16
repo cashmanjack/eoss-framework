@@ -114,6 +114,13 @@ def check(path):
                 ok('B15 loop: exactly one branch, a backward BRA to the TTUOPEN, after the CLOSE',
                    len(brs) == 1 and low12(body[brs[0]]) == 0x947 and tgt == [g] and brs[0] > g + 18, (brs, tgt, g))
             ok('B15 loop: no TTU instruction after the branch target other than the one group', len(hits) == 19, len(hits))
+        elif meta.get('sibling'):   # q20 --sibling: exactly one branch, an @!P6 backward BRA to the spin load, after the first session's CLOSE and before the second group; no TTU instruction inside the spin
+            off = lambda b: (W(b) >> 32) & 0xffffffff
+            tgt = [i + 1 + ((off(body[i]) - (1 << 32 if off(body[i]) >> 31 else 0)) // 16) for i in brs]
+            g1 = groups[0]
+            ok('B15 sibling: exactly one backward BRA (@!P6) between the sessions, to the spin load, no TTU instruction in the loop',
+               len(brs) == 1 and low12(body[brs[0]]) == 0x947 and g1 + 18 < tgt[0] < brs[0] < groups[1] and ((W(body[brs[0]]) >> 12) & 0xf) == 0xe
+               and low12(body[tgt[0]]) == 0x981 and not any(low12(body[i]) in TTU for i in range(tgt[0], brs[0] + 1)), (brs, tgt, groups))
         else:
             ok('B15 no branch anywhere before EXIT', not brs)
     if meta.get('cctl'):   # Interface_7: exactly one TTUCCTL.IVALL in stage 1 (none in stage 0), unpredicated, right after the first session's wait NOP, outside every session, followed by 4 stall 15 NOPs
@@ -146,7 +153,7 @@ def check(path):
         ok('sleepb: one @P1 NANOSLEEP, before the group', len(ns) == 1 and ns[0] < g and pred(body[ns[0]]) == (1, 0), ns)
     is_clk = lambda b, rd: low12(b) == 0x805 and (W(b) >> 16) & 0xff == rd and (W(b) >> 72) & 0xff == 0x50
     cs, ce = meta.get('clk', [84, 86])
-    f4 = 4 if meta.get('smfilter') else 0   # S2R, 2 ISETP, @P0 EXIT sit between the wait and ISETP P0
+    f4 = 4 if meta.get('smfilter') and not meta.get('twice') else 0   # S2R, 2 ISETP, @P0 EXIT sit between the wait and ISETP P0
     ok('B12 loads waited on before ISETP P0 (and before the SM filter)', low12(body[g - 3 - c - f4]) == 0x918 and wt(body[g - 3 - c - f4]) == 0x3f)
     ok('B12 ISETP P0 then a NOP with stall 15 before the group',
        low12(body[g - 2 - c]) == 0x80c and low12(body[g - 1 - c]) == 0x918 and stall(body[g - 1 - c]) == 15)

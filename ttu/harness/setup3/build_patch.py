@@ -160,6 +160,11 @@ def bsync(b):
     return _instr(0x7941 | (b << 16), 0x3800000, 5, 1, 7, 7, 0)
 
 
+def bra_back_neg(pg, off_bytes, stall=5):
+    """@!Pg BRA, target (q20 spin wait): bra_back with the guard predicate negated (bit 15)."""
+    return _instr(0x0947 | (pg << 12) | (1 << 15) | ((off_bytes & 0xffffffff) << 32), 0x03ffff | (7 << 23), stall, 1, 7, 7, 0)
+
+
 def bra_back(pg, pp, off_bytes, stall=5):
     """@Pg BRA Pp, target (nvcc 12.8: opcode 0x947, signed byte offset from the next instruction in bits 63:32, second
     predicate Pp in bits 89:87)."""
@@ -244,7 +249,7 @@ def ttuccttl_bytes():
 
 
 def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out=95, preclk=False, barnops=1,
-          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False, lean_ld=False, lean_st=False, cctl=False, ias=False, prewarm=0, l1t=0, l1t_nofirst=False, sectors=1, bypass=False, decoy=False, bypass_first=False):
+          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False, lean_ld=False, lean_st=False, cctl=False, ias=False, prewarm=0, l1t=0, l1t_nofirst=False, sectors=1, bypass=False, decoy=False, bypass_first=False, sibling=False):
     global INPUTS, GROUP_LEN
     d = open(dump, 'rb').read()
     if ias:
@@ -476,6 +481,19 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
             assert twice, '--cctl needs --twice'
             body.append(ttuccttl_bytes() if stage == 1 else ctrl.NOP_BYTES)
             body += [ctrl.write_control(ctrl.NOP_BYTES, stall=15)] * 4
+        if sibling:   # q20: after the first session is closed: flag1 = 1 (the sibling block starts streaming), then spin on flag2 (it is done). Flags at the pointer in slots 26, 27 (+0, +128).
+            assert twice and remap and clock and not (thrash or cctl or l1t or prewarm or decoy or slim or loop or outer or ias), '--sibling: --twice --remap --clock, plain'
+            for r in (THRASH_PTR, THRASH_PTR + 1):
+                body.append(field(field(ldg[r], 16, phys(r)), 24, in_ptr))
+            body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
+            body.append(field(field(field(stg[3], 24, phys(THRASH_PTR)), 32, phys(THRASH_PTR)), 40, 0, 24))   # flag1 = low word of the flag address (nonzero)
+            body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
+            spin_top = len(body)
+            body.append(field(field(field(ldg[32], 16, 8), 24, phys(THRASH_PTR)), 40, 128, 24))             # STRONG.SYS load of flag2 into junk R8
+            body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
+            body.append(isetp_ne(6, 8, 255, 13, 0))                                                           # P6 = flag2 != 0
+            body.append(bra_back_neg(6, (spin_top - (len(body) + 1)) * 16))                                   # @!P6 BRA spin_top
+            body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=15))
         if thrash:   # same warp, same SM: N L1 allocating loads per lane, N x 4 KB of lines per warp
             assert remap, '--thrash needs --remap'
             for r in (THRASH_PTR, THRASH_PTR + 1):
@@ -594,7 +612,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     p.save(out)
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
     top_reg = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5] + ([LCNT + 1] if loop else []))
-    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'loop': loop, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0, 'lean': lean, 'hoist': hoist, 'coal': coal, 'outer': outer, 'outer_at': outer_at, 'stride': stride, 'cctl': cctl, 'ias': ias, 'l1t': l1t, 'prewarm': prewarm, 'sectors': sectors, 'bypass': bypass, 'decoy': decoy, 'bypass_first': bypass_first,
+    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'sibling': sibling, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'loop': loop, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0, 'lean': lean, 'hoist': hoist, 'coal': coal, 'outer': outer, 'outer_at': outer_at, 'stride': stride, 'cctl': cctl, 'ias': ias, 'l1t': l1t, 'prewarm': prewarm, 'sectors': sectors, 'bypass': bypass, 'decoy': decoy, 'bypass_first': bypass_first,
             'inputs': INPUTS, 'outputs': outputs, 'in_ptr': in_ptr}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
     used = g0 + GROUP_LEN + 1 + int(clock) + len(outputs) + 2
@@ -613,6 +631,7 @@ if __name__ == '__main__':
     a.add_argument('--regs', type=int, help='declared register count of ttu_one (>= 96)')
     a.add_argument('--max-out', type=int, default=95, help='store registers only up to this one')
     a.add_argument('--ias', action='store_true', help='BVH_4: the IAS traversal group (F91, 17 instructions) from an IAS pipeline dump (--dump notes/q3/ias/ias_a.bin) instead of the GAS group; plain builds only; the host needs --ias')
+    a.add_argument('--sibling', action='store_true', help='q20 (with --twice --remap --clock): between the sessions store flag1 and spin on flag2 (host --sibling SM:KB:PASSES runs a plain block on another SM)')
     a.add_argument('--cctl', action='store_true', help='Interface_7 (with --twice): TTUCCTL.IVALL between the two sessions (stage 1 only; stage 0 has a NOP there)')
     a.add_argument('--twice', action='store_true', help='two full sessions with the same ray; time the second')
     a.add_argument('--compact-out', action='store_true', help='store only input and clock registers')
@@ -644,4 +663,4 @@ if __name__ == '__main__':
     a.add_argument('--barnops', type=int, default=8, help='NOPs after the barrier: a warp issues a few instructions past BAR.SYNC before it stalls (8 measured enough at 20 warps)')
     x = a.parse_args()
     build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else '') + ('a%d' % x.alu if x.alu else '') + ('l' if x.slim else '') + ('L%d' % x.loop if x.loop else '') + ('o%ds%d' % (x.outer, x.stride) if x.outer else '') + ('N' if x.lean else '') + ('Nl' if x.lean_ld else '') + ('Ns' if x.lean_st else '') + ('H' if x.hoist else '') + ('C' if x.coal else '') + ('I' if x.ias else '') + ('W%d' % x.prewarm if x.prewarm else '') + ('T%d' % x.l1t if x.l1t else '') + ('n' if x.l1t_nofirst else '') + ('S%d' % x.sectors if x.sectors != 1 else '') + ('Y' if x.bypass else '') + ('D' if x.decoy else '') + ('B' if x.bypass_first else ''),
-          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean, x.hoist, x.coal, x.lean_ld, x.lean_st, x.cctl, x.ias, x.prewarm, x.l1t, x.l1t_nofirst, x.sectors, x.bypass, x.decoy, x.bypass_first)
+          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean, x.hoist, x.coal, x.lean_ld, x.lean_st, x.cctl, x.ias, x.prewarm, x.l1t, x.l1t_nofirst, x.sectors, x.bypass, x.decoy, x.bypass_first, x.sibling)
