@@ -6,7 +6,7 @@ matplotlib.use('Agg'); import matplotlib.pyplot as plt
 R = os.path.expanduser('~/eoss/'); O = R + 'notes/figures/meeting/'
 B, Or, G, K, Rd = '#1f5fa8', '#d1621b', '#4a8f3c', '#555555', '#b03a2e'
 plt.rcParams.update({'font.size': 11, 'axes.spines.top': False, 'axes.spines.right': False, 'axes.grid': True, 'grid.alpha': .25, 'figure.dpi': 130, 'axes.titlesize': 12, 'axes.titleweight': 'bold'})
-def save(fig, n): fig.tight_layout(); fig.savefig(O + n, dpi=150); plt.close(fig); print('wrote', n)
+def save(fig, n, rect=None): fig.tight_layout(rect=rect); fig.savefig(O + n, dpi=150); plt.close(fig); print('wrote', n)
 
 # 1 latency staircase (4070 Ti pointer chase, notes/io/core/chase_ca_*.json)
 pts = []
@@ -35,23 +35,32 @@ save(fig, 'm2_throughput_vs_tpcs.png')
 # 3 per element cost bars (cycles; log). Callback side: F131 microbenchmarks (4070 Ti); RT side: F5 / fig1 slopes (triton), F127 (candidate), F137 (hand off), Throughput_1 (7.4 cycles per ray, one SM saturated)
 items = [('warp instruction', .25, B), ('L1 tag request', 1.0, B), ('scattered L2 sector', 2.9, B), ('double precision instruction', 19, B),
          ('custom primitive candidate (per SM)', 4.9, Or), ('ray at saturation (one SM)', 7.4, Or), ('BVH level, node in L1', 43, Or), ('BVH level, node in L2', 337, Or), ('BVH level, node in DRAM', 620, Or), ('callback hand off (per warp call)', 875, Rd)]
-fig, ax = plt.subplots(figsize=(7.6, 4.6)); y = np.arange(len(items))[::-1]
+fig, ax = plt.subplots(figsize=(8.4, 5.8)); y = np.arange(len(items))[::-1]
 ax.barh(y, [i[1] for i in items], color=[i[2] for i in items]); ax.set_xscale('log'); ax.set_yticks(y); ax.set_yticklabels([i[0] for i in items], fontsize=9.5)
 for yy, i in zip(y, items): ax.text(i[1] * 1.12, yy, '%g' % i[1], va='center', fontsize=9)
-ax.set_xlabel('cycles   (blue: SM instruction and cache, orange: RT unit, red: SM to RT hand off)', fontsize=9.5); ax.set_xlim(.1, 3000); ax.set_title('Per element costs span four orders of magnitude'); ax.grid(axis='y', alpha=0)
-save(fig, 'm3_per_element_cost.png')
+ax.set_xlabel('cycles (blue: SM instruction and cache, orange: RT unit, red: hand off)', fontsize=9.5); ax.set_xlim(.1, 3000); ax.set_title('Per element costs span four orders of magnitude'); ax.grid(axis='y', alpha=0)
+fig.text(.01, .01, 'Sources (Findings):\n instruction .25, L1 tag 1.0, L2 sector 2.9, double precision 19: F131 (4070 Ti microbenchmarks)\n candidate 4.9 per SM: F116 (RTNN slope; F127 gives 4 to 9)\n ray 7.4 at saturation: F24, F31 (5.7 to 7.4 per ray, one SM)\n BVH level 43 (L1): F25, F26; 337 (L2), 620 (DRAM): F26 ranges 270 to 400, 580 to 750; point values from fig1 slopes\n hand off 875 per warp call: F49 (850 to 900), used in F137', fontsize=7.4, color=K, va='bottom')
+save(fig, 'm3_per_element_cost.png', rect=(0, .2, 1, 1))
 
-# 4 node state capacity (F150, notes/q19/capacity_table.txt) with the sibling result (F155, notes/q20/sib_matrix.json)
+# 4 node state capacity (F150, notes/q19/capacity_table.txt), sibling results F155 (notes/q20/sib_matrix.log medians; its json was overwritten by the F157 run) and F157 (notes/q20/sib_fence.json). TENTATIVE.
 rows = [l.split() for l in open(R + 'notes/q19/capacity_table.txt') if l.strip() and l.split()[0].isdigit()]
 kb = [float(r[2]) for r in rows]; sv = [float(r[7]) for r in rows]
-sib = json.load(open(R + 'notes/q20/sib_matrix.json')); Ns = [1024, 2048, 3072, 4096]
-def med(a, N): return st.median(c for x in sib['%s|%d' % (a, N)] for c in x['cycles'])
-fig, ax = plt.subplots(figsize=(7.2, 4.3)); ax.plot(kb, sv, 'o-', color=B, ms=4, label='second session, alone (F150)')
-ax.plot([68, 132, 199, 263], [1 - med('sib4', N) / med('single', N) for N in Ns], 's--', color=Rd, ms=6, label='with a block on the sibling SM (F155)')
-ax.plot([68, 132, 199, 263], [1 - med('ctl4', N) / med('single', N) for N in Ns], '^:', color=G, ms=6, label='block on another TPC (F155)')
+nm = 'single twice flag0 sib4 ctl4 sib16 ctl16 flag0p sib4p ctl4p'.split(); f155 = {}
+for l in open(R + 'notes/q20/sib_matrix.log'):
+    t = l.split('|')[0].split()
+    if len(t) == 11 and t[0].isdigit(): f155[int(t[0])] = dict(zip(nm, map(int, t[1:])))
+fen = json.load(open(R + 'notes/q20/sib_fence.json'))
+def med(a, N): return st.median(c for x in fen['%s|%d' % (a, N)] for c in x['cycles'])
+Ns = [1024, 2048, 3072, 4096]; KB = [68, 132, 199, 263]
+fig, ax = plt.subplots(figsize=(7.6, 4.6)); ax.plot(kb, sv, 'o-', color=B, ms=4, label='second session, alone (F150)')
+ax.plot(KB, [1 - f155[N]['sib4'] / f155[N]['single'] for N in Ns], 's--', color=Rd, ms=6, label='sibling block that streams loads and fences (F155)')
+ax.plot(KB, [1 - f155[N]['ctl4'] / f155[N]['single'] for N in Ns], '^:', color=G, ms=6, label='same block on another TPC (F155)')
+ax.plot(KB[:2], [1 - med('c1', N) / med('single', N) for N in (1024, 2048)], 'D', color=Rd, mfc='none', ms=8, label='sibling that only waits, then ONE fence (F157)')
+ax.plot(KB[:2], [1 - med('a1', N) / med('single', N) for N in (1024, 2048)], 'v', color='#7b3fa0', ms=8, label='sibling that only waits, no fence (F157)')
 ax.axvspan(80, 96, color=K, alpha=.15); ax.text(88, .03, 'L1 cliff\n80 to 96 KB', ha='center', fontsize=8.5, color=K); ax.set_xscale('log')
 ax.set_xlabel('BVH size, GAS bytes read by one ray (KB)'); ax.set_ylabel('saving of the second session (1 minus second / first)'); ax.set_ylim(0, .75)
-ax.set_title('Second session saving: small BVH and a quiet sibling SM'); ax.legend(frameon=False, fontsize=9, loc='upper right', bbox_to_anchor=(1, .98)); save(fig, 'm4_node_state_capacity.png')
+ax.set_title('TENTATIVE: second session saving; a fence on the sibling SM removes it'); ax.legend(frameon=False, fontsize=8.2, loc='upper right', bbox_to_anchor=(1, .98))
+fig.text(.01, .005, 'Tentative: mechanism of the fence effect not separated (barrier or L1 invalidate); F157 measured at 68 and 132 KB only.', fontsize=7.5, color=K); save(fig, 'm4_node_state_capacity.png')
 
 # 5 BITTU against the harness clock (F122, notes/q11/timing_fix.json)
 j = json.load(open(R + 'notes/q11/timing_fix.json')); x = [v['harness_s1'] - v['harness_s0'] for v in j.values()]; y = [v['corrected'] for v in j.values()]
@@ -81,16 +90,24 @@ from matplotlib.lines import Line2D
 ax.legend(handles=[Line2D([], [], marker='o', ls='', color=B, label='4070 Ti (io)'), Line2D([], [], marker='s', ls='', color=Or, label='6000 Ada (triton)'), Line2D([], [], marker='o', ls='', mfc=K, mec=K, label='filled: predicted first'), Line2D([], [], marker='o', ls='', mfc='none', mec=K, label='hollow: after the fact')], frameon=False, fontsize=8.5, loc='lower left', ncol=2)
 save(fig, 'm6_predicted_vs_measured.png')
 
-# 7 stacked time breakdown (F134, midpoints of the reported ranges, percent of warp time: callbacks / traversal / other)
-W = [('RTNN', 32, 66, 2), ('kNN rounds 1 to 4', 76, 22, 2), ('RT-BarnesHut 1M', 83, 11, 6), ('RT-BarnesHut 100k', 62, 7, 30), ('Arkade', 70, 27, 3)]
-fig, ax = plt.subplots(figsize=(7.4, 4.2)); y = np.arange(len(W))[::-1]; l = np.zeros(len(W))
-for k, (lab, c) in enumerate((('callbacks on the SM', Or), ('traversal (RT unit)', B), ('other', '#999999'))):
-    v = np.array([w[k + 1] for w in W]); ax.barh(y, v, left=l, color=c, label=lab)
-    for yy, a, b in zip(y, l, v):
-        if b >= 8: ax.text(a + b / 2, yy, '%d' % b, ha='center', va='center', color='white', fontsize=9)
-    l += v
-ax.set_yticks(y); ax.set_yticklabels([w[0] for w in W]); ax.set_xlabel('percent of warp time (midpoint of the measured range)'); ax.set_xlim(0, 100); ax.grid(axis='y', alpha=0)
-ax.set_title('Callbacks, not traversal, dominate most RT programs'); ax.legend(frameon=False, fontsize=9, loc='upper center', bbox_to_anchor=(.5, -.18), ncol=3); save(fig, 'm7_time_breakdown.png')
+# 7 time breakdown per workload (F134, every measured row of model/results_latency_term.md): range over the rows as a bar with end caps, a single measurement as a dot; NO midpoints.
+rows = {}
+for l in open(R + 'model/results_latency_term.md'):
+    t = [x.strip() for x in l.split('|')]
+    if len(t) > 9 and re.match(r'(rtnn|knn_round[1-4]$|bh_|ark_)', t[1]) and t[7].endswith('%') and t[9].endswith('%') and t[1] not in rows: rows[t[1]] = [float(x.rstrip('%')) for x in (t[7], t[8], t[9])]
+grp = [('RTNN (12 configs)', 'rtnn'), ('kNN rounds 1 to 4', 'knn'), ('RT-BarnesHut 1M', 'bh_g1M'), ('RT-BarnesHut 100k', 'bh_g100k'), ('Arkade (3 configs)', 'ark')]
+fig, ax = plt.subplots(figsize=(7.6, 4.6)); y0 = np.arange(len(grp))[::-1] * 1.0
+for gi, (lab, key) in enumerate(grp):
+    R_ = [v for k, v in rows.items() if k.startswith(key) and v]
+    for ci, (cn, c) in enumerate((('callbacks on the SM', Or), ('traversal (RT unit)', B), ('other', '#777777'))):
+        v = [r[ci] for r in R_]; lo, hi = min(v), max(v); yy = y0[gi] + (1 - ci) * .25
+        if hi - lo < 1e-9: ax.plot([lo], [yy], 'o', color=c, ms=6, label=cn if gi == 0 else None)
+        else:
+            ax.plot([lo, hi], [yy, yy], '-', color=c, lw=2.5, label=cn if gi == 0 else None); ax.plot([lo, lo, None, hi, hi], [yy - .07, yy + .07, None, yy - .07, yy + .07], '-', color=c, lw=1.5)
+        ax.text(hi + 1.5, yy, ('%d' % lo) if hi - lo < 1e-9 else '%d to %d' % (lo, hi), va='center', fontsize=8, color=c)
+ax.set_yticks(y0); ax.set_yticklabels([g[0] for g in grp]); ax.set_xlabel('percent of warp time (bar: range of rows, dot: one row)'); ax.set_xlim(0, 100); ax.grid(axis='y', alpha=0)
+ax.set_title('Callbacks, not traversal, dominate most RT programs'); ax.legend(frameon=False, fontsize=9, loc='upper center', bbox_to_anchor=(.5, -.16), ncol=3)
+fig.text(.01, .005, 'F134. RT-BarnesHut 100k: other = 30 is a first launch cost (28). Probes add 0 to 31 percent to launch time (F133).', fontsize=7.5, color=K); save(fig, 'm7_time_breakdown.png')
 
 # 8 Arkade waterfall on io (F145 pinned 24.1 ms, F154 device buffer 3.70 and float square 0.36)
 fig, ax = plt.subplots(figsize=(6.6, 4.2)); v = [24.1, 3.70, 0.36]; lab = ['original\n(pinned host output)', 'device buffer\noutput', 'float distance\n(same neighbours)']
