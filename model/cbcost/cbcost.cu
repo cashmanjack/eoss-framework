@@ -14,13 +14,13 @@ __global__ void alu(float* o, long long* cyc, int n) {
 }
 __global__ void mem(const char* base, unsigned long long wset, unsigned stride, float* o, long long* cyc, int n) {
   unsigned lane = threadIdx.x & 31, w = blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32; unsigned long long nl = wset / 128; float s = 0;
-  unsigned long long h = 0x9E3779B97F4A7C15ull * (w + 1);
+  unsigned long long h = 2654435761ull * (w + 1);
   long long t0 = clock64();
   for (int i = 0; i < n; i += 4) {
     float v[4];
     #pragma unroll
     for (int u = 0; u < 4; u++) {
-      h = h * 6364136223846793005ull + 1442695040888963407ull;
+      h = h * 2654435761ull + 40503ull; h ^= h >> 15;
       unsigned long long line = (h >> 9) & (nl - 1); const char* p = base + line * 128 + ((lane * stride) & 127);
       if (stride >= 128) p = base + (((h >> 9) + (unsigned long long)lane * 2654435761ull) & (nl - 1)) * 128;   // every lane its own line (wset a power of two)
       asm volatile("ld.global.ca.f32 %0, [%1];" : "=f"(v[u]) : "l"(p));

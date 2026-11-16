@@ -49,7 +49,8 @@ def raw(path):
     rows = list(csv.reader(open(path)))
     h = rows[0] if rows and rows[0][0] == 'ID' else None
     for i, r in enumerate(rows):
-        if r and r[0] == 'ID': h = r; v = rows[i + 1]; return {k: x for k, x in zip(h, v)}
+        if r and r[0] == 'ID':
+            h = r; v = next(x for x in rows[i + 1:] if x and x[0].isdigit()); return {k: x for k, x in zip(h, v)}
     return {}
 
 
