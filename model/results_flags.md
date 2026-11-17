@@ -46,18 +46,18 @@ Predicted: cull back within -10 to +15 percent of none (+5.0 percent cold, +1.7 
 Does a masked out instance still cost a node fetch? Almost none: 63 masked instances add 4 L1 fill sectors, 257 cycles cold and 43 warm over the one instance scene (predicted H1: +60 to +130 sectors, +4,000 to +10,000 cycles cold: both MISS, far below; H2 (a line per instance) is excluded by 60 times). Masked out instances are cheaper than visible ones (A below D by 727 cold cycles and 8 sectors): they are rejected before their subtree is read, so the rejection must happen at the interior IAS nodes (consistent with a mask summary per node; not decoded). Limit: in this layout the masked instances form a block by position, so a parent node can reject whole subtrees; a single masked out instance sitting between visible ones was not tested, and its cost may be a line.
 
 ## 5. tmax pruning on random rays (Feature_5), soup 100,000, 262,144 random rays
-| tmax | RT sectors per ray | ns per ray | hit fraction | trace cold (32 rays) | trace warm |
+| tmax | RT sectors per ray | ns per ray | hit fraction (262,144 rays; corrected 2026-11-17: the first version of this column was the 32 ray probe launch) | trace cold (32 rays) | trace warm |
 |---|---|---|---|---|---|
 | 0 | 20.7 | 0.188 | 0.000 | 7455 | 3498 |
 | 0.01 | 22.9 | 0.188 | 0.038 | 8273 | 4389 |
-| 0.02 | 25.2 | 0.219 | 0.12 | 8754 | 4556 |
-| 0.05 | 31.5 | 0.246 | 0.19 | 9464 | 4672 |
-| 0.1 | 41.8 | 0.289 | 0.38 | 9752 | 4871 |
-| 0.2 | 56.8 | 0.371 | 0.53 | 12626 | 5513 |
-| 0.5 | 75.2 | 0.469 | 0.75 | 15676 | 6690 |
-| 1 | 80.2 | 0.496 | 0.78 | 22456 | 8578 |
-| 2 | 80.7 | 0.507 | 0.81 | 24080 | 9114 |
-| unlimited | 80.8 | 0.508 | 0.81 | 24140 | 9130 |
+| 0.02 | 25.2 | 0.219 | 0.075 | 8754 | 4556 |
+| 0.05 | 31.5 | 0.246 | 0.175 | 9464 | 4672 |
+| 0.1 | 41.8 | 0.289 | 0.314 | 9752 | 4871 |
+| 0.2 | 56.8 | 0.371 | 0.509 | 12626 | 5513 |
+| 0.5 | 75.2 | 0.469 | 0.754 | 15676 | 6690 |
+| 1 | 80.2 | 0.496 | 0.823 | 22456 | 8578 |
+| 2 | 80.7 | 0.507 | 0.829 | 24080 | 9114 |
+| unlimited | 80.8 | 0.508 | 0.829 | 24140 | 9130 |
 Predicted sectors 12 / 20 / 30 / 45 / 65 / 80 / 90 (r 0 to 0.5) and equal to unlimited at r >= 1: measured inside the range at r = 0 to 0.02, then 30 to 36 percent below the prediction at 0.05 to 0.2 and 16 percent below at 0.5 (saturation 81, not 90; the rule "equal to unlimited at r >= 1 within 3 percent" held: 80.2 against 80.8). Hit fraction predicted 0.9 or more by r = 0.3: miss (0.81 at most; 0.53 at 0.2). Time per ray predicted 0.3 of unlimited at r = 0.01 and 0.75 at 0.2: 0.37 and 0.73 (inside). Saving at r = 0.05 against unlimited: sectors 61 percent, time 52 percent (predicted 40 to 65: inside). One warp trace at r = 0.05 against unlimited: 0.39 cold, 0.51 warm (predicted 0.5 to 0.8: cold below). A zero length ray still costs 20.7 sectors per ray and 37 percent of an unlimited ray's time (F44: an empty interval from inside the scene is not free; the lone warp warm trace at r = 0 is 38 percent of the unlimited one). At one warp the cold trace keeps growing after the per ray sectors have flattened (15676 at r = 0.5 to 22456 at r = 1 while sectors grow 6.6 percent); hypothesis, not tested: the warp waits for its slowest lane, whose chain is longer than the mean.
 
 ## Which of these change the traversal group itself

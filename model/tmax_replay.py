@@ -3,7 +3,7 @@ import subprocess, sys, numpy as np
 rays_f, table, replay, work = sys.argv[1:5]
 R = np.fromfile(rays_f, np.float32).reshape(-1, 8); n = len(R)
 TM = [0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 1e16]
-req = [20.7, 22.9, 25.2, 31.5, 41.8, 56.8, 75.2, 80.2, 80.7, 80.8]; hitf = [0, .04, .12, .19, .38, .53, .75, .78, .81, .81]; ns = [.188, .188, .219, .246, .289, .371, .469, .496, .507, .508]
+req = [20.7, 22.9, 25.2, 31.5, 41.8, 56.8, 75.2, 80.2, 80.7, 80.8]; hitf = [0, .038, .075, .175, .314, .509, .754, .823, .829, .829]; ns = [.188, .188, .219, .246, .289, .371, .469, .496, .507, .508]   # hit fractions: 262,144 ray launch (F182 summary.json; corrected 2026-11-17, the first version used the 32 ray probe launch); ns = [.188, .188, .219, .246, .289, .371, .469, .496, .507, .508]
 rows = []
 for t in TM:
     r = R.copy(); r[:, 7] = t; r.tofile(work + '/r.bin')
