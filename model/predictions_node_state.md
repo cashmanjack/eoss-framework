@@ -36,3 +36,6 @@ Run rules as (i): stage 0 first, check_seq, smallest launch first, timeout -k 2 
 
 ## What survives
 If (i) gives g at least 0.8 (P cold, X warm) and (ii) thr near 0.26: A. If (i) g at most 0.2 (both D) and (ii) thr equal dly: B. Any mixed result: reported as not separated, no third hypothesis added after the fact.
+
+## Design change, 2026-11-16 (before any stage 1 run; predictions above unchanged)
+Instead of a TTU warp loop that streams loads (--stream, --delay builds, which fault in stage 0), test (ii) with a plain block on the TTU's own SM (launched after the TTU kernel; the validated sibling build, polling flag1 with relaxed loads as F157 b): mode 8 streams 1 MB with ordinary cached loads, mode 9 (delay control) waits the measured stream time on the global timer after flag1, with no loads (as F157 a). Test (i) keeps the validated sibO build (TTUCCTL issued by the TTU warp on SM A outside a session, F162 sequence type) with the plain warm and reload block on SM 1; the mirrored F161 build is not used.
