@@ -124,10 +124,10 @@ extern "C" __global__ void ttu_one(const unsigned *in, unsigned *out)
 // ---- TPC_1 (--compute TYPE:PLACE): a persistent plain CUDA compute kernel on a second stream; it owns SMs by parity (blocks on other SMs exit at once) ----
 __device__ static unsigned smid_() { unsigned s; asm volatile("mov.u32 %0, %%smid;" : "=r"(s)); return s; }
 template <int TYPE>
-__device__ void compute_body(int parity, int limit, const volatile int *stop, unsigned long long *iters, unsigned long long *resident, const uint4 *buf, size_t nbuf, unsigned wmask)
+__device__ void compute_body(int parity, int limit, int half, const volatile int *stop, unsigned long long *iters, unsigned long long *resident, const uint4 *buf, size_t nbuf, unsigned wmask)
 {
     __shared__ int ok; __shared__ unsigned my_sm; __shared__ uint4 sm4[TYPE == 4 ? 1024 : 1];
-    if (threadIdx.x == 0) { const unsigned s = smid_(); my_sm = s; ok = parity < 0 || (int)(s & 1) == parity; if (ok && atomicAdd(&resident[s], 1ull) >= (unsigned long long)limit) { atomicAdd(&resident[s], (unsigned long long)-1); ok = 0; } }   // at most LIMIT resident blocks per SM: the rest exit at once
+    if (threadIdx.x == 0) { const unsigned s = smid_(); my_sm = s; ok = parity < 0 || (parity < 2 ? (int)(s & 1) == parity : parity == 2 ? (int)s >= half : ((s & 1) && (int)s < half)); if (ok && atomicAdd(&resident[s], 1ull) >= (unsigned long long)limit) { atomicAdd(&resident[s], (unsigned long long)-1); ok = 0; } }   // at most LIMIT resident blocks per SM: the rest exit at once
     __syncthreads(); if (!ok) return;
     float x = 1.f + threadIdx.x * 1e-3f, y = 0.5f; unsigned long long it = 0; uint4 acc = make_uint4(0, 0, 0, 0);
     const size_t base = ((size_t)blockIdx.x * 2048) % (nbuf > 4096 ? nbuf - 2048 : 1);
@@ -143,7 +143,7 @@ __device__ void compute_body(int parity, int limit, const volatile int *stop, un
     }
     if (x == 12345.f || acc.x == 0xdeadbeef) iters[1023] += 1;
 }
-template <int TYPE> __global__ void __maxnreg__(24) compute_k(int p, int lim, const volatile int *s, unsigned long long *i, unsigned long long *r, const uint4 *b, size_t n, unsigned wm) { compute_body<TYPE>(p, lim, s, i, r, b, n, wm); }
+template <int TYPE> __global__ void __maxnreg__(24) compute_k(int p, int lim, int hf, const volatile int *s, unsigned long long *i, unsigned long long *r, const uint4 *b, size_t n, unsigned wm) { compute_body<TYPE>(p, lim, hf, s, i, r, b, n, wm); }
 
 extern "C" __global__ void tlb_touch(const uint4 *p, size_t pages, unsigned *sink)   // q18: one line in each 2 MB page of a big buffer (translation pressure, almost no L2 traffic)
 {
@@ -361,11 +361,12 @@ int main(int argc, char **argv)
     const bool random_fill = !strcmp(argv[4], "random");
     double energy_s = 0;
     int sib_sm = -1, sib_kb = 4096, sib_passes = 4; unsigned sib_poll = 0, sib_mode = 0;
-    bool gopaque = false; unsigned imask = 255; bool ias = false; bool decoy = false, thrash_near = false, thrash_node = false; size_t tlbpages = 0; bool run_ttu = true, thrash = false, thrash_gas = false; unsigned thrash_lane = 128; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int oclk = 0, lclock = 0, onrep = 1, orot = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool gopaque = false; unsigned imask = 255; std::string imat = "id"; bool ias = false; bool decoy = false, thrash_near = false, thrash_node = false; size_t tlbpages = 0; bool run_ttu = true, thrash = false, thrash_gas = false; unsigned thrash_lane = 128; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int oclk = 0, lclock = 0, onrep = 1, orot = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--ias")) ias = true;
         else if (!strcmp(argv[a], "--gopaque")) gopaque = true;
+        else if (!strcmp(argv[a], "--imat") && a + 1 < argc) imat = argv[++a];   // --ias (Xform_1): instance object to world transform: id (default) | rz37 | rz90s2 | rx37 | snu
         else if (!strcmp(argv[a], "--imask") && a + 1 < argc) imask = (unsigned)strtoul(argv[++a], nullptr, 0);   // --ias: instance visibility mask (default 255; Mask_1)
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
         else if (!strcmp(argv[a], "--thrash-gas")) thrash_gas = true;
@@ -473,7 +474,14 @@ int main(int argc, char **argv)
     // --ias: one instance of the GAS (identity transform) under an IAS
     CUdeviceptr iasbuf = 0; OptixTraversableHandle ih = 0; size_t ias_size = 0; unsigned long long ias_off = 0;
     if (ias) {
-        OptixInstance inst{}; const float idm[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}; memcpy(inst.transform, idm, sizeof idm);
+        OptixInstance inst{}; float idm[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+        { const float c37 = cosf(0.6458f), s37 = sinf(0.6458f);   // 37 degrees; keep in sync with ref.py IMATS
+          if (imat == "rz37") { const float m[12] = {c37, -s37, 0, 0.05f, s37, c37, 0, -0.03f, 0, 0, 1, 0.02f}; memcpy(idm, m, sizeof m); }
+          else if (imat == "rz90s2") { const float m[12] = {0, -2, 0, 0.1f, 2, 0, 0, 0.2f, 0, 0, 2, 0.3f}; memcpy(idm, m, sizeof m); }
+          else if (imat == "rx37") { const float m[12] = {1, 0, 0, 0, 0, c37, -s37, 0, 0, s37, c37, 0.1f}; memcpy(idm, m, sizeof m); }
+          else if (imat == "snu") { const float m[12] = {2, 0, 0, 0.05f, 0, 0.5f, 0, -0.02f, 0, 0, 1.5f, 0.2f}; memcpy(idm, m, sizeof m); }
+          else if (imat != "id") { fprintf(stderr, "--imat id|rz37|rz90s2|rx37|snu\n"); return 2; } }
+        memcpy(inst.transform, idm, sizeof idm);
         inst.instanceId = 0; inst.sbtOffset = 0; inst.visibilityMask = imask; inst.flags = OPTIX_INSTANCE_FLAG_NONE; inst.traversableHandle = h;
         CUdeviceptr dinst; CK(cudaMalloc((void **)&dinst, sizeof inst)); CK(cudaMemcpy((void *)dinst, &inst, sizeof inst, cudaMemcpyHostToDevice));
         OptixBuildInput ib{}; ib.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES; ib.instanceArray.instances = dinst; ib.instanceArray.numInstances = 1;
@@ -685,6 +693,7 @@ int main(int argc, char **argv)
             ray.o[0], ray.o[1], ray.o[2], ray.d[0], ray.d[1], ray.d[2]);
     fprintf(jf, " \"gas\": \"0x%llx\", \"gas_size\": %zu, \"handle\": \"0x%llx\", \"root_off\": \"0x%llx\", \"root\": \"0x%llx\",\n",
             (unsigned long long)gas, (size_t)bs.outputSizeInBytes, (unsigned long long)h, off, root);
+    fprintf(jf, " \"imat\": \"%s\",\n", ias ? imat.c_str() : "none");
     fprintf(jf, " \"ias\": %d, \"ias_addr\": \"0x%llx\", \"ias_handle\": \"0x%llx\", \"ias_root_off\": \"0x%llx\", \"ias_size\": %zu,\n", ias ? 1 : 0, (unsigned long long)iasbuf, (unsigned long long)ih, ias_off, ias_size);
     fprintf(jf, " \"inst\": \"0x%llx\", \"inst_ok\": %s, \"c3_34\": \"0x%08x\", \"handle_ok\": %s, \"align_ok\": %s,\n", A,
             inst_ok ? "true" : "false", c3_34, handle_ok ? "true" : "false", align_ok ? "true" : "false");
@@ -933,23 +942,24 @@ int main(int argc, char **argv)
     if (comp) {
         const size_t colon = compute_opt.find(':'); const std::string ctype = compute_opt.substr(0, colon); std::string cplace = compute_opt.substr(colon + 1);
         int lim_opt = 0, kb_opt = 0; { const size_t c2 = cplace.find(':'); if (c2 != std::string::npos) { std::string rest = cplace.substr(c2 + 1); cplace = cplace.substr(0, c2); lim_opt = atoi(rest.c_str()); const size_t c3 = rest.find(':'); if (c3 != std::string::npos) kb_opt = atoi(rest.c_str() + c3 + 1); } }   // TYPE:PLACE[:LIM[:KB]]
-        const int tp = ctype == "alu" ? 0 : ctype == "l1" ? 1 : ctype == "mem" ? 2 : ctype == "l2" ? 3 : ctype == "smem" ? 4 : ctype == "l1w" ? 5 : -1; if (tp < 0 || (cplace != "all" && cplace != "odd") || lim_opt < 0 || lim_opt > 4) { fprintf(stderr, "--compute alu|l1|mem|l2|smem|l1w:all|odd[:LIM 1..4[:KB]]\n"); return 2; }
+        const int tp = ctype == "alu" ? 0 : ctype == "l1" ? 1 : ctype == "mem" ? 2 : ctype == "l2" ? 3 : ctype == "smem" ? 4 : ctype == "l1w" ? 5 : -1; if (tp < 0 || (cplace != "all" && cplace != "odd" && cplace != "high" && cplace != "sib") || lim_opt < 0 || lim_opt > 4) { fprintf(stderr, "--compute alu|l1|mem|l2|smem|l1w:all|odd|high|sib[:LIM 1..4[:KB]]\n"); return 2; }
         unsigned wmask = tp == 5 ? (unsigned)((kb_opt ? kb_opt : 32) * 64 - 1) : tp == 3 ? (unsigned)((kb_opt ? kb_opt : 32768) * 64 - 1) : 0;   // l1: KB per block window (default 32 KB = 2048 uint4); l2: KB window over the whole buffer (default 32 MB)
         if (tp == 5 && (wmask & (wmask + 1))) { fprintf(stderr, "l1 KB must be a power of two\n"); return 2; } if (tp == 3 && (wmask & (wmask + 1))) { fprintf(stderr, "l2 KB must be a power of two\n"); return 2; }
         CK(cudaStreamCreateWithFlags(&sc, cudaStreamNonBlocking)); CK(cudaStreamCreateWithFlags(&ss, cudaStreamNonBlocking));
         const size_t nbuf = (size_t)1 << 26;   // 1 GB of uint4
         CK(cudaMalloc((void **)&dstop, 4)); CK(cudaMemset(dstop, 0, 4)); CK(cudaMalloc((void **)&diters, 1024 * 8)); CK(cudaMemset(diters, 0, 1024 * 8)); CK(cudaMalloc((void **)&dres, 1024 * 8)); CK(cudaMemset(dres, 0, 1024 * 8));
         CK(cudaMalloc((void **)&dcbuf, nbuf * 16)); CK(cudaMemset(dcbuf, 1, nbuf * 16));
-        const int parity = cplace == "odd" ? 1 : -1, lim = lim_opt ? lim_opt : cplace == "odd" ? 4 : 2, grid = NSM * lim * 40;
+        const int parity = cplace == "odd" ? 1 : cplace == "high" ? 2 : cplace == "sib" ? 3 : -1, lim = lim_opt ? lim_opt : cplace != "all" ? 4 : 2, grid = NSM * lim * 40;
         auto setcarve = [&](const void *k) { if (ccarve >= 0) CK(cudaFuncSetAttribute(k, cudaFuncAttributePreferredSharedMemoryCarveout, ccarve)); if (csmem) CK(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, csmem)); };   // --ccarve P (percent shared), --csmem BYTES per block (unused, shrinks the L1)
         setcarve((const void *)compute_k<0>); setcarve((const void *)compute_k<1>); setcarve((const void *)compute_k<2>); setcarve((const void *)compute_k<3>); setcarve((const void *)compute_k<4>); setcarve((const void *)compute_k<5>);
-        if (tp == 0) compute_k<0><<<grid, 384, csmem, sc>>>(parity, lim, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 1) compute_k<1><<<grid, 384, csmem, sc>>>(parity, lim, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 2) compute_k<2><<<grid, 384, csmem, sc>>>(parity, lim, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 3) compute_k<3><<<grid, 384, csmem, sc>>>(parity, lim, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 4) compute_k<4><<<grid, 384, csmem, sc>>>(parity, lim, dstop, diters, dres, dcbuf, nbuf, wmask); else compute_k<5><<<grid, 384, csmem, sc>>>(parity, lim, dstop, diters, dres, dcbuf, nbuf, wmask);
+        if (tp == 0) compute_k<0><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 1) compute_k<1><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 2) compute_k<2><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 3) compute_k<3><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 4) compute_k<4><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask); else compute_k<5><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask);
         CK(cudaGetLastError());
         wdog = std::thread([&]() { for (int k = 0; k < 250 && !cdone; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(100)); int o = 1; cudaMemcpyAsync(dstop, &o, 4, cudaMemcpyHostToDevice, ss); });   // watchdog: stop the compute kernel after 25 s
         std::this_thread::sleep_for(std::chrono::milliseconds(400));   // blocks settle on their SMs
         CK(cudaMemcpy(res_blocks, dres, 1024 * 8, cudaMemcpyDeviceToHost));
         unsigned long long be = 0, bo = 0; for (int q = 0; q < NSM; ++q) (q & 1 ? bo : be) += res_blocks[q];
-        printf("compute %s: resident blocks on even SMs %llu, odd SMs %llu\n", compute_opt.c_str(), be, bo);
+        unsigned long long blo = 0, bhi = 0; for (int q = 0; q < NSM; ++q) (q < NSM / 2 ? blo : bhi) += res_blocks[q];
+        printf("compute %s: resident blocks on even SMs %llu, odd SMs %llu, SMs below %d: %llu, from %d: %llu\n", compute_opt.c_str(), be, bo, NSM / 2, blo, NSM / 2, bhi);
         { const unsigned long long a0 = csample(); const double t0 = now_s(); std::this_thread::sleep_for(std::chrono::milliseconds(300)); const unsigned long long a1 = csample(); calone_it = a1 - a0; calone_s = now_s() - t0; }   // compute alone, before any ttu_one launch
     }
     for (int it = 0; it < repeat && e == cudaSuccess; ++it) {
@@ -1075,6 +1085,7 @@ int main(int argc, char **argv)
         unsigned long long be = 0, bo = 0; for (int q = 0; q < NSM; ++q) (q & 1 ? bo : be) += res_blocks[q];
         fprintf(jf, ",\n \"compute_alone_iters\": %llu, \"compute_alone_s\": %.6f", calone_it, calone_s);
         fprintf(jf, ",\n \"compute\": \"%s\", \"compute_blocks_even\": %llu, \"compute_blocks_odd\": %llu", compute_opt.c_str(), be, bo);
+        { unsigned long long blo2 = 0, bhi2 = 0; for (int q = 0; q < NSM; ++q) (q < NSM / 2 ? blo2 : bhi2) += res_blocks[q]; fprintf(jf, ",\n \"compute_blocks_low\": %llu, \"compute_blocks_high\": %llu", blo2, bhi2); }
     }
     if (dump_final && e == cudaSuccess) {   // per lane final words of the last launch: R3 R32 R33 R44 R45 R56..R61 R70 R71 R84 (15 u32)
         static const int DF[15] = {3, 32, 33, 44, 45, 56, 57, 58, 59, 60, 61, 70, 71, 84, 3};

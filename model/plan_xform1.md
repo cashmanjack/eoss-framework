@@ -1,0 +1,21 @@
+# Xform_1: plan for a transform TTU sequence (prepared 2026-11-17, tethys; stage 1 NOT run)
+
+Status: the sequence is the IAS group of F139 and F195, unchanged. Only the data changes: the instance in the IAS carries a non identity object to world matrix. Everything below the line "Prepared" is done; everything under "Plan for stage 1" needs Jack's approval first (new instance data, same sequence class as F139, and the checked build below).
+
+## Why the sequence does not change
+- The IAS traversal code that OptiX runs was dumped (F91, memdump launch --ias); the memdump source says its IAS launch uses one instance with a real transform (rotation about z, uniform scale, translation); I did not re-verify that the dump file in use came from that launch. Our IAS builds copy that group. F139 and F195 ran it on an identity instance and matched OptiX. So the group was copied from a transformed launch, and ran against an identity instance.
+- F223 (OptiX only): a rotation costs nothing on one level or two (time, SM warp instructions and unit requests equal to identity), which fits the transform being applied by the unit and not by SM code.
+- The register image of the first query holds ray words in world space; the matrix is only in the instance leaf the unit reads (the object to world matrix in the instance level and, in the leaf record, the world to object matrix next to the child pointer, F85). We confirmed by running the stage 0 twin: the 32 bit words of the lane 0 register image (ray hit) are identical for identity, rotation, scaled and non uniform scale matrices, except the two words that hold this process's IAS address (the same two differ between two identity runs).
+
+## Prepared (stage 0 only, no TTU instruction ran)
+1. setup3 --imat NAME (id, rz37, rz90s2, rx37, snu): the matrix of the one instance; default id so every earlier run is unchanged. Matrices in setup3.cu and ttu/bench/Xform_1/prepare.py (kept in sync by a check: all 30 comparisons below used the same table).
+2. Builds /dev/shm/t9x/ias_s0 and ias_s1 (build_patch --ias from the private IAS dump; the stage 1 build was NOT run), check_seq ALL PASS on both (fuse count 15, eight stores, GO, six loads, close bit on the last load only, even register pairs, no branch inside the group, same predicates as F139).
+3. Stage 0 runs (OptiX through the transformed IAS, one warp, no TTU instruction): 5 matrices x 6 rays (hit, moved, moved2, miss, t2, back) against a float64 CPU reference on the triangle moved by the matrix: 30 of 30 agree in hit, t, barycentrics, primitive 0 (t within 2e-5, u and v within 2e-5). Results ttu/bench/Xform_1/prepare.py output, raw JSON notes/xform1 (private).
+
+## Plan for stage 1 (NOT run; needs approval)
+Same rules as every TTU run: timeout -k 2 30, GPU 1, idle, one warp, smallest launch first, check_seq ALL PASS on the exact binary first, TTULD.CLOSE last, fuse count 15.
+1. Order: identity (sanity, repeats F139), then rz37, rz90s2, rx37, snu. For each matrix the rays hit, moved, moved2, miss, t2, back (one launch per ray, one warp, 32 lanes with the same ray first; then 32 different rays among them). 30 launches, then one launch with all 32 lanes holding different rays among the six.
+2. Success criterion per launch: result flag, distance word (t as float, sign bit as in F139: set for a hit that needs no any hit), primitive, barycentrics and the instance pair equal what OptiX returned in the same process for the same ray and matrix; misses give the all ones marker. Any difference stops the run and is reported, not retried.
+3. What it would show: the unit applies the transform (object space hit, parametric t unchanged) with our sequence exactly as OptiX issues it, and that the world to object matrix is read from the instance leaf (not from SM code). A mismatch on rotated matrices only would point to the SM code applying part of the transform before the group (then the register image of the first query would carry object space rays: we compared the world space ray words and they are equal for all matrices, so this is not expected).
+4. Risk: the same as F139 and F195 (same group, same bytes). No new TTU instruction, no new count, no new store offsets.
+5. Not in scope: two instance levels (the pipeline would need the any graph flag; F223) and many instances; those need a different group and are separate.
