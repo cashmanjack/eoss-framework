@@ -17,7 +17,7 @@ Classes 6 / 3 / 5, 9 / 3 / 7, 12 / 4 / 9, 15 / 5 / 10 (nearest the F197 means th
 | 100,000 | 85.9 76.3 44.0 21.1 15.6 18.0 | 1.00 0.89 0.51 0.25 0.18 0.21 | 165 114 89 76 69 66 | 103 69 61 59 58 58 | 98 56 35 24 19 16 |
 | 1,000,000 | 86.6 81.5 64.7 28.3 22.3 20.2 | 1.00 0.94 0.75 0.33 0.26 0.23 | 184 123 93 78 71 67 | 123 74 62 59 58 58 | 90 53 35 26 22 20 |
 
-One warp latency (cycles, g = 1 2 4 8 16 32): 1,000: 3,707 3,807 3,828 3,825 3,859 3,945; 10,000: 4,595 4,852 4,845 4,909 4,924 4,792; 100,000: 6,407 6,363 6,062 6,218 6,238 6,257; 1,000,000: 7,679 7,567 7,798 7,590 7,660 7,552. Within 6 percent of g = 1 at every g, and on the F67 line for the class counts (3,591 / 4,724 / 5,970 / 7,164: measured 1.03 / 0.97 / 1.07 / 1.07 times).
+One warp latency (cycles, g = 1 2 4 8 16 32): 1,000: 3,707 3,807 3,828 3,825 3,859 3,945; 10,000: 4,595 4,852 4,845 4,909 4,924 4,792; 100,000: 6,407 6,363 6,062 6,218 6,238 6,257; 1,000,000: 7,679 7,567 7,798 7,590 7,660 7,552. Within 7 percent of g = 1 at every g, and on the F67 line for the class counts (3,591 / 4,724 / 5,970 / 7,164: measured 1.03 / 0.97 / 1.07 / 1.07 times).
 
 ## Against the predictions and the reading rules
 1. Model A (Memory_4 fit): rate within 30 percent at 0 of 4 groups at every size: MISSED. Model B (F123 sharing form): at 0 / 1 / 1 / 2 of 4 groups: MISSED. Measured c(16) / c(1) 0.17 / 0.17 / 0.18 / 0.26 against A 0.59 / 0.48 / 0.42 / 0.38 and B 0.95 / 0.77 / 0.56 / 0.47: the sharing term is not right in kind (the direction is right, the size is not: measured floors at the coherent rate, the models floor at 58 to 67, 3 to 5 times higher, and the model's drop is smooth where the measurement has a knee).
