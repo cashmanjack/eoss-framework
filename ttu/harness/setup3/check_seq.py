@@ -44,6 +44,10 @@ def check(path):
     ex = next(i for i, b in enumerate(body) if low12(b) == 0x94d and pred(b) == (7, 0))   # the unpredicated EXIT
     fails = [i for i in range(ex) if dec.decode(0, body[i]).n_failed]
     ok('A1 body decodes with 0 failed checks up to EXIT', not fails, fails[:5])
+    if meta.get('aluwarps'):   # Sched_2: the ALU path (after the main EXIT and BRA self) is checked as well
+        ap = meta['apath']; alast = next(i for i in range(ap, len(body)) if low12(body[i]) == 0x94d and pred(body[i]) == (7, 0))
+        afails = [i for i in range(ap, alast + 2) if dec.decode(0, body[i]).n_failed]
+        ok('A1 the ALU path decodes with 0 failed checks up to its EXIT and BRA self', not afails, afails[:5])
     g = meta['group_index']
     groups = meta.get('groups') or [g]
     ok('layout: the timed group is the last session', groups[-1] == g, groups)
@@ -156,6 +160,27 @@ def check(path):
             ok('B15 delay: exactly one backward BRA (@P5) after the first session and before the second, loop body = IADD3, LOP3, BRA only',
                len(brs) == 1 and low12(body[brs[0]]) == 0x947 and pred(body[brs[0]]) == (5, 0) and g1 + 18 < tgt[0] < brs[0] < groups[1] and brs[0] - tgt[0] == 2
                and [low12(body[i]) for i in range(tgt[0], brs[0])] == [0x810, 0x212], (brs, tgt, groups, [hex(low12(body[i])) for i in range(max(0, brs[0] - 3), brs[0] + 1)]))
+        elif meta.get('aluwarps'):   # Sched_2: one forward @P2 BRA to the ALU path; the ALU path is plain ALU code with its own barrier, no TTU
+            fw, ap = meta['abra'], meta['apath']; offf = (W(body[fw]) >> 32) & 0xffffffff
+            ok('B15 aluwarps: exactly one branch before the main EXIT: a forward @P2 BRA to the ALU path right after the main EXIT and BRA self, positive offset (bits 64..81 zero), before any TTU instruction and any barrier',
+               brs == [fw] and low12(body[fw]) == 0x947 and pred(body[fw]) == (2, 0) and fw + 1 + offf // 16 == ap and ap == ex + 2 and ((W(body[fw]) >> 64) & 0x3ffff) == 0
+               and all(low12(b) not in TTU and low12(b) != 0xb1d for b in body[:fw + 1]), (brs, fw, ap, ex))
+            alast = next(i for i in range(ap, len(body)) if low12(body[i]) == 0x94d and pred(body[i]) == (7, 0)); apt = body[ap:alast + 2]
+            ok('B15 aluwarps: ALU path ends with EXIT and BRA self, then only NOP padding', low12(body[alast + 1]) == 0x947 and all(low12(b) == 0x918 for b in body[alast + 2:]), alast)
+            ok('B15 aluwarps: no TTU instruction, no load, no atomic, no second EXIT in the ALU path', not [b for b in apt if low12(b) in TTU | {0x981, 0x98e, 0x9a8}] and len([b for b in apt if low12(b) == 0x94d]) == 1)
+            bars_ = [b for b in apt if low12(b) == 0xb1d]
+            ok('B15 aluwarps: exactly one BAR.SYNC 0, blocking form, in the ALU path (the main path has the other one)', len(bars_) == 1 and ((W(bars_[0]) >> 80) & 1) == 0 and ((W(bars_[0]) >> 77) & 7) == 0)
+            abr = [i for i, b in enumerate(apt) if low12(b) == 0x947 and i != len(apt) - 1]
+            offp = lambda b: (W(b) >> 32) & 0xffffffff
+            tg = [i + 1 + ((offp(apt[i]) - (1 << 32 if offp(apt[i]) >> 31 else 0)) // 16) for i in abr]
+            nd = 1 if meta.get('aludelay') else 0
+            if nd:
+                ok('B15 aluwarps: the delay loop: a backward @P4 BRA over IADD3, LOP3 only, before the clock read and the FFMA loop', len(abr) == 2 and pred(apt[abr[0]]) == (4, 0) and 0 < tg[0] < abr[0] and all(low12(apt[i]) in (0x810, 0x212) for i in range(tg[0], abr[0])), (abr, tg))
+            ok('B15 aluwarps: exactly one FFMA loop branch, a backward @P5 BRA over FFMA, IADD3, LOP3 only (a counted loop)', len(abr) == 1 + nd and pred(apt[abr[-1]]) == (5, 0) and 0 < tg[-1] < abr[-1] and all(low12(apt[i]) in (0x223, 0x810, 0x212) for i in range(tg[-1], abr[-1])), (abr, tg))
+            ff = [b for b in apt if low12(b) == 0x223]
+            ok('B15 aluwarps: 12 FFMA, all unpredicated, Rd = Ra in R8..R15, Rb = R16, Rc = R17 (independent accumulators)', len(ff) == 12 and all(pred(b) == (7, 0) and (W(b) >> 16) & 0xff == (W(b) >> 24) & 0xff and 8 <= (W(b) >> 16) & 0xff <= 15 and (W(b) >> 32) & 0xff == 16 and (W(b) >> 64) & 0xff == 17 for b in ff), len(ff))
+            sts = [b for b in apt if low12(b) == 0x986]
+            ok('B15 aluwarps: exactly four stores, the clock registers to the record slots of the main path (slots 84 to 87)', sorted((W(b) >> 40) & 0xffffff for b in sts) == [4 * k for k in (84, 85, 86, 87)], [(W(b) >> 40) & 0xffffff for b in sts])
         else:
             ok('B15 no branch anywhere before EXIT', not brs)
     if meta.get('cctl'):   # Interface_7: exactly one TTUCCTL.IVALL in stage 1 (none in stage 0), unpredicated, right after the first session's wait NOP, outside every session, followed by 4 stall 15 NOPs
