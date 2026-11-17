@@ -1,0 +1,18 @@
+# Sched_1 and Sched_2 predictions (2026-11-17, tethys RTX 4090 GPU 1; written BEFORE any Sched run)
+
+Question (Phase 10): when several warps on one SM sub partition (scheduler) are ready, which one issues, and does a warp returning from the RT core get priority over ready ALU warps? Cap: one day.
+Facts used (not new): 4 schedulers per SM, 1 warp instruction per cycle per scheduler, warps map to schedulers by warp id (CUDA block warp w to scheduler w mod 4, assumed: tested here); FFMA dependent latency 4 cycles on Ada (assumed, from public microbenchmark papers, tested here).
+
+## Sched_1 (plain CUDA, no TTU; ttu/bench/Sched_1/sched1.cu, one block of 16 warps, clock stamps after each segment of 8, 32 or 64 FMAs, all warps released by one bar.sync)
+S1a mapping: warps 0 and 4 slow each other (segment time doubles), warps 0 and 1 do not (segment time within 5 percent of alone). Confidence 85 percent.
+S1b alone, independent FMAs: segment of 32 FMAs takes 32 to 36 cycles (1 FFMA per cycle), segment of 8 takes 8 to 12.
+S1c two warps on one scheduler, independent FMAs: each warp's segment time is 2.0 times alone (1.9 to 2.1), the total issue rate does not change; four warps 4.0 times.
+S1d dependent chain (DEP=1): one warp issues one FMA per 4 cycles; 2 and 4 warps on one scheduler each keep the alone speed (ratio 0.95 to 1.1, free issue slots); 8 warps on a scheduler 2.0 times (the scheduler is full). Confidence 70 percent.
+S1e among ready warps released together, ties are broken by warp id: the lowest id stamps first in more than 90 percent of launches (blocks land on different SMs; counted per launch). Confidence 60 percent (some chips rotate).
+S1f interleaving: with independent FMAs and two warps on one scheduler the stamps are NOT strict one for one alternation at the finest grain: a warp's consecutive stamp runs (stamps of the same warp with no stamp of the other warp between them, sequence sorted by time) have mean length above 1.5 at segment length 8 (greedy style: the same warp issues several instructions in a row before the other gets a turn). Confidence 45 percent; the alternative, mean run length near 1 (loose round robin), is equally plausible, and I state that I do not know.
+Scoring: S1a to S1f each held or missed; numbers as above. No fit.
+
+## Sched_2 (RT core returns; needs the checked TTU builds, so it runs only if the Sched_1 and prepare steps are clean)
+Design: the checked Unit_1 build (t1r_s0 with no TTU, t1r_s1 with the checked group; one TTU warp, scene par:1 or a small soup, per warp clock stamps) beside the existing ALU compute kernel of the harness (--compute alu:all, 2 blocks of 384 threads on every SM = 6 ready warps per scheduler, FMA chain). Quantity: the TTU warp's start to end latency L with and without compute, for stage 1 (TTU) and stage 0 (same instruction stream, no TTU instruction): extra delay of a returning warp = (L1_load - L1_alone) - (L0_load - L0_alone), 5 repetitions of 30 launches, medians.
+S2a: if returning warps got priority the extra delay would be 0 (within 10 cycles); if they queue like any ready warp it is up to about (ready warps per scheduler - 1) cycles per issued instruction after the wait, so 5 to 30 cycles. I predict the extra delay is between 0 and 40 cycles, i.e. under 5 percent of the 800 to 1,500 cycle query latency, so "no measurable priority and no measurable penalty at this resolution"; confidence 60 percent. A bigger result (above 100 cycles) would mean TTU instruction issue itself is slowed by the ready ALU warps and would be reported as such.
+Limits stated now: one warp only measures the TTU warp's own delay, not warp to warp ordering among several returning warps; 32 warps of TTU against compute is a second step only if time allows.
