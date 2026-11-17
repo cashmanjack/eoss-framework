@@ -35,3 +35,6 @@ Same as for the 4070 Ti (model/predictions_4070ti.md): everything inside one SM 
 
 ## How to run (when access exists)
 GPU: an idle, non display GPU (nvidia-smi shows no Xorg or gnome-shell on it); set TTU_GPU. Set up ttu/config/gpucfg.py detection first (it must print 128 SMs, 72 MB), run probe_placement.cu, validate the driver by memdump (byte identical GAS group), then ttu/bench/io_core/core_set.py WORK chase|latency|thr1|thr8|thr6|thr6par|mem5|mem2 as on the 4070 Ti, adding chase points 68, 70, 72, 74, 76 MB.
+
+## Erratum, 2026-11-16 (added after the run; the text above is unchanged)
+Item 7 gave about 0.10 rays per cycle per SM for the long query scene (par:64:s). That was the wrong scene's rate. Measured on tethys 0.0178, and triton measures the same 0.0178. The 63.6 and 66.2 times scaling in that item is a ratio and was right. This is a writing error in the prediction, not a model miss and not refitted. Item 1 (L2 ramp at 72, 74, 76 MB) was a real miss: see F176 and F177.

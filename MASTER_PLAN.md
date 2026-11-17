@@ -293,6 +293,124 @@ Each one is first run as an OptiX launch (reference: hit, primitive, t, and the 
 
 Open question for all seven: which of them change the traversal group itself (store words, node format) and which are SM side only (Feature_2 any hit, Feature_7), because only the first kind needs a new TTU sequence.
 
+### Phase 10: coverage matrix, ranking and harness gap (added 2026-11-16; planning only, no run)
+
+GPUs: T = RTX 6000 Ada (triton), I = RTX 4070 Ti (io), 4090 = tethys (core set only, F176). A cell with a Finding number means it was measured on that GPU. "Planned" means a test ID with no run yet. Every planned test follows the order in Phase 9: OptiX launch first, our own sequence only after its store words are read from live OptiX code and checked.
+
+**Coverage matrix (every RT core and OptiX feature axis)**
+
+|Axis|Measured (Finding, GPU)|Planned|Out of scope or note|
+|---|---|---|---|
+|Triangles, opaque|F9, F17 to F26, F67 (T); F103 to F105 (I); F176 (4090, core set)|none|Fully covered.|
+|Custom (AABB) primitives|F49 BVH_3 (T); F116, F125 to F135 RTNN, BarnesHut, kNN (I); F165 to F173 Mochi (T)|none|Cost is one SM round trip per candidate (about 850 to 900 cycles).|
+|Built in spheres|None. F173 only flipped the sphere flag in a replica.|Feature_8|Believed to run on the SM, not in the RT core, on Ada (hypothesis, to be read from the OptiX code first). Core of Paper 2.|
+|Built in curves|None|Feature_9|Same question as spheres. Low value for non graphics work.|
+|Ray flags (cull, terminate on first hit, disable any hit, opaque)|F56 (T): back face cull works through flag words, terminate on first hit changes nothing in the unit|Feature_2|Front face cull and the any hit flags not timed.|
+|Visibility masks|F111 format only (I): byte 6 of the IAS child|Feature_1|Whether a masked instance still costs a fetch is unknown.|
+|Instancing, one identity level|F5, F91 (T, code read); F114 (I); F139 (T, runs, same answers as OptiX)|none|Covered.|
+|Instance transforms, depth above 1|F85 (CPU reference only, no timing)|Feature_6|No timing of rotation or scale, no two level IAS.|
+|Motion blur|None|Feature_10|Ampere and Ada have hardware motion support; low value for non graphics work.|
+|Opacity micromaps|None|Feature_3|OptiX 8.1 SDK has them.|
+|Displaced micromeshes|None|none|Out of scope: graphics only, no use for neighbor search or collision work.|
+|tmin, tmax, ray length|F44 (empty interval, tmax 0 lanes), F47 (short rays start low), F70 (tmax cuts boxes) (T)|Feature_5|tmin not varied on its own; the radius benefit is not quantified.|
+|Build flags, compaction of the GAS|F170 (T): refit and update flag, tree quality matters; F172 flags ruled out for Mochi|Feature_12|Fast trace against fast build, compaction, size and trace time not measured. Lane compaction (F132, I) is a different thing: no gain.|
+|Tree depth|F22, F26 (T); F103 (I); F176 (4090)|none|Covered.|
+|Tree fanout, leaf size|F67 (T): 156 cycles per child in steps of three, node 343, leaf 113, triangle 52|Unit_1|Latency measured; the unit's rate at saturation is not.|
+|Restart cost|F35, F53, F56 (T): each return costs about one fixed query, 740 warm|Feature_4|Not split into SM instructions and unit restart.|
+|Size against caches|F29, F51, F68, F150, F175 (T); F110 (I); F176 (4090)|Cache_1, Cache_2|L2 ramp differs per chip (F176 miss). Line size, associativity, replacement not measured.|
+|Warps per SM|F23, F31, F90 (T); F176 (4090)|none|All 1,024 lanes accepted; about 160 lanes in service at saturation.|
+|TPC siblings|F27, F32, F50 (T); F105 (I); F176 (4090)|none|Covered on three GPUs.|
+|Concurrent kernels|F87, F92 to F95, F97, F99, F101, F155 to F162, F174 (T)|TPC_2|OptiX launch cannot start beside a running compute kernel (F87), so mixed runs use our own kernel.|
+|Co running bandwidth|F94, F101 (T): L2 or DRAM traffic on the sibling costs the full amount|none|Covered on triton only.|
+|Partial and divergent warps|F28, F43, F44, F90 (T)|Interface_4|Lane mask semantics only touched through Throughput_2.|
+|Warp scheduling, which ready warp issues|None|Sched_1|Only indirect: latency rises about 32 cycles per extra warp (F90).|
+|Priority of warps returning from the RT core|None|Sched_2|Candidate cause of the loaded latency gap (F133, F152, F168).|
+|Any hit against intersection program|F49, F131, F133, F134, F137, F138 (I, T)|none|Callback cost measured per program.|
+|Payload and registers|F112 (I): about one register per value, step at 128 registers|none|Triton and 4090 not repeated.|
+|SER|F79 (T): hint version slower on random rays, neutral when sorted|Feature_7|Break even against callback weight not found.|
+|Quantization, false positives|F116 (I): box test conservative, hardware 10 percent above exact box count; F166 residual 5 to 27 percent of queries above the replay|Feature_13|Box precision not decoded.|
+|Tree quality (refit)|F170 (T): refit tree up to 134 times a fresh one|Feature_12|Part of Feature_12.|
+|Clocks|F172 (T): 2,700 MHz during Mochi|Clock_1|Clock under saturated RT load against plain load not compared.|
+|Energy|F108, F109 (I): query energy below resolution; per ray energy follows time|Clock_1|Needs a persistent kernel and long windows.|
+
+**Cross check with the Volta, Turing and Ampere microbenchmark papers and Vulkan-Sim**
+
+I wrote this from memory of the papers (Jia et al. on Volta and Turing, Abdelkhalik et al. on Ampere) and from one web search on Vulkan-Sim (Saed et al., MICRO 2022). I did NOT check values against the papers or the simulator config files; every item marked "unverified" must be read there before it is cited. The search confirmed only that Vulkan-Sim treats ray box and ray triangle latency as fixed parameters, and one secondary note says up to 8 warps in its RT unit and an 8 entry short stack per thread (unverified). The Turing and Volta papers do not measure RT cores.
+
+|Item they cover|Ours|Added test|
+|---|---|---|
+|Cache line, sector size, associativity, replacement (fine grained pointer chase)|Latency and capacity only|Cache_1 (plain CUDA, no TTU)|
+|L2 partition (near and far) and replacement|L2 ramp differs per chip (F110, F176)|Cache_2|
+|TLB levels and reach|Only the instance node line against the TLB (F148)|TLB_1: BVH larger than the TLB reach|
+|Instruction cache and constant cache|None; OptiX traversal code is large|Not planned (SM side, low value)|
+|Register file bank conflicts|TTU operand pairs are even base registers (F54), conflicts not timed|Not planned|
+|Shared memory, tensor cores|Not used by the RT core|Out of scope|
+|Memory bandwidth against occupancy, instruction latency and throughput, atomics, power|F66, F94, F131, F146, F108|Covered|
+|Vulkan-Sim: warps resident in the RT unit (unverified, 4 to 8)|F90: 1,024 lanes accepted, about 160 in service|Covered, differs from their assumption|
+|Vulkan-Sim: traversal stack depth (short stack, unverified)|F35, F36: two returned entries, internal depth open|Unit_2|
+|Vulkan-Sim: fixed ray box and ray triangle latency, number of test units|F67 gives dependent step latency; unit rate and count not separated|Unit_1|
+|Vulkan-Sim: node cache size, line, misses in flight (MSHRs)|Capacity about 60 KB per SM, about 130 KB per TPC (F150, F175)|Unit_3: misses in flight|
+|Treelet prefetching (Chou et al., MICRO 2023): does the unit prefetch children|Children in steps of three (F67) suggests a fetch width|Unit_3 (same test)|
+|Ray scheduling and ray coalescing in the unit|Lane merging of equal node requests (F135)|Covered|
+|Purdue paper on RT simulation (Shen, ISPASS 2025, found by the search, not read)|Unknown|Read before the related work section|
+
+New test definitions (all planned, none run):
+- **Feature_8** Sphere to triangle. The same neighbor or hit query on spheres as (a) custom AABB with our intersection program, (b) built in sphere, (c) tessellated icosphere triangles at several subdivision levels. Time per query, candidates per query, accuracy loss of the tessellation. Prediction first from F49 (850 to 900 cycles per custom candidate) against about 45 to 52 cycles per extra triangle (F67). First step: read from the OptiX code whether the built in sphere test runs on the SM.
+- **Feature_9** Built in curves, same method as Feature_8 (b) against triangle strips.
+- **Feature_10** Motion: two keys, time varied per ray, cost of the interpolation and of the motion BVH.
+- **Feature_12** Build flags (fast trace, fast build, compaction, update) and refit: trace time, BVH size (read with memdump), queries per ray, against fresh builds.
+- **Feature_13** Box quantization: decode the box precision from our dumps, then count box false positives against exact boxes for thin and offset geometry.
+- **Sched_1** Two or more warps on one SM ready to issue at once, TTU free: record clock64 issue order to find which warp the scheduler picks.
+- **Sched_2** One warp returns from TTULD while others are ready: does the returning warp issue first, last, or by age. Checked sequences only, small launches.
+- **Unit_1** Latency against rate: many warps, many independent boxes or triangles per query; marginal cost per box and per triangle at saturation.
+- **Unit_2** Stack depth: scenes that leave 1 to 10 unfinished siblings; count returned entries and resumes.
+- **Unit_3** Misses in flight and fetch width: cold wide nodes against a chain, node fetch time against children.
+- **Cache_1**, **Cache_2** Plain CUDA pointer chase: line, sector, associativity, replacement and the L2 ramp near the L2 size on all three GPUs.
+- **TLB_1** Plain chase over strides to find TLB reach, then a BVH larger than that reach.
+- **Clock_1** SM clock and power with the RT unit saturated against a plain load, NVML, 10 second windows.
+- **TPC_2** End to end co scheduling: our persistent RT kernel and a compute kernel placed on the same TPC against different TPCs, short and long queries, throughput of both.
+
+**Ranking for Paper 1 (model inputs and the main argument first).** Time is working days including the prediction file committed first and the check_seq steps; a guess, not a measurement.
+
+|Rank|Test|Why|Days|
+|---|---|---|---|
+|1|HG_1 harness against OptiX, one warp (below)|Every harness derived constant is only as good as this comparison|2|
+|2|Sched_1, Sched_2|Loaded callback latency is 1.3 to 16 times the single warp value (F133) and the queueing models failed (F152, F168); scheduling is the untested piece|1.5|
+|3|Unit_1|Separates unit rate from step latency; the model has only latency|1|
+|4|Cache_1, Cache_2|The L2 ramp is the one recorded model limit (F176, F177)|1|
+|5|Feature_12|Tree quality is part of the answer (F170); build flags change the model's fixed part|1|
+|6|Feature_13|May explain the 5 to 27 percent hardware excess over the replay (F166)|1.5|
+|7|Feature_4|The restart term of the model|1|
+|8|Feature_5|The benefit of a radius, central to RTNN style mappings|1|
+|9|Feature_2|Shadow and any hit flags|1.5|
+|10|Feature_6|Cost per instance level|2|
+|11|Feature_1|Masks as free pruning|1|
+|12|Unit_2, Unit_3|Open interior of the unit|2|
+|13|Feature_7|SER break even|1|
+|14|Clock_1|Clock and energy axis|0.5|
+|15|Feature_3|Micromaps|3|
+|16|TLB_1, Feature_9, Feature_10|Completeness|4.5|
+
+**Ranking for Paper 2 (sphere to triangle, TPC co scheduling).**
+
+|Rank|Test|Days|
+|---|---|---|
+|1|Feature_8 sphere to triangle (prediction from F49 and F67 first, OptiX only first, then our sequence)|3|
+|2|TPC_2 co scheduling end to end (uses F105: short queries use both SMs, long ones one unit per TPC)|3|
+|3|Feature_5 tmax (radius)|1|
+|4|Feature_2 any hit and cull flags (sphere to triangle needs no any hit)|1.5|
+|5|Feature_7 SER|1|
+|6|Unit_1|1|
+|7|Feature_1 masks|1|
+|8|Feature_6 instancing for batching|2|
+
+**The remaining 1.6 times gap, harness against OptiX (from notes/ABLATION_2026-11-11.md and F52, F64, F73, F75, F77, F78).**
+Known. Random rays, 100,000 triangle soup, 142 blocks, about 12.7 million rays, every ray equals OptiX and the CPU. Our kernel went from 832 to 1,883 rays per microsecond (OptiX 2,838 to 3,019): loading the lane invariant words once gave 66 percent, one coalesced 16 byte result per ray 17 percent, 13 warps per SM none (it removed the memory queue stall, 14 warps to about 1). The remaining gap is 1.6 times. Instruction count is not the cause (OptiX executes 4.7 times more warp instructions per ray). L2 throughput is about 81 percent for both, and our L2 sector rate is 156 against 164 thousand per microsecond, so the gap matches our 1.44 times more L2 sectors per ray (83 against 58); our input and result traffic explains only part (LSU sectors 24 against 17). RT queries in flight stay at 9.3 to 9.9 warps in every configuration, OptiX included.
+Not known. (1) Why our node fetches make more L2 sectors (L1 misses of the unit, not tested). (2) Each configuration was measured once, baseline twice. (3) The ablation was done on random rays only; the 4 to 10 times gap on one triangle and coherent rays (F73, F75) was not redone after the ablation. (4) Nothing separates latency per query from concurrency: all numbers are whole GPU rates.
+**HG_1, the one warp comparison (proposed, not run).** One block of one warp, one SM, idle GPU, the same recorded ray pool for both (soup:100000 random rays, one triangle, the depth sweep scenes), the same in process OptiX GAS. Per launch time of the warp from clock64 probes inside OptiX's raygen (probe code of F133) and inside our kernel, 200 launches, a cold launch and a second pass over the same rays (L1 warm). Report cycles per ray, queries per ray (replay of F81, check against the recorder), cycles per query. Then the same at 4, 13 and 28 warps on the one SM, to see where the gap opens.
+Reading rule, written before the run: if the one warp gap is within 10 percent, the 1.6 times is concurrency (a shared per SM resource, L1 bandwidth or the load pipe), and the per query constants of the model apply to OptiX. If the one warp gap is over 20 percent, the difference is in the query path (issue overhead between queries, resume policy or node fetch behavior), and the BITTU probes go around each phase to split it.
+Model comparison to attribute it: feed both runs through the performance model (queries per ray from the replay, L1 requests and L2 sectors per ray from ncu on this GPU, the 740 cycle fixed cost, the F67 per level costs) and list the residual per term as in F124: fixed cost per query, node fetches, issue and instruction overhead, input and result memory instructions. The term that carries the one warp difference is the cause; at 13 and 28 warps the added gap is the shared resource term. Time about 2 days.
+
 # Binary instrumentation tool
 
 Working name: **BITTU**
@@ -572,3 +690,4 @@ Short dated list of what we have learned, in words only. Details and evidence ar
 174. **2026-11-16, triton GPU 1, 1 MB of ordinary loads through the TTU's own SM between the two sessions removes about half of the second session saving beyond what the same wait removes: the node state the traversal unit reuses is in the L1 of its own SM (own SM half of the question; the sibling SM is still open).** Predictions committed first (model/predictions_node_state.md). A plain role block on the same SM as the single working TTU block (grid of 142 blocks, placement checked with plain CUDA first; a single block does not land beside a plain block, a grid does) polls the flag set after the first session and then either streams 1 MB with ordinary cached loads (70 microseconds) or waits 70 microseconds with no loads. Saved fraction of the second session at 68 and 132 KB of BVH: nothing between 0.61 and 0.57; 1 MB stream 0.29 and 0.27; same wait without loads 0.53 and 0.42 (5 repetitions of 30 launches, medians, every run exit 0, one TTU block). The prediction for the hypothesis that the node lines are in L1 (about 0.26) held; the prediction for a separate structure (stream within 0.08 of the wait) missed (0.24 and 0.15 apart). The wait alone costs part of the saving at 132 KB, which is why the comparison is against the wait. Test (i) (TTUCCTL on one SM, reload on the other) was not run: its probe, a plain block reloading 32 KB after a possible invalidate, did not distinguish a fence from no fence in stage 0. Two earlier designs failed before this one (a TTU warp loop that faults in stage 0 for reasons not found, and a plain block launched after the TTU kernel that never landed on the SM and hung); no TTU fault in any run. Files ttu/harness/setup3 (setup3.cu sib_own, sib_l1, place_check.cu), model/results_node_state.md; raw private in notes/q32.
 175. **2026-11-16, node state summary (no new run): the traversal unit's node state is "node state in the TPC's L1s": node lines in the two L1s of the TPC, about half in each, ordinary loads cannot create them, a gpu scope fence or a stream of ordinary loads clears one SM's half, TTUCCTL from either SM clears both, capacity about 130 KB.** Put together from F147 (ordinary loads do not reach the second session cost), F150 (capacity), F159 and F174 (one SM's half cleared by a fence or by 1 MB of ordinary loads, about 0.26 to 0.29 of the saving left against 0.5 without loads), F161 and F162 (TTUCCTL from the sibling or the own SM removes everything). The sibling reload probe that F174 planned was not needed and is dropped: F161 with F174 already show TTUCCTL is TPC wide. Open: a 70 microsecond wait without loads removes part of the saving (0.53 and 0.42 saved against 0.61 and 0.57 with nothing between: losses of 0.08 at 68 KB and 0.15 at 132 KB), cause not found. The name is not "L0": nothing shows a separate cache level. Figure m4 now carries the F174 arms.
 176. **2026-11-16, tethys (RTX 4090) GPU 1, core set against the predictions committed before any run (model/predictions_4090.md, results in model/results_4090.md): per SM cycle costs carry over from triton almost unchanged, the TPC scaling holds, and the misses are the L2 capacity ramp (later and wider than modelled) and one written absolute throughput number.** Detected: 128 SMs, 64 TPCs, 72 MB L2, 384 bit memory, driver 580.178.04 (already validated on io); block placement rule held (0 mismatches); the OptiX traversal group read back from our own launch is byte identical to the earlier dump. Matched: L1 hit 41 cycles, L2 hit 285 to 295 cycles up to 70 MB, DRAM level 620 cycles (6 percent under the predicted 658, inside 10 percent); one triangle warm 1,630, cold 2,627, second session 782 cycles; depth sweep warm within 3.3 percent and cold within 4.3 percent at all seven sizes; one SM throughput at 1 to 20 warps within 1 percent of the prediction and a steady state of 0.143 to 0.148 rays per cycle; TPC siblings 1.02 to 1.05 times one SM and different TPCs 2.0 times on long queries; long query whole GPU scaling 63.5 times at one SM per TPC (99 percent) and 64.6 times with both SMs of every TPC; second session costs next to a working sibling 782 / 827 / 867 cycles and 1,676 to 2,335 on another TPC; L1 about 90 KB falling to about 20 KB with the shared memory reservation. Missed: the capacity ramp (at 72, 74 and 76 MB the latency is 354, 451 and 572 cycles against 425, 554 and 658 predicted: hits still occur at 76 MB, so the ramp starts later and is wider than the model, not refitted), and the absolute throughput of the long query scene (0.0178 rays per cycle per SM against 0.10 written: the prediction used the wrong scene's rate, triton measures the same 0.0178, so it is an error in the prediction and not a difference between boards). Not measured: the Memory_2 refetch fraction and the 50 percent split of node fetches between the TPC's two L1s (ncu cannot open /tmp/nsight-compute-lock, owned by another user, reported to the administrators), the short query sibling version, and the IAS group on this driver. The tri1 whole GPU numbers were not predicted. System libnvoptix is absent on tethys, so the extracted copy of the matching 580.178.04 library was used (as documented for this case).
+177. **2026-11-16, F176 bookkeeping (no new run): the L2 ramp miss is a model limitation, the Throughput_6 absolute rate was a prediction writing error, and ncu honors TMPDIR for its lock file.** (1) The L2 capacity term (hit 1 up to 0.97 times the L2 size, 0 from 1.05 times, F110) was fitted on one chip, the 4070 Ti. On the 4090 the latency at 72, 74 and 76 MB is 354, 451 and 572 cycles against 425, 554 and 658: the ramp starts later and is wider. It is recorded as a limit of the model, valid for the 4070 Ti only, not refitted; the triton ramp (88 to 104 MB) is still untested. A cause (replacement policy or L2 partitioning) is not known; Cache_2 is planned for it. (2) The long query rate of 0.10 rays per cycle per SM in the 4090 predictions was the wrong scene's number; triton and the 4090 both measure 0.0178. It is a writing error in the prediction, not a difference between boards and not a refit; the prediction file keeps its original text with a dated erratum below it. (3) From the Nsight Compute 2025.1.1 documentation (the copy under our CUDA 12.8): the lock file is TMPDIR/nsight-compute-lock, where the directory is the first of TMPDIR, TMP, TEMP, TEMPDIR that is set, else /tmp; the documented workaround for a lock file owned by another user is to set TMPDIR to a directory the current user can write, provided no other ncu instance is running on the machine. So the Memory_2 refetch fraction and the 50 percent L1 split can be tried on tethys with TMPDIR set to a directory we own (for example one under /dev/shm), after checking nvidia-smi for other profiling processes, because our own lock then no longer excludes theirs. Not tested (no GPU run this session). The administrators are only needed if that fails, for the admin only profiling setting on triton, and for the missing system OptiX library on tethys (optional, the extracted copy works). Coverage matrix, rankings and the harness gap test are in Phase 10 of this file.
