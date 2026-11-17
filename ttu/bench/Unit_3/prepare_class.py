@@ -4,9 +4,9 @@ Per size: among the rays that hit nothing, find the (nodes, slots, triangles) cl
 cls<g>_<N>.bin = 1,024 rays (the 32 ray pattern tiled 32 times: lane l = class ray l // g), cls<g>_32_<N>.bin = the 32 ray pattern; g = 1 2 4 8 16 32. Writes class_<N>.json."""
 import collections, json, os, subprocess, sys
 import numpy as np
-D = sys.argv[1]; F197 = {1000: (5.95, 2.69, 5.2), 10000: (9.3, 3.8, 7.7), 100000: (11.7, 4.4, 9.0), 1000000: (13.6, 4.7, 9.7)}
+D = sys.argv[1]; F197 = {1000: (5.95, 2.69, 5.2), 10000: (9.3, 3.8, 7.7), 30000: (10.4, 3.5, 7.95), 100000: (11.7, 4.4, 9.0), 300000: (13.4, 4.5, 9.5), 1000000: (13.6, 4.7, 9.7)}   # 30,000 and 300,000: counts interpolated in log size between the neighbouring classes (blind test sizes)
 for n, tgt in F197.items():
-    tab = '%s/table_%d.bin' % (D, n); NC = 400000 if n >= 100000 else 40000
+    tab = '%s/table_%d.bin' % (D, n); NC = 400000 if n >= 30000 else 40000
     g = np.random.default_rng(31337 + n); o = g.uniform(-1, 1, (NC, 3)); d = g.normal(size=(NC, 3)); d /= np.linalg.norm(d, axis=1, keepdims=True)
     R = np.zeros((NC, 8), np.float32); R[:, 0:3] = o; R[:, 4:7] = d; R[:, 7] = 1e16
     R.tofile('%s/cand2_%d.bin' % (D, n)); out = '%s/cand2_%d.out' % (D, n)

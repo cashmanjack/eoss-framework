@@ -6,7 +6,7 @@ and the 32 ray versions miss32_<N>.bin, coh32_<N>.bin, grp<g>_32_<N>.bin (the fi
 import json, os, subprocess, sys
 import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__)); RP = os.path.join(HERE, '..', '..', '..', 'model', 'replay')
-D = sys.argv[1]; SIZES = (1000, 10000, 100000, 1000000); GS = (2, 4, 8, 16, 32)
+D = sys.argv[1]; SIZES = (1000, 10000, 30000, 100000, 300000, 1000000); GS = (2, 4, 8, 16, 32)
 for exe in ('assign', 'replay'):
     if not os.path.exists('%s/%s' % (D, exe)): subprocess.run(['g++', '-O2', '-o', '%s/%s' % (D, exe), '%s/%s.cpp' % (RP, exe)], check=True)
 for n in SIZES:

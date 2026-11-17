@@ -38,6 +38,24 @@ if __name__ == '__main__':
         go(B0, '%s/g_stage0_%s.json' % (work, TS), 'soup:1000000', 'file:' + rayfile('grp16', 1000000, 32), ['--warps', '32', '--repeat', '1'])
     elif step == 'first':
         go(B1, '%s/g_first_%s.json' % (work, TS), 'soup:1000', 'file:' + rayfile('grp2', 1000, 1), ['--warps', '1', '--repeat', '1'])
+    elif step in ('stage0S', 'firstS'):   # shifted start files (predictions: model/predictions_knee2.md); the start file has 1,024 lines (lane pattern tiled)
+        n, w, bn = (1000000, 32, B0) if step == 'stage0S' else (1000, 1, B1)
+        go(bn, '%s/s_%s_%s.json' % (work, step, TS), 'soup:%d' % n, 'file:' + rayfile('cls4' if n == 1000000 else 'cls2', n, w), ['--warps', str(w), '--repeat', '1', '--start-file', '%s/sh%d_%d.txt' % (D, 4 if n == 1000000 else 2, n)])
+    elif step == 'runsK2':   # W = 12 on six sizes, new sizes at W = 16 and 32, shifted variant (120 runs)
+        res = []; S6 = (1000, 10000, 30000, 100000, 300000, 1000000)
+        def one(kind, n, W, nm, extra=()):
+            tag = '%s_%s_%d_w%d' % (kind, nm, n, W)
+            j = go(B1, '%s/k2_%s_%s.json' % (work, tag, TS), 'soup:%d' % n, 'file:' + rayfile(nm, n, W), ['--warps', str(W), '--repeat', '30'] + list(extra))
+            s = stats(j); s.update(size=n, rays=nm, kind=kind); res.append(s); print('   ', s, flush=True)
+        for n in S6:
+            for nm in SETS_B: one('plain', n, 12, nm)
+        for n in (30000, 300000):
+            for W in (16, 32):
+                for nm in SETS_B: one('plain', n, W, nm)
+        for n in S6:
+            for W in (16, 32):
+                for g in (2, 4, 8, 16, 32): one('shift', n, W, 'cls%d' % g, ['--start-file', '%s/sh%d_%d.txt' % (D, g, n)])
+        json.dump(res, open('%s/k2_summary_%s.json' % (work, TS), 'x'))
     elif step == 'runsK':   # knee map: design B rays, W = 4 8 16 32 warps, 4 sizes x 6 g x 4 W = 96 runs (predictions: model/predictions_knee.md)
         res = []
         for n in SIZES:

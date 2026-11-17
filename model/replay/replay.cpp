@@ -35,6 +35,7 @@ int main(int argc, char **argv)
     std::vector<int32_t> lt(ls[NL]); fread(lt.data(), 4, lt.size(), f);
     std::vector<float> tr((size_t)NT * 9); fread(tr.data(), 4, tr.size(), f); fclose(f);
     const bool firsthit = getenv("FIRSTHIT") != nullptr;
+    const bool startchild = getenv("STARTCHILD") != nullptr;
     const long nr = atol(argv[3]); const int order = atoi(argv[4]);
     std::vector<Ray8> rays(nr); f = fopen(argv[2], "rb"); fread(rays.data(), sizeof(Ray8), nr, f); fclose(f);
     // NODESEQ=FILE: per ray int32 count, then the fetch events in order: node id (>= 0) or -(leaf slot + 1) (knee map, 2026-11-17)
@@ -49,7 +50,12 @@ int main(int argc, char **argv)
         auto empty = [&]() { return order ? pq.empty() : st.empty(); };
         auto pop = [&]() { E e; if (order) { e = pq.top(); pq.pop(); } else { e = st.back(); st.pop_back(); } return e; };
         std::vector<int32_t> seq;
-        double t0; push({0.f, 0, -1});   // the root is always fetched
+        double t0;
+        if (startchild) {   // STARTCHILD=1: the traversal starts at the nearest internal child of the root (the root is not fetched): the shifted lane of the knee runs
+            int bc = -1; double bt = 1e300;
+            for (int k = 0; k < 12; ++k) { const Slot &S = sl[k]; if (S.type != 1 || !slab(S.b, o, id, r.tmin, best, t0)) continue; if (t0 < bt) { bt = t0; bc = S.child; } }
+            if (bc >= 0) push({(float)bt, bc, -1}); else push({0.f, 0, -1});
+        } else push({0.f, 0, -1});   // the root is always fetched
         while (!empty()) {
             E e = pop();
             if (e.t > best) continue;
