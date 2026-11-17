@@ -3,7 +3,7 @@
 //   scene=soup:N | cust:K:N:R   (K u uniform cube, c 200 clusters sigma 0.03, t thin rods half widths (30R,R,R) clipped, o uniform shifted +1000; R half width)
 //   bf=none|trace|build upd=0|1 comp=0|1      build flags of the GAS (compaction = ALLOW_COMPACTION then optixAccelCompact)
 //   inst=none|id1|r90_1|r37_1|id2|r90_2  any=1 (pipeline graph flag ALLOW_ANY with the one level instance)
-//   rays=rand|pts tmax=R big=NB nbig=N probe=N bigonly=1 dump=PREFIX nolaunch=1 dumpres=FILE
+//   rays=rand|pts|ctr (ctr: origin at the centre of a random primitive, point query) tmax=R big=NB nbig=N probe=N bigonly=1 dump=PREFIX nolaunch=1 dumpres=FILE
 #include <cuda_runtime.h>
 #include <optix.h>
 #include <optix_function_table_definition.h>
@@ -43,7 +43,7 @@ int main(int argc, char **argv)
     auto gets = [&](const char *k, const char *d) { return kv.count(k) ? kv[k] : std::string(d); };
     const std::string scene = gets("scene", "soup:100000"), bf = gets("bf", "none"), inst = gets("inst", "none"), rk = gets("rays", "rand");
     const int upd = (int)geti("upd", 0), comp = (int)geti("comp", 0), any = (int)geti("any", 0), nbigl = (int)geti("nbig", 20), nprobe = (int)geti("probe", 0), bigonly = (int)geti("bigonly", 0);
-    const unsigned NB = (unsigned)geti("big", 262144); const float tmaxv = kv.count("tmax") ? (float)atof(kv["tmax"].c_str()) : (rk == "pts" ? 1e-16f : 1e16f);
+    const unsigned NB = (unsigned)geti("big", 262144); const float tmaxv = kv.count("tmax") ? (float)atof(kv["tmax"].c_str()) : ((rk == "pts" || rk == "ctr") ? 1e-16f : 1e16f);
     CK(cudaFree(0)); OX(optixInit()); OptixDeviceContextOptions co{}; OX(optixDeviceContextCreate(0, &co, &ctx));
     std::mt19937 g(1234); std::uniform_real_distribution<float> U(-1.f, 1.f); std::normal_distribution<float> Nn(0.f, 1.f);
     std::vector<Tri> v; std::vector<float> bx; bool cust = false; long N = 0; char kc = 'u'; float R = 0;
@@ -96,8 +96,8 @@ int main(int argc, char **argv)
     const int levels = inst == "none" ? 0 : (inst.back() == '2' ? 2 : 1);
     // rays (host generated, fixed seed)
     std::vector<Ray8> big; { std::mt19937 gr(2026); const float off = (cust && kc == 'o') ? 1000.f : 0.f;
-        for (unsigned i = 0; i < NB; ++i) { float3 d{Nn(gr), Nn(gr), Nn(gr)}; const float l = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z); const float3 o{U(gr) + off, U(gr) + off, U(gr) + off};
-            if (rk == "pts") d = {0.f, 0.f, 1.f}; else d = {d.x / l, d.y / l, d.z / l}; big.push_back(Ray8{{o.x, o.y, o.z}, 0.f, {d.x, d.y, d.z}, tmaxv}); } }
+        for (unsigned i = 0; i < NB; ++i) { float3 d{Nn(gr), Nn(gr), Nn(gr)}; const float l = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z); float3 o{U(gr) + off, U(gr) + off, U(gr) + off};
+            if (rk == "ctr") { if (!cust) { fprintf(stderr, "ctr needs cust\n"); exit(2); } const size_t q = (size_t)(gr() % (unsigned)N) * 6; o = float3{0.5f * (bx[q] + bx[q + 3]), 0.5f * (bx[q + 1] + bx[q + 4]), 0.5f * (bx[q + 2] + bx[q + 5])}; d = {0.f, 0.f, 1.f}; } else if (rk == "pts") d = {0.f, 0.f, 1.f}; else d = {d.x / l, d.y / l, d.z / l}; big.push_back(Ray8{{o.x, o.y, o.z}, 0.f, {d.x, d.y, d.z}, tmaxv}); } }
     std::vector<char> hb(std::min<size_t>(gas_final, 0x100)); CK(cudaMemcpy(hb.data(), (void *)gas, hb.size(), cudaMemcpyDeviceToHost));
     FILE *jf = fopen(argv[2], "wx"); if (!jf) { fprintf(stderr, "refuse to overwrite or cannot write %s\n", argv[2]); return 2; }
     fprintf(jf, "{\"scene\": \"%s\", \"bf\": \"%s\", \"upd\": %d, \"comp\": %d, \"inst\": \"%s\", \"any\": %d, \"rays\": \"%s\", \"tmax\": %g, \"levels\": %d, \"buffer_bytes\": %zu, \"temp_bytes\": %zu, \"final_bytes\": %zu, \"compacted_bytes\": %llu, \"hdr\": [", scene.c_str(), bf.c_str(), upd, comp, inst.c_str(), any, rk.c_str(), tmaxv, levels, (size_t)bs.outputSizeInBytes, (size_t)bs.tempSizeInBytes, gas_final, compsz);
