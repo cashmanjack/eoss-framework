@@ -43,3 +43,19 @@ The predictions file was committed before any run and is not edited. No refittin
 - Item 7 absolute: the prediction took the tri1 rate (about 0.10 per SM) for the par64 scene. Triton measured par64 at 0.0178 per SM and tethys gives the same, so this is an error in the written prediction, not a difference between the boards. The scaling part (the ratios) is right.
 - Items 1 ramp points: the measured ramp starts later and is wider than the model. Hit fraction from the latencies (between 295 L2 and 621 DRAM): about 0.82 at 72 MB, 0.52 at 74 MB, 0.15 at 76 MB, against 0.63, 0.28, 0 predicted. Still partly hitting at 76 MB, 1.05 C. Not refitted.
 - Item 7, tri1 (not predicted, as the prediction said): 0.100 rays per cycle per SM from 1 to 65 SMs (aggregate 64.0 times at G = 64), 0.0877 at G = 128 (112 times); the script marks G >= 63 as not overlapping (0 of 5 launches), so the aggregate is not valid there.
+
+## Addendum 2026-11-16 late night: item 9, Memory_2 (refetch fraction) now measured on tethys
+The ncu lock file problem is solved without ECN: `/tmp/nsight-compute-lock` is owned by another user, so ncu was started with `TMPDIR` set to a directory we own (`/dev/shm/ncu_tmp_$USER`). No other ncu was running (checked with ps first). A plain CUDA kernel under ncu worked, then core_set mem2n (Memory_2, soup 100,000, R distinct random rays on one SM, 16 warps, 2 ray pools) ran to the end in 6.5 minutes, exit 0, no fault. Data notes/tethys/mem2n_20261116T212343 (private).
+| R | footprint KB | refetch, L1 about 90 KB | refetch, L1 about 20 KB |
+|---|---|---|---|
+| 1 | 2.1 | 0.00 | 0.46 |
+| 8 | 14.9 | 0.00 | 1.65 |
+| 16 | 28.2 | 0.03 | 1.47 |
+| 24 | 42.3 | 0.01 | 1.17 |
+| 32 | 60.2 | 0.03 | 3.66 |
+| 48 | 94.3 | 0.50 | 5.07 |
+| 64 | 115.5 | 0.55 | 4.76 |
+| 128 | 234.1 | 0.67 | 4.47 |
+| 256 | 539.1 | 0.73 | 2.30 |
+| 512 | 719.1 | 1.01 | 1.59 |
+Item 9 predicted: every node found again below about 60 KB, half lost at about 100 KB. Measured: at most 3 percent refetched up to a 60 KB footprint, 50 percent at 94 KB: match. With the reserved shared memory (L1 about 20 KB) every point refetches 1.2 to 5.5 times its footprint (more fills than distinct sectors: the second session thrashes), also as expected from the small L1. Item 10's 50 percent in own L1 split still needs the F175 style arms and was not run here.
