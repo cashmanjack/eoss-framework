@@ -1,5 +1,5 @@
 """Sched_2 redone (predictions: model/predictions_sched2.md, committed before any run). ALU warps INSIDE the TTU block (build_patch --aluwarps), one block of W warps: one TTU warp (warp T) and W-1 ALU warps
-(each: delay loop, clock, 600 iterations of 12 independent FFMA + 3 loop instructions, clock). Scene par:16:s, ray hit, 1 block, 30 launches (first dropped) per run, 5 repetitions, arm order rotated.
+(each: delay loop, clock, 47 iterations of 192 independent FFMA + 3 loop instructions, clock). Scene par:16:s, ray hit, 1 block, 30 launches (first dropped) per run, 5 repetitions, arm order rotated.
     run2.py WORK build               build the checked binaries in /dev/shm/s2 (stage 0 and 1 of every shape), needs /dev/shm/s2/setup3, setup3_dev.ptx, words.txt
     run2.py WORK stage0              every arm's stage 0 build once (no TTU instruction), 1 launch each, prints the ALU windows
     run2.py WORK first               the smallest stage 1 launch: W = 4, T = 0, 1 launch
@@ -15,7 +15,7 @@ BF = ['--clock', '--sync', '--remap', '--compact-out', '--regs', '64', '--max-ou
 
 
 def binp(T, st_):
-    return '%s/a_t%d_s%d' % (D, T, st_)
+    return '%s/b_t%d_s%d' % (D, T, st_)
 
 
 def build():
@@ -25,7 +25,7 @@ def build():
         for stg in (0, 1):
             out = binp(T, stg)
             if os.path.exists(out): print('exists', out); continue
-            subprocess.run([py, os.path.join(S3, 'build_patch.py'), '--stage', str(stg), '--bin', D + '/setup3', '--out', out] + BF + ['--aluwarps', '--aluiters', '600', '--aludelay', '16', '--ttuwarp', str(T)], check=True, env=env, capture_output=True)
+            subprocess.run([py, os.path.join(S3, 'build_patch.py'), '--stage', str(stg), '--bin', D + '/setup3', '--out', out] + BF + ['--aluwarps', '--aluiters', '47', '--aluunroll', '192', '--aludelay', '16', '--ttuwarp', str(T)], check=True, env=env, capture_output=True)
             r = subprocess.run([py, os.path.join(S3, 'check_seq.py'), out], env=env, capture_output=True, text=True)
             print(out, r.stdout.strip().splitlines()[-1][:40]); assert 'ALL PASS' in r.stdout, r.stdout[-1500:]
 
