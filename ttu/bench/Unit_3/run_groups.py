@@ -27,6 +27,7 @@ def stats(j):
 
 def rayfile(name, n, w):
     if name == 'miss': return '%s/miss%s%d.bin' % (D, '32_' if w == 1 else '', n)
+    if name.startswith('cls') and w == 12: return '%s/%s_w12_%d.bin' % (D, name, n)   # 384 rays: the harness needs a multiple of 32 W
     if name.startswith('cls'): return '%s/%s%s_%d.bin' % (D, name, '_32' if w == 1 else '', n)
     if name == 'coh': return '%s/coh%s%d.bin' % (D, '32_' if w == 1 else '', n)
     return '%s/%s%s_%d.bin' % (D, name, '_32' if w == 1 else '', n)
