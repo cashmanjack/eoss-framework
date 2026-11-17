@@ -1,0 +1,16 @@
+# Flags_2 (our own TTU sequence with the F183 flag and mask words): predictions (2026-11-16 night, tethys GPU 1, written BEFORE any run; stage 1 NOT approved, not run)
+
+What it is: the Setup_3 sequence (the verbatim OptiX traversal group, P0 true path, TTUOPEN.DUAL, TTUMACROFUSE 0x11, 10 TTUST, TTUGO, 6 TTULD, close on the last) is byte identical for every variant (stage 1 sha256 ce9ab4447fa22d89 for all twelve builds; stage 0 b9133fd24fd8fad0); only the 8 hex words of TTUST 0 and 0x80 differ (host input, words.txt). The words are the computed ones of F183 (store_words.py, hand transcription, never checked on the GPU). One triangle scene, one warp, one launch, rays hit and back (the OptiX reference launch of the same process runs first with flags NONE and is not the check for a flag variant: expected outcomes below come from the documented flag semantics).
+Variants (P0 true only): none (control, words as Setup_3), TERMINATE, CULL_BACK, CULL_FRONT, CULL_OPAQUE, CULL_NON_OPAQUE, DISABLE_ANYHIT, ENFORCE_ANYHIT, mask15, mask1, mask128, mask0. Excluded: TERM + DISABLE_CLOSESTHIT (the P0 false path, other predicated stores) and cull both (invalid configuration).
+Geometry: one triangle, build flag NONE (non opaque); GAS only (the identity instance node OptiX makes, visibility 255 expected). Ray "hit" = the +z ray that reports front = 0 (back face of the triangle by OptiX's rule), ray "back" = the ray from +z (front face hit).
+
+Stage 0 (done before stage 1, no TTU instruction): every build passes check_seq ALL PASS; stage 0 runs exit 0 with the registers stored equal to the loaded words (the 8 store words appear in the stored registers R68, R69, R62, R63, R60..R59, R58, R59: not checked beyond exit 0 and the unchanged stored image).
+
+Predictions for stage 1 (outcome on the hit / back rays):
+1. none, TERMINATE, DISABLE_ANYHIT, ENFORCE_ANYHIT, mask128, mask15, mask1: both rays hit with the same primitive, t and u, v as the control, bit for bit (p = 0.80 for all seven; the any hit flags are the least certain: p = 0.70).
+2. CULL_BACK: the hit ray (back face) misses, the back ray (front face) hits. CULL_FRONT: the reverse. p = 0.75 each (the cull bits are in word 0 low byte, the same field as terminate; the face to bit assignment may be the other way: p = 0.2).
+3. CULL_NON_OPAQUE: both rays miss (the geometry is non opaque); CULL_OPAQUE: both rays hit. p = 0.55 (word 1 low byte, the least understood field: the two cull bits may be swapped or not enforced without an any hit program).
+4. mask0: both rays miss (p = 0.8). mask1, mask15, mask128: hit (the identity instance has mask 255).
+5. No variant changes the resume state or the pending words (no pending entries in a one triangle scene).
+6. Safety: no hang, no fault, exit 0 in every run (N and the sequence are unchanged: p = 0.97). A miss that is not the expected outcome is not an error of the run.
+Reading rule: a variant counts as confirmed if both rays give the predicted hit or miss, and a hit is bit identical to the control (t, u, v, primitive). If any variant is unexpected (hit when culled or the reverse) the computed word for that flag is wrong (hand transcription) and the flag is documented as such, not repaired by guessing: the variant pair culled / not culled is then compared to the other words at the same bits.
