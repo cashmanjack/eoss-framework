@@ -361,7 +361,7 @@ int main(int argc, char **argv)
     const bool random_fill = !strcmp(argv[4], "random");
     double energy_s = 0;
     int sib_sm = -1, sib_kb = 4096, sib_passes = 4; unsigned sib_poll = 0, sib_mode = 0;
-    bool ias = false; bool decoy = false, thrash_near = false, thrash_node = false; size_t tlbpages = 0; bool run_ttu = true, thrash = false, thrash_gas = false; unsigned thrash_lane = 128; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool ias = false; bool decoy = false, thrash_near = false, thrash_node = false; size_t tlbpages = 0; bool run_ttu = true, thrash = false, thrash_gas = false; unsigned thrash_lane = 128; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int oclk = 0, lclock = 0, onrep = 1, orot = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--ias")) ias = true;
@@ -378,6 +378,10 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--passes") && a + 1 < argc) passes = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--smem") && a + 1 < argc) smem = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--optix-repeat") && a + 1 < argc) optix_repeat = atoi(argv[++a]);
+        else if (!strcmp(argv[a], "--optix-clk")) oclk = 1;   // HG_1 (hg1_dev.cu PTX): the timed OptiX launches (--optix-repeat) run with params.oclk = 1 (no instance node read) and the raygen probes ta, tb, tc, td of every launch index go to the JSON ("optix_clk"); --flush MB flushes L2 before each
+        else if (!strcmp(argv[a], "--optix-nrep") && a + 1 < argc) onrep = atoi(argv[++a]);   // HG_1b (hg1b_dev.cu PTX): traces per raygen (1..3)
+        else if (!strcmp(argv[a], "--optix-rot")) orot = 1;   // HG_1b: trace k uses the ray of launch index (i + k) mod n
+        else if (!strcmp(argv[a], "--lclock")) lclock = 1;   // HG_1: build_patch --lclock --slim --remap --loop binary: per lane clock start and end (words 88, 89 and 92, 93 of the record); the JSON warp_clk is [min start, max end] over the 32 lanes
         else if (!strcmp(argv[a], "--blockrays")) blockrays = 1;
         else if (!strcmp(argv[a], "--outer") && a + 1 < argc) outer = atoi(argv[++a]);   // build_patch --outer R binary: R records per lane (ray k G W 32 + lane of round k); needs --blockrays
         else if (!strcmp(argv[a], "--quick")) quick = 1;
@@ -572,6 +576,7 @@ int main(int argc, char **argv)
         rays[i] = {{o.x, o.y, o.z}, 0.f, {d.x / l, d.y / l, d.z / l}, 1e16f};
     }
     Params prm{}; prm.handle = ias ? ih : h; prm.n = NR; prm.ias = ias ? 1u : 0u;
+    if (oclk) CK(cudaMalloc((void **)&prm.clk, (size_t)NR * 8 * 8)); prm.nrep = (unsigned)onrep; prm.rot = (unsigned)orot;
     CK(cudaMalloc((void **)&prm.rays, NR * sizeof(Ray8)));
     CK(cudaMemcpy((void *)prm.rays, rays.data(), NR * sizeof(Ray8), cudaMemcpyHostToDevice));
     CK(cudaMalloc((void **)&prm.out, NR * sizeof(RefOut))); CK(cudaMalloc((void **)&prm.inst, 18 * 8));
@@ -590,13 +595,21 @@ int main(int argc, char **argv)
     }
     OX(optixLaunch(pipe, 0, dprm, sizeof prm, &sbt, NR, 1, 1));
     CK(cudaDeviceSynchronize());
-    std::vector<float> optix_ms;
+    std::vector<float> optix_ms; std::vector<std::vector<unsigned long long>> oclk_runs;
     if (optix_repeat > 0) {   // Throughput_7: the same launch again, timed (the first launch above warms caches and JIT)
         cudaEvent_t a0, a1; CK(cudaEventCreate(&a0)); CK(cudaEventCreate(&a1));
+        uint4 *ofb = nullptr; unsigned *osink = nullptr; const size_t ofn = (size_t)(flush_mb * 1048576.0) / sizeof(uint4);
+        if (oclk) {   // timed launches in probe mode (see hg1_dev.cu); the reference launch above ran with oclk 0 and found the instance node
+            prm.oclk = 1; CK(cudaMemcpy((void *)dprm, &prm, sizeof prm, cudaMemcpyHostToDevice));
+            if (ofn) { CK(cudaMalloc((void **)&ofb, ofn * sizeof(uint4))); CK(cudaMemset(ofb, 1, ofn * sizeof(uint4))); CK(cudaMalloc((void **)&osink, 4)); }
+        }
         for (int k = 0; k < optix_repeat; ++k) {
+            if (ofn && ofb) { flush_read<<<NSM * 8, 256>>>(ofb, ofn, osink); CK(cudaGetLastError()); CK(cudaDeviceSynchronize()); }
             CK(cudaEventRecord(a0)); OX(optixLaunch(pipe, 0, dprm, sizeof prm, &sbt, NR, 1, 1)); CK(cudaEventRecord(a1));
             CK(cudaEventSynchronize(a1)); float ms; CK(cudaEventElapsedTime(&ms, a0, a1)); optix_ms.push_back(ms);
+            if (oclk) { std::vector<unsigned long long> c(8 * (size_t)NR); CK(cudaMemcpy(c.data(), prm.clk, c.size() * 8, cudaMemcpyDeviceToHost)); oclk_runs.push_back(c); }
         }
+        if (oclk) { prm.oclk = 0; CK(cudaMemcpy((void *)dprm, &prm, sizeof prm, cudaMemcpyHostToDevice)); }
     }
     std::vector<RefOut> ref(NR); unsigned long long inst[18];
     CK(cudaMemcpy(ref.data(), prm.out, NR * sizeof(RefOut), cudaMemcpyDeviceToHost));
@@ -676,6 +689,11 @@ int main(int argc, char **argv)
     fprintf(jf, " \"optix_ms\": [");
     for (size_t k = 0; k < optix_ms.size(); ++k) fprintf(jf, "%s%.6f", k ? "," : "", optix_ms[k]);
     fprintf(jf, "],\n");
+    if (oclk) {   // per timed launch: 4 values (ta, tb, tc, td) per launch index
+        fprintf(jf, " \"optix_clk_stride\": 8, \"optix_nrep\": %d, \"optix_rot\": %d, \"optix_clk\": [", onrep, orot);
+        for (size_t r = 0; r < oclk_runs.size(); ++r) { fprintf(jf, "%s[", r ? ",\n  " : ""); for (size_t k = 0; k < oclk_runs[r].size(); ++k) fprintf(jf, "%s%llu", k ? "," : "", oclk_runs[r][k]); fprintf(jf, "]"); }
+        fprintf(jf, "],\n");
+    }
     fprintf(jf, " \"start_file\": \"%s\", \"rays_not_from_root\": %zu,", start_file ? start_file : "", n_nonroot);
     fprintf(jf, " \"start_path\": \"%s\",", use_path ? (start_path.empty() ? "root" : start_path.c_str()) : "");
     fprintf(jf, " \"start_off\": \"0x%llx\", \"start\": \"0x%llx\", \"start_flags\": \"0x%x\", \"start_ok\": %s,\n",
@@ -976,7 +994,9 @@ int main(int argc, char **argv)
             const int nso = loopk ? 14 : 13;
             for (size_t i = 0; i < TOTAL; ++i) {
                 unsigned *Q = &o[i * N]; unsigned w[14]; memcpy(w, Q, nso * 4);
+                unsigned wc[4] = {Q[16], Q[17], Q[18], Q[19]};
                 for (int k = 0; k < 14; ++k) Q[k] = 0x77777777u;   // slots 14.. were never stored: still the fill
+                if (lclock) { Q[88] = wc[0]; Q[89] = wc[1]; Q[92] = wc[2]; Q[93] = wc[3]; Q[16] = Q[17] = Q[18] = Q[19] = 0x77777777u; }
                 if (lean) { Q[3] = w[0]; Q[44] = w[1]; Q[45] = w[2]; Q[84] = w[13]; }
                 else for (int k = 0; k < nso; ++k) Q[SO[k]] = w[k];
             }
@@ -1005,7 +1025,12 @@ int main(int argc, char **argv)
                     const unsigned *Ll = &B0[(32 * w + l) * N];
                     lanes_eq &= Ll[84] == L0[84] && Ll[85] == L0[85] && Ll[86] == L0[86] && Ll[87] == L0[87];
                 }
-                char buf[64]; snprintf(buf, sizeof buf, "%s[%llu,%llu]", w ? "," : "", u64(L0, 84), u64(L0, 86)); wc += buf;
+                unsigned long long cs = u64(L0, 84), ce = u64(L0, 86);
+                if (lclock) {   // lanes of a warp leave the resume loop at different rounds: the warp's span is the earliest start to the latest end (64 bit)
+                    cs = ~0ull; ce = 0;
+                    for (int l = 0; l < 32; ++l) { const unsigned *Ll = &B0[(32 * w + l) * N]; const unsigned long long s0 = u64(Ll, 88), e0 = u64(Ll, 92); if (s0 < cs) cs = s0; if (e0 > ce) ce = e0; }
+                }
+                char buf[64]; snprintf(buf, sizeof buf, "%s[%llu,%llu]", w ? "," : "", cs, ce); wc += buf;
             }
             fprintf(jf, "%s], \"gt\": [", wc.c_str());
             for (int w = 0; w < warps; ++w) {

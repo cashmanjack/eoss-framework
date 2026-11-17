@@ -266,7 +266,7 @@ def ttuccttl_bytes():
 
 
 def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out=95, preclk=False, barnops=1,
-          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False, lean_ld=False, lean_st=False, cctl=False, ias=False, prewarm=0, l1t=0, l1t_nofirst=False, sectors=1, bypass=False, decoy=False, bypass_first=False, sibling=False, ownfence=False, sibccctl=False, ownccctl=False, delay=0, stream=0):
+          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False, lean_ld=False, lean_st=False, cctl=False, ias=False, prewarm=0, l1t=0, l1t_nofirst=False, sectors=1, bypass=False, decoy=False, bypass_first=False, sibling=False, ownfence=False, sibccctl=False, ownccctl=False, delay=0, stream=0, lclock=False):
     global INPUTS, GROUP_LEN
     d = open(dump, 'rb').read()
     if ias:
@@ -556,6 +556,9 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         body.append(cs2r_globaltimer(phys(GT_START)))
     if clock and not l1t:
         body.append(cs2r_clock(phys(CLK_START)))
+    if lclock:
+        assert slim and loop and remap and not (outer or clock or gtime or coal or lean or hoist or twice), '--lclock: --slim --remap --loop, no --outer, --clock, --gtime, --coal, --lean, --hoist'
+        body.append(cs2r_clock(phys(CLK_START)))
     if dualgo:   # Interface_5: OPEN, FUSE 28, 10 ST, GO, the same 10 ST, GO, 6 LD (CLOSE last): one ray submitted twice
         assert stage != 1 or (low12(group[12]) == 0x3d3 and all(low12(b) == 0x3d1 for b in group[2:12])), 'group shape'
         fuse = W(group[1]) & ~(0x1f << 40) | (28 << 40)
@@ -596,6 +599,8 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=6))
     if clock and not l1t:
         body.append(cs2r_clock(phys(CLK_END)))
+    if lclock:
+        body.append(cs2r_clock(phys(CLK_END)))
     if gtime:
         body.append(cs2r_globaltimer(phys(GT_END)))
     if sr133:
@@ -627,6 +632,9 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
             body.append(field(stg[r], 32, phys(r)))
     if loop and not coal:   # rounds left (K - rounds run) to slot 13
         body.append(field(field(stg[3], 32, LCNT), 40, 4 * 13, 24))
+    if lclock:   # clock start (R46:R47) and end (R48:R49) to slots 16..19
+        for k, r in enumerate((CLK_START, CLK_START + 1, CLK_END, CLK_END + 1)):
+            body.append(field(field(stg[3], 32, phys(r)), 40, 4 * (16 + k), 24))
     if outer and os.environ.get('OUTER_DBG'):   # diagnostic: slot 13 = R1 (record word index), slot 12 = R0
         body.append(field(field(stg[3], 32, 1), 40, 4 * 13, 24)); body.append(field(field(stg[3], 32, 0), 40, 4 * 12, 24))
     if outer:  # next record of this lane: wait until every store has read its registers (read barrier 5), then loop
@@ -674,7 +682,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     p.save(out)
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
     top_reg = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5] + ([LCNT + 1] if loop else []))
-    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'sibling': sibling, 'ownfence': ownfence, 'ownccctl': ownccctl, 'delay': delay, 'stream': stream, 'sibccctl': sibccctl, 'sibccctl_bra': sibccctl_bra if sibccctl else None, 'bpath': bpath, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'loop': loop, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0, 'lean': lean, 'hoist': hoist, 'coal': coal, 'outer': outer, 'outer_at': outer_at, 'stride': stride, 'cctl': cctl, 'ias': ias, 'l1t': l1t, 'prewarm': prewarm, 'sectors': sectors, 'bypass': bypass, 'decoy': decoy, 'bypass_first': bypass_first,
+    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'sibling': sibling, 'ownfence': ownfence, 'ownccctl': ownccctl, 'delay': delay, 'stream': stream, 'sibccctl': sibccctl, 'sibccctl_bra': sibccctl_bra if sibccctl else None, 'bpath': bpath, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'loop': loop, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0, 'lean': lean, 'hoist': hoist, 'coal': coal, 'outer': outer, 'outer_at': outer_at, 'stride': stride, 'cctl': cctl, 'ias': ias, 'lclock': lclock, 'l1t': l1t, 'prewarm': prewarm, 'sectors': sectors, 'bypass': bypass, 'decoy': decoy, 'bypass_first': bypass_first,
             'inputs': INPUTS, 'outputs': outputs, 'in_ptr': in_ptr}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
     used = g0 + GROUP_LEN + 1 + int(clock) + len(outputs) + 2
@@ -720,6 +728,7 @@ if __name__ == '__main__':
     a.add_argument('--lean-st', action='store_true', help='only the 3 result words + rounds left of --lean (loads as the default build; host needs --lean)')
     a.add_argument('--hoist', action='store_true', help='ablation: constant input words loaded once before the outer loop (needs --loop --outer)')
     a.add_argument('--coal', action='store_true', help='ablation: one coalesced 16 byte STG.128 record per ray (host --coal)')
+    a.add_argument('--lclock', action='store_true', help='HG_1 (with --slim --remap --loop, no --outer): clock64 before the first group and after the resume loop ended, stored to slots 16, 17 (start) and 18, 19 (end) of the lane record (host --lclock)')
     a.add_argument('--alu', type=int, default=0, help='Throughput_4: N dependent IADD3 (stall 15) after the group, before the wait')
     a.add_argument('--sleepb', type=int, default=0, help='with --smfilter: @P1 NANOSLEEP NS before the start clock (the block on SM B waits)')
     a.add_argument('--sr133', action='store_true', help='Interface_5: S2R SR_TTU_TICKET_INFO into R88 before TTUOPEN and R89 after the group')
@@ -730,4 +739,4 @@ if __name__ == '__main__':
     a.add_argument('--barnops', type=int, default=8, help='NOPs after the barrier: a warp issues a few instructions past BAR.SYNC before it stalls (8 measured enough at 20 warps)')
     x = a.parse_args()
     build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else '') + ('a%d' % x.alu if x.alu else '') + ('l' if x.slim else '') + ('L%d' % x.loop if x.loop else '') + ('o%ds%d' % (x.outer, x.stride) if x.outer else '') + ('N' if x.lean else '') + ('Nl' if x.lean_ld else '') + ('Ns' if x.lean_st else '') + ('H' if x.hoist else '') + ('C' if x.coal else '') + ('I' if x.ias else '') + ('W%d' % x.prewarm if x.prewarm else '') + ('T%d' % x.l1t if x.l1t else '') + ('n' if x.l1t_nofirst else '') + ('S%d' % x.sectors if x.sectors != 1 else '') + ('Y' if x.bypass else '') + ('D' if x.decoy else '') + ('B' if x.bypass_first else '') + ('F' if x.ownfence else '') + ('K' if x.sibccctl else '') + ('O' if x.ownccctl else '') + ('e%d' % x.delay if x.delay else '') + ('M%d' % x.stream if x.stream else ''),
-          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean, x.hoist, x.coal, x.lean_ld, x.lean_st, x.cctl, x.ias, x.prewarm, x.l1t, x.l1t_nofirst, x.sectors, x.bypass, x.decoy, x.bypass_first, x.sibling, x.ownfence, x.sibccctl, x.ownccctl, x.delay, x.stream)
+          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean, x.hoist, x.coal, x.lean_ld, x.lean_st, x.cctl, x.ias, x.prewarm, x.l1t, x.l1t_nofirst, x.sectors, x.bypass, x.decoy, x.bypass_first, x.sibling, x.ownfence, x.sibccctl, x.ownccctl, x.delay, x.stream, x.lclock)

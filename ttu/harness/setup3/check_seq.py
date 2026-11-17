@@ -190,7 +190,8 @@ def check(path):
     stall = lambda b: (W(b[8:]) >> 41) & 0xf
     nb = meta.get('barnops', 1) if meta.get('sync') else 0
     CLK = meta.get('clock') and not meta.get('l1t')   # --l1t: the clock window is the timed reload between the sessions, not the group
-    c = (1 if CLK else 0) + ((1 + nb) if meta.get('sync') else 0) + (1 if meta.get('preclk') else 0) + (1 if meta.get('gtime') else 0) + (1 if meta.get('sr133') else 0) + (1 if meta.get('sleepb') else 0)
+    LCK = bool(meta.get('lclock'))   # HG_1 --lclock: start clock right before TTUOPEN (as --clock), end clock after the resume loop
+    c = (1 if (CLK or LCK) else 0) + ((1 + nb) if meta.get('sync') else 0) + (1 if meta.get('preclk') else 0) + (1 if meta.get('gtime') else 0) + (1 if meta.get('sr133') else 0) + (1 if meta.get('sleepb') else 0)
     GL = meta.get('group_len', 19)
     NA = meta.get('alu', 0)
     if NA:   # Throughput_4: exactly NA IADD3 right after the group, none of them TTU, then the wait NOP
@@ -210,6 +211,11 @@ def check(path):
     if meta.get('l1t'):
         cl = [i for i, b in enumerate(body) if is_clk(b, cs) or is_clk(b, ce)]
         ok('l1t: exactly two CS2R SR_CLOCKLO (start, end), both between the sessions, no TTU instruction between them', len(cl) == 2 and groups[0] + GL < cl[0] < cl[1] < groups[1] and not [i for i in range(cl[0], cl[1]) if low12(body[i]) in TTU], cl)
+    if LCK:
+        cl = [i for i, b in enumerate(body[:ex]) if is_clk(b, cs) or is_clk(b, ce)]
+        loop_bra = [i for i in range(g + GL, ex) if low12(body[i]) == 0x947]
+        ok('lclock: exactly two CS2R SR_CLOCKLO, the first right before TTUOPEN, the second after the resume loop branch, no TTU instruction after the second',
+           len(cl) == 2 and cl[0] == g - 1 and is_clk(body[g - 1], cs) and len(loop_bra) == 1 and cl[1] > loop_bra[0] and not [i for i in range(cl[1], ex) if low12(body[i]) in TTU], (cl, loop_bra))
     if CLK:
         ok('clock: CS2R SR_CLOCKLO right before TTUOPEN', is_clk(body[g - 1], cs), cs)
         ok('clock: CS2R SR_CLOCKLO right after the wait NOP', is_clk(body[g + GL + 1], ce), ce)
