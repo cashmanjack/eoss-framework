@@ -37,9 +37,10 @@ F123's sharing term divides only the MISS cost (S1 x (1 - hit)) by the lane fetc
 - One warp (32 lanes, distinct rays against the F67 line): A at W = 1 gives 2,700 / 5,800 / 10,500 / 14,000 against 6,576 / 15,524 / 19,165 / 17,591 measured; the F67 line (3,550 to 6,556) is the right coherent value but is 1.9 to 3.3 times low for distinct lanes. B has no latency form, so no prediction.
 - Reading: the 4.5 to 5.9 times and 2.7 to 3.3 times are NOT predicted by the sharing term (it cannot: it is a memory term). Which constants need distinct ray measurements: every unit term used for light queries (the F194 per node and per triangle rates, c_qW at one query per ray, the F67 per element costs at one warp). Proposed runs below.
 
-## 3. Proposed runs (not done; no refit)
-1. Lane groups (this session, predictions first): g = 2, 4, 8, 16 lanes per ray, same four scenes, 32 warps and one warp. Tells whether the unit's per element cost scales with distinct rays per warp.
-2. Distinct rays, one shared node path (F28 style, parallel rays on a scene where all lanes take the same nodes): separates "distinct ray values" from "distinct node sets".
-3. F67 per element costs with distinct lanes: the Latency_34 par scenes with a different parallel ray per lane (one warp), to get the node, slot and triangle step costs for distinct rays.
-4. F194 style rate sweep (1 to 4,096 triangles) with distinct parallel rays per lane, to get the per triangle and per node rates for distinct lanes.
-5. c_qW at one query per ray: Memory_4 style launch at W = 1 to 32 with q = 1 rays (the fit has q 1.9 to 2.2 and W up to 16).
+## 3. Proposed runs (no refit)
+1. DONE (F199, lane groups): the unit's rate for distinct rays is 4.3 to 5.9 times the identical lane rate and falls to the identical lane rate when a warp holds few distinct rays; the knee moves with scene size (model/results_lane_groups.md). Both models fail it: A 0 of 4 groups within 30 percent, B 0 to 2 of 4.
+2. Knee map: distinct rays per warp 1 to 32 x scenes with different counts per ray, and warps 4, 8, 16, 32 (the Memory_4 fit covers 4 to 16 warps; F199 is 32 warps with the same rays in every warp). Tells what the knee limits (distinct nodes, lines, rays) and how c_qW should depend on it.
+3. Distinct rays that share one node path (F28 style, parallel rays, a different triangle per lane): separates distinct ray values from distinct node sets.
+4. F194 rate sweep (1 to 4,096 triangles) with distinct parallel rays per lane: per triangle and per node rates for distinct lanes (needs 2).
+5. c_qW and the unit term at one query per ray from Memory_4 style launches with warp counts 1 to 32 (the fit has q 1.9 to 2.2).
+Constants that need distinct ray measurements before use on light queries: c_qW (unit term), the F194 per node, per slot and per triangle rates, the F67 per element costs for 32 distinct rays (use the slowest lane, F199).
