@@ -49,8 +49,9 @@ int main(int argc, char **argv)
     if (!is_sph && !is_cus && !is_tri) { fprintf(stderr, "kind?\n"); return 2; }
     CK(cudaFree(0)); OX(optixInit()); OptixDeviceContextOptions co{}; OptixDeviceContext ctx; OX(optixDeviceContextCreate(0, &co, &ctx));
     std::mt19937 g(4321); std::uniform_real_distribution<float> U(-1.f, 1.f);
+    const float off = kv.count("off") ? (float)atof(kv["off"].c_str()) : 0.9f, jitf = kv.count("jit") ? (float)atof(kv["jit"].c_str()) : 0.05f;   // line scene: centre offset and ray jitter, both in units of r (D1a: 0.9 and 0.05; D1b: 0.72 and 0.005)
     const int scene = kv.count("scene") && kv["scene"] == "line" ? 1 : 0;   // line: N spheres along z, each centre 0.9 r off the axis in x and y (signs cycle), the axis rays cross every box and hit no sphere
-    std::vector<V3> cen(N); for (long k = 0; k < N; ++k) { if (scene == 0) cen[k] = {U(g), U(g), U(g)}; else cen[k] = {0.9f * R * ((k & 1) ? -1.f : 1.f), 0.9f * R * ((k & 2) ? -1.f : 1.f), -0.9f + 1.8f * (k + 0.5f) / N}; }
+    std::vector<V3> cen(N); for (long k = 0; k < N; ++k) { if (scene == 0) cen[k] = {U(g), U(g), U(g)}; else cen[k] = {off * R * ((k & 1) ? -1.f : 1.f), off * R * ((k & 2) ? -1.f : 1.f), -0.9f + 1.8f * (k + 0.5f) / N}; }
     V3 *dcen; CK(cudaMalloc((void **)&dcen, N * sizeof(V3))); CK(cudaMemcpy(dcen, cen.data(), N * sizeof(V3), cudaMemcpyHostToDevice));
     unsigned tps = 1; unsigned gflag = OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT; OptixBuildInput bi{}; CUdeviceptr dA = 0, dB = 0;
     if (is_sph) {
@@ -70,9 +71,8 @@ int main(int argc, char **argv)
     OptixAccelBuildOptions ao{}; ao.buildFlags = OPTIX_BUILD_FLAG_NONE; ao.operation = OPTIX_BUILD_OPERATION_BUILD;
     OptixAccelBufferSizes bs{}; OX(optixAccelComputeMemoryUsage(ctx, &ao, &bi, 1, &bs));
     CUdeviceptr tmp, gas, cs; CK(cudaMalloc((void **)&tmp, bs.tempSizeInBytes)); CK(cudaMalloc((void **)&gas, bs.outputSizeInBytes)); CK(cudaMalloc((void **)&cs, 8));
-    OptixAccelEmitDesc em{}; em.type = OPTIX_PROPERTY_TYPE_COMPACTED_SIZE; em.result = cs;
-    OptixTraversableHandle root; OX(optixAccelBuild(ctx, 0, &ao, &bi, 1, tmp, bs.tempSizeInBytes, gas, bs.outputSizeInBytes, &root, &em, 1)); CK(cudaDeviceSynchronize());
-    unsigned long long csz; CK(cudaMemcpy(&csz, (void *)cs, 8, cudaMemcpyDeviceToHost));   // the size a compacted copy would have (reported, not used: the GAS timed is the uncompacted build)
+    OptixTraversableHandle root; OX(optixAccelBuild(ctx, 0, &ao, &bi, 1, tmp, bs.tempSizeInBytes, gas, bs.outputSizeInBytes, &root, nullptr, 0)); CK(cudaDeviceSynchronize());
+    const unsigned long long csz = 0;   // no compaction (the flag would change the build); gas_bytes is the buffer OptiX asked for (an upper bound of the tree)
     OptixModuleCompileOptions mo{}; OptixPipelineCompileOptions po{};
     po.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS; po.numPayloadValues = 4; po.numAttributeValues = 2; po.pipelineLaunchParamsVariableName = "params";
     po.usesPrimitiveTypeFlags = is_sph ? OPTIX_PRIMITIVE_TYPE_FLAGS_SPHERE : is_cus ? OPTIX_PRIMITIVE_TYPE_FLAGS_CUSTOM : OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE;
@@ -92,12 +92,12 @@ int main(int argc, char **argv)
     OptixShaderBindingTable sbt{}; sbt.raygenRecord = drec; sbt.missRecordBase = drec + sizeof(Rec); sbt.missRecordStrideInBytes = sizeof(Rec); sbt.missRecordCount = 1;
     sbt.hitgroupRecordBase = drec + 2 * sizeof(Rec); sbt.hitgroupRecordStrideInBytes = sizeof(Rec); sbt.hitgroupRecordCount = 1;
     FILE *jf = fopen(argv[2], "wx"); if (!jf) { fprintf(stderr, "refuse to overwrite or cannot write %s\n", argv[2]); return 2; }
-    fprintf(jf, "{\"kind\": \"%s\", \"N\": %ld, \"r\": %.5f, \"scene\": %d, \"tps\": %u, \"gas_bytes\": %zu, \"gas_compacted_bytes\": %llu, \"ptx\": \"%s\"", kind.c_str(), N, R, scene, tps, (size_t)bs.outputSizeInBytes, csz, argv[1]);
+    fprintf(jf, "{\"kind\": \"%s\", \"N\": %ld, \"r\": %.5f, \"scene\": %d, \"off\": %.3f, \"jit\": %.4f, \"tps\": %u, \"gas_bytes\": %zu, \"gas_compacted_bytes\": %llu, \"ptx\": \"%s\"", kind.c_str(), N, R, scene, off, jitf, tps, (size_t)bs.outputSizeInBytes, csz, argv[1]);
     const long maxn = std::max({I("sat", 0), I("nver", 1 << 20), 32L});
     unsigned long long *dcal, *dcyc; unsigned *dsink; uint4 *dout;
     CK(cudaMalloc((void **)&dcal, (size_t)(maxn / 32 + 1) * 32)); CK(cudaMalloc((void **)&dsink, (size_t)(maxn / 32 + 1) * 4)); CK(cudaMemset(dsink, 0, (size_t)(maxn / 32 + 1) * 4));
     CK(cudaMalloc((void **)&dcyc, 32 * 8)); CK(cudaMalloc((void **)&dout, (size_t)maxn * 16));
-    Params prm{}; prm.handle = root; prm.centers = (const float3 *)dcen; prm.radius = R; prm.tps = tps; prm.scene = scene; prm.jit = 0.05f * R; prm.sink = dsink; prm.cyc = dcyc; prm.cal = nullptr; prm.out = nullptr;
+    Params prm{}; prm.handle = root; prm.centers = (const float3 *)dcen; prm.radius = R; prm.tps = tps; prm.scene = scene; prm.jit = jitf * R; prm.sink = dsink; prm.cyc = dcyc; prm.cal = nullptr; prm.out = nullptr;
     CUdeviceptr dprm; CK(cudaMalloc((void **)&dprm, sizeof prm));
     auto launch = [&](unsigned n) { CK(cudaMemcpy((void *)dprm, &prm, sizeof prm, cudaMemcpyHostToDevice)); OX(optixLaunch(pipe, 0, dprm, sizeof prm, &sbt, n, 1, 1)); };
     if (kv.count("verify")) {   // per ray results of the first nver rays: (hit, t bits, sphere index, intersection program calls) as uint32 x 4, written to a new file
