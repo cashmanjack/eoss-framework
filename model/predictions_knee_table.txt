@@ -1,0 +1,38 @@
+calibration soup:100,000 W=32: g_knee 3.37
+C per statistic (x W variants: demand x 32 at calibration): {'H step_max': 9.5, 'step_mean': 8.3, 'total': 96.5, 'step_max x W': 303.6, 'total x W': 3087.5}
+
+D(g) per statistic and size (g = 1 2 4 8 16 32):
+H step_max         1000 |   28.0   16.0    8.0    4.0    2.0    1.0
+H step_max        10000 |   31.0   16.0    8.0    4.0    2.0    1.0
+H step_max       100000 |   32.0   16.0    8.0    4.0    2.0    1.0
+H step_max      1000000 |   32.0   16.0    8.0    4.0    2.0    1.0
+step_mean          1000 |   18.3   10.7    6.2    3.2    1.8    1.0
+step_mean         10000 |   23.3   12.6    6.9    3.6    1.9    1.0
+step_mean        100000 |   26.4   13.7    7.1    3.6    1.8    1.0
+step_mean       1000000 |   28.0   14.3    7.4    3.8    1.9    1.0
+total              1000 |   51.0   44.0   27.0   15.0   10.0    6.0
+total             10000 |  146.0   92.0   57.0   31.0   17.0    9.0
+total            100000 |  287.0  153.0   83.0   43.0   22.0   12.0
+total           1000000 |  405.0  210.0  111.0   57.0   29.0   15.0
+
+PREDICTED g_knee (0 = no knee, demand under C; 99 = no knee, over C), configurations n x W = 4 8 16 32:
+H step_max         1000 |  3.37  3.37  3.37  3.37
+H step_max        10000 |  3.37  3.37  3.37  3.37
+H step_max       100000 |  3.37  3.37  3.37  3.37
+H step_max      1000000 |  3.37  3.37  3.37  3.37
+step_mean          1000 |  2.74  2.74  2.74  2.74
+step_mean         10000 |  3.21  3.21  3.21  3.21
+step_mean        100000 |  3.37  3.37  3.37  3.37
+step_mean       1000000 |  3.53  3.53  3.53  3.53
+total              1000 | none none none none
+total             10000 |  1.86  1.86  1.86  1.86
+total            100000 |  3.37  3.37  3.37  3.37
+total           1000000 |  4.63  4.63  4.63  4.63
+step_max x W       1000 | none none  1.62  3.37
+step_max x W      10000 | none none  1.67  3.37
+step_max x W     100000 | none none  1.69  3.37
+step_max x W    1000000 | none none  1.69  3.37
+total x W          1000 | none none none none
+total x W         10000 | none none none  1.86
+total x W        100000 | none none  1.55  3.37
+total x W       1000000 | none  1.05  2.19  4.63

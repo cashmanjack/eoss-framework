@@ -37,6 +37,8 @@ int main(int argc, char **argv)
     const bool firsthit = getenv("FIRSTHIT") != nullptr;
     const long nr = atol(argv[3]); const int order = atoi(argv[4]);
     std::vector<Ray8> rays(nr); f = fopen(argv[2], "rb"); fread(rays.data(), sizeof(Ray8), nr, f); fclose(f);
+    // NODESEQ=FILE: per ray int32 count, then the fetch events in order: node id (>= 0) or -(leaf slot + 1) (knee map, 2026-11-17)
+    const char *seqpath = getenv("NODESEQ"); std::vector<int32_t> seqout;
     std::vector<int32_t> out(nr * 8); std::vector<int32_t> pq3; if (argc > 6) pq3.assign((size_t)nr * 24, 0);
     for (long i = 0; i < nr; ++i) {
         const Ray8 &r = rays[i]; double o[3], d[3], id[3];
@@ -46,11 +48,13 @@ int main(int argc, char **argv)
         auto push = [&](const E &e) { if (order) pq.push(e); else st.push_back(e); };
         auto empty = [&]() { return order ? pq.empty() : st.empty(); };
         auto pop = [&]() { E e; if (order) { e = pq.top(); pq.pop(); } else { e = st.back(); st.pop_back(); } return e; };
+        std::vector<int32_t> seq;
         double t0; push({0.f, 0, -1});   // the root is always fetched
         while (!empty()) {
             E e = pop();
             if (e.t > best) continue;
             if (e.leaf >= 0) {   // leaf slot: test its triangles
+                if (seqpath) seq.push_back(-(e.leaf + 1));
                 ++leaves; bool improved = false; const int t_before = tris;
                 for (int k = ls[e.leaf]; k < ls[e.leaf + 1]; ++k) {
                     const int p = lt[k]; ++tris;
@@ -79,6 +83,7 @@ int main(int argc, char **argv)
                 continue;
             }
             ++nodes;   // internal node fetch (128 bytes)
+            if (seqpath) seq.push_back(e.node);
             E kids[12]; int nk = 0;
             for (int s = 0; s < 12; ++s) {
                 const Slot &S = sl[(size_t)e.node * 12 + s]; if (!S.type) continue;
@@ -89,9 +94,11 @@ int main(int argc, char **argv)
             else { std::sort(kids, kids + nk, [](const E &a, const E &b) { return a.t > b.t; }); for (int k = 0; k < nk; ++k) push(kids[k]); }   // far first, so the nearest is popped first
         }
         if (!pq3.empty()) { int k = std::min(cq, 7); pq3[(size_t)i * 24 + k * 3] += nodes - c0; pq3[(size_t)i * 24 + k * 3 + 1] += leaves - c1; pq3[(size_t)i * 24 + k * 3 + 2] += tris - c2; }
+        if (seqpath) { seqout.push_back((int32_t)seq.size()); seqout.insert(seqout.end(), seq.begin(), seq.end()); }
         int32_t *q = &out[i * 8]; q[0] = nodes; q[1] = leaves; q[2] = tris; q[3] = qa; q[4] = qb; q[5] = bestp;
         float bt = (float)best; memcpy(&q[6], &bt, 4); q[7] = hits;
     }
+    if (seqpath) { f = fopen(seqpath, "wb"); fwrite(seqout.data(), 4, seqout.size(), f); fclose(f); }
     f = fopen(argv[5], "wb"); fwrite(out.data(), 4, out.size(), f); fclose(f);
     if (!pq3.empty()) { f = fopen(argv[6], "wb"); fwrite(pq3.data(), 4, pq3.size(), f); fclose(f); }
     return 0;
