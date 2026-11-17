@@ -83,6 +83,7 @@ int main(int argc, char **argv)
             else if (mc == 'L') I.visibilityMask = (k % modeN == modeN / 2) ? 2 : 1;
             else if (mc == 'E') I.visibilityMask = (k & 1) ? 2 : 1;
             else I.visibilityMask = 2;   // C, D
+            if (kv.count("imask")) I.visibilityMask = (unsigned)geti("imask", 255);   // imask=<n>: every instance gets this visibility mask (Mask_1: instance 0x0F against ray masks)
             inst.push_back(I);
         }
         CUdeviceptr di; CK(cudaMalloc((void **)&di, inst.size() * sizeof(OptixInstance))); CK(cudaMemcpy((void *)di, inst.data(), inst.size() * sizeof(OptixInstance), cudaMemcpyHostToDevice));

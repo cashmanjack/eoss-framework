@@ -14,8 +14,10 @@ VARS = {'base': {}}
 for k, v in F.items():
     if v: VARS['f_' + k] = dict(FLAGS=v)
 VARS['f_TERM_DISCH'] = dict(FLAGS=12)
-for m in (15, 1, 128): VARS['m_%d' % m] = dict(MASK=m)
+for m in (15, 1, 128, 0): VARS['m_%d' % m] = dict(MASK=m)
 VARS['t_0p05'] = dict(TMAX='0.05f'); VARS['t_2'] = dict(TMAX='2.0f'); VARS['tmin_0p1'] = dict(TMIN='0.1f')
+WIN = os.environ.get('FE_WIN', '0x10000')   # window length (max 0x10000)
+OFF = os.environ.get('FE_OFF', '0x10000')   # window start below the kernel (0x12000 reaches the callee below the default window)
 sel = sys.argv[1:] or list(VARS)
 stamp = time.strftime('%Y%m%dT%H%M%S')
 for name in sel:
@@ -32,7 +34,7 @@ for name in sel:
     if os.path.exists(raw): sys.exit('exists ' + raw)
     r = subprocess.run(['nvidia-smi', '-i', str(CFG.index), '--query-compute-apps=pid', '--format=csv,noheader'], capture_output=True, text=True)
     if r.stdout.strip(): sys.exit('GPU busy')
-    cmd = ['timeout', '-k', '2', '30', exe + '/memdump', 'read', '--fn', '--fnrel', '-0x10000', '--method', 'kernel', '--len', '0x10000', '--out', raw]
+    cmd = ['timeout', '-k', '2', '30', exe + '/memdump', 'read', '--fn', '--fnrel', '-' + OFF, '--method', 'kernel', '--len', WIN, '--out', raw]
     r = subprocess.run(cmd, env=ENV, capture_output=True, text=True)
     print(name, 'exit', r.returncode, r.stdout.strip().splitlines()[-1:] , r.stderr.strip()[-200:])
     if r.returncode: sys.exit('stopping at first failure')
