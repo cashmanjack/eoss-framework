@@ -22,4 +22,4 @@ runs a binary whose sha256 passed check_seq.py, on an idle GPU 1, under a 30 s t
     python build_patch.py --stage 0|1 --bin /dev/shm/t9i/setup3 --dump IAS_DUMP.bin --ias --out /dev/shm/t9i/ias_s<stage>
     python check_seq.py /dev/shm/t9i/ias_s<stage> IAS_DUMP.bin            # shape (A4, A12, A13: offsets, predicates, fuse 15) and, with --remap, A10
     python run.py /dev/shm/t9i/ias_s0 hit zero OUT.json --ias             # stage 0 only; analyze.py reads "ias" from the JSON
-Stage 1 IAS builds are checked but not run (the .checked marker is deleted).
+Stage 1 IAS builds have run on hardware (F139, triton); a build is run only after its own check_seq pass (the marker is deleted after prepare scripts, run check_seq again on purpose).
