@@ -198,6 +198,36 @@ extern "C" __global__ void sib_fence(unsigned target, unsigned mode, unsigned lo
     __syncthreads();
 }
 
+
+// q32 (i) modes 6 and 7: block B on SM `target` (plain CUDA, no TTU). Warms an L1 sized buffer with ordinary cached loads (ld.ca, every sector of every line, 4 passes; the last pass is timed: t1), sets ready,
+// waits for flag1 (the TTU warp finished its first session), waits dns on the global timer (no loads, no stores), mode 7: one fence.acq_rel.gpu (MEMBAR, ERRBAR, CCTL.IVALL = cold L1 control), then one timed pass over
+// the same buffer (t0 = cycles), then flag2 by a relaxed store. No fence anywhere in mode 6 after the warm up. The TTU warp's TTUCCTL (arm P, X) is executed by the other build, not here.
+extern "C" __global__ void sib_l1(unsigned target, unsigned mode, unsigned long long dns, const uint4 *buf, unsigned nvec, volatile unsigned *flags, SibStat *st)
+{
+    __shared__ int go; __shared__ unsigned long long tw, tr;
+    if (threadIdx.x == 0) { go = 0; if (smid_() == target && atomicAdd((unsigned *)&flags[64], 1u) == 0) go = 1; }
+    __syncthreads(); if (!go) return;
+    uint4 acc = make_uint4(0, 0, 0, 0);
+    for (int p = 0; p < 4; ++p) {
+        __syncthreads(); const unsigned long long c = clock64();
+        for (unsigned i = threadIdx.x; i < nvec; i += blockDim.x) { const uint4 v = __ldca(buf + i); acc.x += v.x; acc.y ^= v.y; acc.z += v.z; acc.w ^= v.w; }
+        __syncthreads(); if (threadIdx.x == 0 && p == 3) tw = clock64() - c;
+    }
+    if (threadIdx.x == 0) {
+        st->sm = smid_(); st->ready = 1;   // no fence: nothing may invalidate this L1 before the reload
+        const unsigned long long t = gtimer_(); unsigned v = 0;
+        for (;;) { asm volatile("ld.relaxed.gpu.global.u32 %0, [%1];" : "=r"(v) : "l"(flags) : "memory"); if (v || gtimer_() - t > 3000000000ull) break; }
+        if (v == 0) st->timedout = 1;
+        const unsigned long long t2 = gtimer_(); while (gtimer_() - t2 < dns) { }
+        if (mode == 7) asm volatile("fence.acq_rel.gpu;" ::: "memory");
+    }
+    __syncthreads(); const unsigned long long c = clock64();
+    for (unsigned i = threadIdx.x; i < nvec; i += blockDim.x) { const uint4 v = __ldca(buf + i); acc.x += v.x; acc.y ^= v.y; acc.z += v.z; acc.w ^= v.w; }
+    __syncthreads();
+    if (threadIdx.x == 0) { tr = clock64() - c; st->t0 = tr; st->t1 = tw; asm volatile("st.relaxed.gpu.global.u32 [%0], %1;" :: "l"(flags + 32), "r"(1u) : "memory"); }
+    if (acc.x == 0x12345678u && acc.y == 0x9abcdef0u) st->acc = acc.z;
+}
+
 extern "C" __global__ void flush_read(const uint4 *p, size_t n, unsigned *sink)
 {
     unsigned acc = 0;
@@ -314,7 +344,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--ias")) ias = true;
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
         else if (!strcmp(argv[a], "--thrash-gas")) thrash_gas = true;
-        else if (!strcmp(argv[a], "--sibling") && a + 1 < argc) { if (sscanf(argv[++a], "%d:%d:%d:%u:%u", &sib_sm, &sib_kb, &sib_passes, &sib_poll, &sib_mode) < 3 || sib_mode > 5 || sib_sm < 0 || sib_kb < 1 || sib_passes < 0) { fprintf(stderr, "--sibling SM:KB:PASSES[:POLLNS]\n"); return 2; } }   // q20: needs build_patch --sibling --smfilter and --sms A,A (the block that lands on SM A runs, the others leave)
+        else if (!strcmp(argv[a], "--sibling") && a + 1 < argc) { if (sscanf(argv[++a], "%d:%d:%d:%u:%u", &sib_sm, &sib_kb, &sib_passes, &sib_poll, &sib_mode) < 3 || sib_mode > 7 || sib_sm < 0 || sib_kb < 1 || sib_passes < 0) { fprintf(stderr, "--sibling SM:KB:PASSES[:POLLNS]\n"); return 2; } }   // q20: needs build_patch --sibling --smfilter and --sms A,A (the block that lands on SM A runs, the others leave)
         else if (!strcmp(argv[a], "--thrash-near")) thrash_near = true;   // (with --thrash) words 26, 27 = a 64 KB buffer allocated right after the GAS (same 2 MB chunk if it prints so): warms the translation of the BVH page, no BVH line
         else if (!strcmp(argv[a], "--tlbflush") && a + 1 < argc) tlbpages = (size_t)atoll(argv[++a]);   // q18: before every timed launch (after --flush) touch one line in each of P 2 MB pages of a P x 2 MB buffer
         else if (!strcmp(argv[a], "--thrash-node")) thrash_node = true;   // q18 (with --thrash): lane 31 loads the OptiX instance node line (address A) instead of GAS line 31
@@ -819,7 +849,7 @@ int main(int argc, char **argv)
     TICK("input image built");
     unsigned char *tbuf = nullptr;
     if (thrash) {
-        CK(cudaMalloc((void **)&tbuf, 4u << 20)); CK(cudaMemset(tbuf, 0, 4u << 20));
+        CK(cudaMalloc((void **)&tbuf, 4u << 20)); CK(cudaMemset(tbuf, 0, 4u << 20)); if ((((unsigned long long)tbuf) & 0xffffffffull) + (4u << 20) > 0x100000000ull) { fprintf(stderr, "--thrash buffer straddles a 4 GB boundary (build_patch --stream advances the low word only)\n"); return 4; }
         for (size_t i = 0; i < TOTAL; ++i) {
             const unsigned long long a = (thrash_near ? (unsigned long long)nearbuf : thrash_gas ? (unsigned long long)gas : (unsigned long long)tbuf) + (unsigned long long)thrash_lane * (i % 32);
             const unsigned long long a2 = (thrash_node && i % 32 == 31) ? (A & ~127ULL) : a;
@@ -888,6 +918,7 @@ int main(int argc, char **argv)
             CK(cudaMemset(sib_flags, 0, 4096)); CK(cudaDeviceSynchronize());
             memset((void *)sib_st, 0, sizeof(SibStat));
             if (sib_mode == 5) { /* q22 (h): no plain block; the second TTU block (build_patch --sibccctl, --sms A,B --blocks NSM) is the sibling */ }
+            else if (sib_mode >= 6) sib_l1<<<NSM, 384, 0, ssib>>>((unsigned)sib_sm, sib_mode, getenv("SIB_DNS") ? strtoull(getenv("SIB_DNS"), 0, 10) : 100000ull, sib_buf, (unsigned)((size_t)sib_kb * 1024 / sizeof(uint4)), sib_flags, sib_st_d);
             else if (sib_mode) sib_fence<<<NSM, 384, 0, ssib>>>((unsigned)sib_sm, sib_mode, getenv("SIB_WAITNS") ? strtoull(getenv("SIB_WAITNS"), 0, 10) : 8000000ull, sib_flags, sib_st_d, getenv("SIB_SM2") ? atoi(getenv("SIB_SM2")) : -1);
             else sib_thrash<<<NSM * (getenv("SIB_GRIDX") ? atoi(getenv("SIB_GRIDX")) : 1), getenv("SIB_THREADS") ? atoi(getenv("SIB_THREADS")) : 384, 0, ssib>>>((unsigned)sib_sm, sib_buf, (unsigned)((size_t)sib_kb * 1024 / sizeof(uint4)), sib_passes, sib_flags, sib_st_d, sib_poll);
             CK(cudaGetLastError());
@@ -961,7 +992,7 @@ int main(int argc, char **argv)
             if (bi == 0) wc0 = wc;
         }
         fprintf(jf, "], \"warp_clk\": [%s], \"lanes_equal\": %s", wc0.c_str(), lanes_eq ? "true" : "false");
-        if (sib_sm >= 0) fprintf(jf, ", \"sib\": {\"sm\": %u, \"sm2\": %u, \"timedout\": %u, \"thrash_ns\": %llu}", sib_st->sm, sib_st->sm2, sib_st->timedout, (unsigned long long)(sib_st->t1 - sib_st->t0));
+        if (sib_sm >= 0) fprintf(jf, ", \"sib\": {\"sm\": %u, \"sm2\": %u, \"timedout\": %u, \"thrash_ns\": %llu, \"t0\": %llu, \"t1\": %llu}", sib_st->sm, sib_st->sm2, sib_st->timedout, (unsigned long long)(sib_st->t1 - sib_st->t0), (unsigned long long)sib_st->t0, (unsigned long long)sib_st->t1);
         fprintf(jf, "}");
         if (it == repeat - 1) out = std::move(o);
     }

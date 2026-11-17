@@ -37,6 +37,7 @@ int main(int argc, char **argv)
     std::vector<Particle> P; std::vector<std::pair<unsigned, unsigned>> mc;   // as Mochi: Morton code from x*1024 clamped, ids popped from a max priority queue (largest code first)
     { FILE *f = fopen(argv[2], "r"); if (!f) { fprintf(stderr, "no dataset\n"); return 2; } float v[5]; while (P.size() < 100000 && fscanf(f, "%f %f %f %f %f", v, v + 1, v + 2, v + 3, v + 4) == 5) { unsigned id = (unsigned)P.size(); P.push_back({{v[0], v[1], v[2]}, {0.f, 0.f, 0.f}, v[3], v[4]});
             auto cl = [](float a) { return std::min(std::max(a * 1024.0f, 0.0f), 1023.0f); }; mc.push_back({expandBits((unsigned)cl(v[0])) * 4 + expandBits((unsigned)cl(v[1])) * 2 + expandBits((unsigned)cl(v[2])), id}); } fclose(f); }
+    const int flip = getenv("FLIP") ? atoi(getenv("FLIP")) : 0; fprintf(stderr, "FLIP %d\n", flip);
     const int NP = (int)P.size(); if (NP != 100000) { fprintf(stderr, "dataset has %d particles\n", NP); return 2; }
     std::priority_queue<std::pair<unsigned, unsigned>> pq; for (auto &x : mc) pq.push(x); std::vector<Particle> S; while (!pq.empty()) { S.push_back(P[pq.top().second]); pq.pop(); } P = S;
     std::vector<float> bx(6 * NP); for (int p = 0; p < NP; ++p) { const float r = P[p].radius; bx[6 * p] = P[p].center.x - 2 * r; bx[6 * p + 1] = P[p].center.y - 2 * r; bx[6 * p + 2] = P[p].center.z - 2 * r; bx[6 * p + 3] = P[p].center.x + 2 * r; bx[6 * p + 4] = P[p].center.y + 2 * r; bx[6 * p + 5] = P[p].center.z + 2 * r; }
@@ -53,19 +54,21 @@ int main(int argc, char **argv)
         ib.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES; ib.instanceArray.instances = di; ib.instanceArray.numInstances = 1; OptixAccelBufferSizes bs2{}; OX(optixAccelComputeMemoryUsage(ctx, &ao, &ib, 1, &bs2));
         tmp2sz = std::max(bs2.tempSizeInBytes, bs2.tempUpdateSizeInBytes); ias_sz = bs2.outputSizeInBytes; CK(cudaMalloc((void **)&tmp2, tmp2sz)); CK(cudaMalloc((void **)&ias_, bs2.outputSizeInBytes)); OX(optixAccelBuild(ctx, 0, &ao, &ib, 1, tmp2, bs2.tempSizeInBytes, ias_, bs2.outputSizeInBytes, &hW, nullptr, 0)); }
     CK(cudaDeviceSynchronize());
-    OptixModuleCompileOptions mo{}; OptixPipelineCompileOptions po{}; po.traversableGraphFlags = ias ? OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING : OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS; po.numPayloadValues = 2; po.numAttributeValues = 0;
-    po.pipelineLaunchParamsVariableName = "params"; po.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_CUSTOM;
+    OptixModuleCompileOptions mo{}; OptixPipelineCompileOptions po{}; po.traversableGraphFlags = ias ? OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING : OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS; po.numPayloadValues = 2; po.numAttributeValues = (flip & 1) ? 2 : 0;
+    po.pipelineLaunchParamsVariableName = "params"; po.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_CUSTOM | ((flip & 2) ? OPTIX_PRIMITIVE_TYPE_FLAGS_SPHERE : 0);
     std::string ptx = read_file(argv[1]); char log[4096]; size_t ls = sizeof log; OptixModule m; { OptixResult rr_ = optixModuleCreate(ctx, &mo, &po, ptx.c_str(), ptx.size(), log, &ls, &m); if (rr_ != OPTIX_SUCCESS) { fprintf(stderr, "optixModuleCreate %d: %s\n", (int)rr_, log); return 2; } }
     OptixProgramGroupOptions go{}; OptixProgramGroupDesc d[3] = {}; d[0].kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN; d[0].raygen.module = m; d[0].raygen.entryFunctionName = "__raygen__rg";
     d[1].kind = OPTIX_PROGRAM_GROUP_KIND_MISS; d[1].miss.module = m; d[1].miss.entryFunctionName = "__miss__ms";
     d[2].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP; d[2].hitgroup.moduleCH = m; d[2].hitgroup.entryFunctionNameCH = "__closesthit__ch"; d[2].hitgroup.moduleIS = m; d[2].hitgroup.entryFunctionNameIS = "__intersection__is";
     OptixProgramGroup pg[3]; ls = sizeof log; OX(optixProgramGroupCreate(ctx, d, 3, &go, log, &ls, pg));
-    OptixPipelineLinkOptions lo{}; lo.maxTraceDepth = 1; OptixPipeline pipe; ls = sizeof log; OX(optixPipelineCreate(ctx, &po, &lo, pg, 3, log, &ls, &pipe));
-    struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) SR { char h[OPTIX_SBT_RECORD_HEADER_SIZE]; }; SR rec[3]; for (int k = 0; k < 3; ++k) OX(optixSbtRecordPackHeader(pg[k], &rec[k]));
-    CUdeviceptr drec; CK(cudaMalloc((void **)&drec, sizeof rec)); CK(cudaMemcpy((void *)drec, rec, sizeof rec, cudaMemcpyHostToDevice));
+    OptixPipelineLinkOptions lo{}; lo.maxTraceDepth = (flip & 4) ? 2 : 1; OptixPipeline pipe; ls = sizeof log; OX(optixPipelineCreate(ctx, &po, &lo, pg, 3, log, &ls, &pipe)); if (flip & 8) OX(optixPipelineSetStackSize(pipe, 2048, 2048, 2048, 2));
+    const size_t RS = (flip & 16) ? 48 : 32;   // record size: header 32 bytes, plus 16 bytes of program data with F5 (as OWL: header + the program's struct)
+    std::vector<char> rec(3 * RS, 0); for (int k = 0; k < 3; ++k) OX(optixSbtRecordPackHeader(pg[k], rec.data() + k * RS));
+    if (flip & 16) { struct RGd { const Particle *p; OptixTraversableHandle h; } rg{(const Particle *)dpt, hW}; struct HGd { const Particle *p; float st, re; } hg{(const Particle *)dpt, 8e3f, 2.f * (1.f / sqrtf(1.f + (float)((M_PI / std::log(0.5)) * (M_PI / std::log(0.5)))))}; static_assert(sizeof(RGd) == 16 && sizeof(HGd) == 16, "sbt data 16 bytes"); memcpy(rec.data() + 32, &rg, 16); memcpy(rec.data() + 2 * RS + 32, &hg, 16); }
+    CUdeviceptr drec; CK(cudaMalloc((void **)&drec, rec.size())); CK(cudaMemcpy((void *)drec, rec.data(), rec.size(), cudaMemcpyHostToDevice));
     Params prm{}; prm.n = NQ; prm.particles = (const Particle *)dpt; prm.boxes = (const float *)db; prm.acc = (float3 *)dacc; prm.callw = (unsigned *)dcw; prm.handle = hW; prm.stiffness = 8e3f; prm.restitution = 0.5f * 0 + 2.f * (1.f / sqrtf(1.f + (float)((M_PI / std::log(0.5)) * (M_PI / std::log(0.5)))));
     CK(cudaMalloc((void **)&prm.rec, NW * sizeof(Rec))); CUdeviceptr dprm; CK(cudaMalloc((void **)&dprm, sizeof prm)); CK(cudaMemcpy((void *)dprm, &prm, sizeof prm, cudaMemcpyHostToDevice));
-    OptixShaderBindingTable sbt{}; sbt.raygenRecord = drec; sbt.missRecordBase = drec + sizeof(SR); sbt.missRecordStrideInBytes = sizeof(SR); sbt.missRecordCount = 1; sbt.hitgroupRecordBase = drec + 2 * sizeof(SR); sbt.hitgroupRecordStrideInBytes = sizeof(SR); sbt.hitgroupRecordCount = 1;
+    OptixShaderBindingTable sbt{}; sbt.raygenRecord = drec; sbt.missRecordBase = drec + RS; sbt.missRecordStrideInBytes = RS; sbt.missRecordCount = 1; sbt.hitgroupRecordBase = drec + 2 * RS; sbt.hitgroupRecordStrideInBytes = RS; sbt.hitgroupRecordCount = 1;
     std::vector<Rec> hr(NW); printf("{\"nq\":%u,\"ias\":%d,\"seq\":%d,\"warm\":%d,\"launches\":[", NQ, ias, seq, warm);
     auto sequence = [&]() {
         if (seq >= 1) { upd<<<(NP + 255) / 256, 256>>>((Particle *)dpt, (float3 *)dacc, 1e-4f, NP); CK(cudaDeviceSynchronize()); }

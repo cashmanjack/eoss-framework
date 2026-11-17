@@ -143,6 +143,19 @@ def check(path):
                     ok('B15 ownccctl: stage 0 has no TTUCCTL', not cc, cc)
             else:
                 ok('B15 no TTUCCTL in the sibling kernel unless --ownccctl', not [i for i, b in enumerate(body) if low12(b) == 0x3d5])
+        elif meta.get('stream'):   # q32 --stream: exactly one backward @P5 BRA between the sessions (a counted loop of ordinary loads), no TTU instruction inside it
+            off = lambda b: (W(b) >> 32) & 0xffffffff
+            tgt = [i + 1 + ((off(body[i]) - (1 << 32 if off(body[i]) >> 31 else 0)) // 16) for i in brs]
+            g1 = groups[0]
+            ok('B15 stream: exactly one backward BRA (@P5) after the first session and before the second, no TTU instruction in the loop',
+               len(brs) == 1 and low12(body[brs[0]]) == 0x947 and pred(body[brs[0]]) == (5, 0) and g1 + 18 < tgt[0] < brs[0] < groups[1] and not any(low12(body[i]) in TTU for i in range(tgt[0], brs[0] + 1)), (brs, tgt, groups))
+        elif meta.get('delay'):   # q32 --delay: exactly one backward @P5 BRA between the sessions (a counted ALU loop), no TTU instruction and no memory instruction inside it
+            off = lambda b: (W(b) >> 32) & 0xffffffff
+            tgt = [i + 1 + ((off(body[i]) - (1 << 32 if off(body[i]) >> 31 else 0)) // 16) for i in brs]
+            g1 = groups[0]
+            ok('B15 delay: exactly one backward BRA (@P5) after the first session and before the second, loop body = IADD3, LOP3, BRA only',
+               len(brs) == 1 and low12(body[brs[0]]) == 0x947 and pred(body[brs[0]]) == (5, 0) and g1 + 18 < tgt[0] < brs[0] < groups[1] and brs[0] - tgt[0] == 2
+               and [low12(body[i]) for i in range(tgt[0], brs[0])] == [0x810, 0x212], (brs, tgt, groups, [hex(low12(body[i])) for i in range(max(0, brs[0] - 3), brs[0] + 1)]))
         else:
             ok('B15 no branch anywhere before EXIT', not brs)
     if meta.get('cctl'):   # Interface_7: exactly one TTUCCTL.IVALL in stage 1 (none in stage 0), unpredicated, right after the first session's wait NOP, outside every session, followed by 4 stall 15 NOPs

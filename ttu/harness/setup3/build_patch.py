@@ -266,7 +266,7 @@ def ttuccttl_bytes():
 
 
 def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out=95, preclk=False, barnops=1,
-          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False, lean_ld=False, lean_st=False, cctl=False, ias=False, prewarm=0, l1t=0, l1t_nofirst=False, sectors=1, bypass=False, decoy=False, bypass_first=False, sibling=False, ownfence=False, sibccctl=False, ownccctl=False):
+          twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False, lean_ld=False, lean_st=False, cctl=False, ias=False, prewarm=0, l1t=0, l1t_nofirst=False, sectors=1, bypass=False, decoy=False, bypass_first=False, sibling=False, ownfence=False, sibccctl=False, ownccctl=False, delay=0, stream=0):
     global INPUTS, GROUP_LEN
     d = open(dump, 'rb').read()
     if ias:
@@ -522,6 +522,21 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
             body.append(isetp_ne(6, 8, 255, 13, 0))                                                           # P6 = flag2 != 0
             body.append(bra_back_neg(6, (spin_top - (len(body) + 1)) * 16))                                   # @!P6 BRA spin_top
             body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=15))
+        if delay:   # q32 (ii): a counted ALU loop between the sessions, no memory access, no TTU instruction: the same time as --thrash without the loads (R45 is free with --remap)
+            assert twice and remap and not (thrash or sibling or cctl or l1t or prewarm or decoy or slim or loop or outer or ias or gtime), '--delay: --twice --remap, plain'
+            dl = phys(ALU_REG); body.append(iadd3_imm(dl, 255, delay, 2)); dtop = len(body)
+            body.append(iadd3_imm(dl, dl, 0xffffffff, 6)); body.append(lop3(0, dl, 255, 255, 0xfc, 13, pu=5)); body.append(bra_back(5, 7, (dtop - (len(body) + 1)) * 16))
+            body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=15))
+        if stream:   # q32 (ii): KB of ordinary L1 allocating loads (every sector of every line) from the TTU warp itself between the sessions: a loop of 16 pages x 4 sectors = 64 KB per round, the pointer advances by 64 KB (low word only: the host checks the buffer does not straddle a 4 GB boundary)
+            assert twice and remap and sectors == 4 and stream % 64 == 0 and not (thrash or delay or sibling or cctl or l1t or prewarm or decoy or slim or loop or outer or ias or gtime), '--stream KB: --twice --remap --sectors 4, KB a multiple of 64'
+            for r in (THRASH_PTR, THRASH_PTR + 1):
+                body.append(field(field(ldg[r], 16, phys(r)), 24, in_ptr))
+            body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
+            dl = phys(ALU_REG); body.append(iadd3_imm(dl, 255, stream // 64, 2)); stop_ = len(body)
+            warm_batch(16)
+            body.append(iadd3_imm(phys(THRASH_PTR), phys(THRASH_PTR), 65536, 6))
+            body.append(iadd3_imm(dl, dl, 0xffffffff, 6)); body.append(lop3(0, dl, 255, 255, 0xfc, 13, pu=5)); body.append(bra_back(5, 7, (stop_ - (len(body) + 1)) * 16))
+            body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=15))
         if thrash:   # same warp, same SM: N L1 allocating loads per lane, N x 4 KB of lines per warp
             assert remap, '--thrash needs --remap'
             for r in (THRASH_PTR, THRASH_PTR + 1):
@@ -659,7 +674,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     p.save(out)
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
     top_reg = max([phys(r) for r in set(INPUTS) | set(outputs)] + [in_ptr + 1, 5] + ([LCNT + 1] if loop else []))
-    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'sibling': sibling, 'ownfence': ownfence, 'ownccctl': ownccctl, 'sibccctl': sibccctl, 'sibccctl_bra': sibccctl_bra if sibccctl else None, 'bpath': bpath, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'loop': loop, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0, 'lean': lean, 'hoist': hoist, 'coal': coal, 'outer': outer, 'outer_at': outer_at, 'stride': stride, 'cctl': cctl, 'ias': ias, 'l1t': l1t, 'prewarm': prewarm, 'sectors': sectors, 'bypass': bypass, 'decoy': decoy, 'bypass_first': bypass_first,
+    meta = {'stage': stage, 'remap': remap, 'regmap': P, 'top_reg': top_reg, 'clk': [phys(CLK_START), phys(CLK_END)], 'gt': [phys(GT_START), phys(GT_END)], 'twice': twice, 'sibling': sibling, 'ownfence': ownfence, 'ownccctl': ownccctl, 'delay': delay, 'stream': stream, 'sibccctl': sibccctl, 'sibccctl_bra': sibccctl_bra if sibccctl else None, 'bpath': bpath, 'thrash': thrash, 'sr133': sr133, 'dualgo': dualgo, 'sleepb': sleepb, 'alu': alu, 'slim': slim, 'loop': loop, 'group_len': GLEN, 'smfilter': smfilter, 'gtime': gtime, 'groups': groups, 'clock': clock, 'sync': sync, 'barnops': barnops if sync else 0, 'preclk': preclk, 'regs': regs, 'sha256': sha, 'section': sec[0][2], 'group_index': g0, 'lean': lean, 'hoist': hoist, 'coal': coal, 'outer': outer, 'outer_at': outer_at, 'stride': stride, 'cctl': cctl, 'ias': ias, 'l1t': l1t, 'prewarm': prewarm, 'sectors': sectors, 'bypass': bypass, 'decoy': decoy, 'bypass_first': bypass_first,
             'inputs': INPUTS, 'outputs': outputs, 'in_ptr': in_ptr}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
     used = g0 + GROUP_LEN + 1 + int(clock) + len(outputs) + 2
@@ -681,6 +696,8 @@ if __name__ == '__main__':
     a.add_argument('--ownfence', action='store_true', help='q22 (with --sibling): the TTU warp itself executes MEMBAR.ALL.GPU, ERRBAR, CCTL.IVALL between the sessions (before its spin on flag2)')
     a.add_argument('--ownccctl', action='store_true', help='q22 arm (i) (with --sibling): the TTU warp itself executes one TTUCCTL.IVALL between the sessions (before its spin on flag2); stage 0 a NOP')
     a.add_argument('--sibccctl', action='store_true', help='q22 arm (h), PREPARED NOT RUN (with --sibling --smfilter): the block on SM B has no session; it spins on flag1 and executes one TTUCCTL.IVALL, then stores flag2')
+    a.add_argument('--delay', type=int, default=0, help='q32 (ii) (with --twice --remap): N iterations of a counted ALU loop between the sessions (no loads), the control for --thrash')
+    a.add_argument('--stream', type=int, default=0, help='q32 (ii) (with --twice --remap --sectors 4): KB of ordinary loads (all sectors) from the TTU warp between the sessions, as a loop (multiple of 64)')
     a.add_argument('--sibling', action='store_true', help='q20 (with --twice --remap --clock): between the sessions store flag1 and spin on flag2 (host --sibling SM:KB:PASSES runs a plain block on another SM)')
     a.add_argument('--cctl', action='store_true', help='Interface_7 (with --twice): TTUCCTL.IVALL between the two sessions (stage 1 only; stage 0 has a NOP there)')
     a.add_argument('--twice', action='store_true', help='two full sessions with the same ray; time the second')
@@ -712,5 +729,5 @@ if __name__ == '__main__':
     a.add_argument('--preclk', action='store_true', help='diagnostic clock read into R88:R89 before the barrier')
     a.add_argument('--barnops', type=int, default=8, help='NOPs after the barrier: a warp issues a few instructions past BAR.SYNC before it stalls (8 measured enough at 20 warps)')
     x = a.parse_args()
-    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else '') + ('a%d' % x.alu if x.alu else '') + ('l' if x.slim else '') + ('L%d' % x.loop if x.loop else '') + ('o%ds%d' % (x.outer, x.stride) if x.outer else '') + ('N' if x.lean else '') + ('Nl' if x.lean_ld else '') + ('Ns' if x.lean_st else '') + ('H' if x.hoist else '') + ('C' if x.coal else '') + ('I' if x.ias else '') + ('W%d' % x.prewarm if x.prewarm else '') + ('T%d' % x.l1t if x.l1t else '') + ('n' if x.l1t_nofirst else '') + ('S%d' % x.sectors if x.sectors != 1 else '') + ('Y' if x.bypass else '') + ('D' if x.decoy else '') + ('B' if x.bypass_first else '') + ('F' if x.ownfence else '') + ('K' if x.sibccctl else '') + ('O' if x.ownccctl else ''),
-          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean, x.hoist, x.coal, x.lean_ld, x.lean_st, x.cctl, x.ias, x.prewarm, x.l1t, x.l1t_nofirst, x.sectors, x.bypass, x.decoy, x.bypass_first, x.sibling, x.ownfence, x.sibccctl, x.ownccctl)
+    build(x.stage, x.bin, x.dump, x.out or '%s_s%d%s%s%s' % (x.bin, x.stage, 'c' if x.clock else '', 'b' if x.sync else '', 'r%d' % x.regs if x.regs else '') + ('m%d' % x.max_out if x.max_out != 95 else '') + ('p' if x.preclk else '') + ('n%d' % x.barnops if x.barnops != 8 else '') + ('t' if x.twice else '') + ('k' if x.compact_out else '') + ('f' if x.smfilter else '') + ('g' if x.gtime else '') + ('x' if x.remap else '') + ('h%d' % x.thrash if x.thrash else '') + ('q' if x.sr133 else '') + ('d' if x.dualgo else '') + ('z%d' % x.sleepb if x.sleepb else '') + ('a%d' % x.alu if x.alu else '') + ('l' if x.slim else '') + ('L%d' % x.loop if x.loop else '') + ('o%ds%d' % (x.outer, x.stride) if x.outer else '') + ('N' if x.lean else '') + ('Nl' if x.lean_ld else '') + ('Ns' if x.lean_st else '') + ('H' if x.hoist else '') + ('C' if x.coal else '') + ('I' if x.ias else '') + ('W%d' % x.prewarm if x.prewarm else '') + ('T%d' % x.l1t if x.l1t else '') + ('n' if x.l1t_nofirst else '') + ('S%d' % x.sectors if x.sectors != 1 else '') + ('Y' if x.bypass else '') + ('D' if x.decoy else '') + ('B' if x.bypass_first else '') + ('F' if x.ownfence else '') + ('K' if x.sibccctl else '') + ('O' if x.ownccctl else '') + ('e%d' % x.delay if x.delay else '') + ('M%d' % x.stream if x.stream else ''),
+          x.clock, x.sync, x.regs, x.max_out, x.preclk, x.barnops, x.twice, x.compact_out, x.smfilter, x.gtime, x.remap, x.thrash, x.sr133, x.dualgo, x.sleepb, x.alu, x.slim, x.loop, x.outer, x.stride, x.lean, x.hoist, x.coal, x.lean_ld, x.lean_st, x.cctl, x.ias, x.prewarm, x.l1t, x.l1t_nofirst, x.sectors, x.bypass, x.decoy, x.bypass_first, x.sibling, x.ownfence, x.sibccctl, x.ownccctl, x.delay, x.stream)
