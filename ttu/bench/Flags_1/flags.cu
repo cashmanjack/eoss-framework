@@ -2,6 +2,7 @@
 //   flags PTX OUT.json key=value ...
 //   scene=layers:L[:alt] | ias:K:A|C|D|V|L<n>|R<n>|E|Q (raymiss=1: rays in the boxes, outside the triangle) | soup:N      rflags=<OptixRayFlags bits> rmask=<ray visibility mask> ah=0|1 (any hit program in the hit group) gopaque=0|1 (build time DISABLE_ANYHIT)
 //   nrep=1..3 (traces per raygen in the probe launches) probe=N (probe launches of 32 rays, default 100) big=NB (rays of the big launches, default 262144) nbig=N (timed big launches, default 20)
+//   dump=PREFIX (soup: write PREFIX.gas, PREFIX.tris, PREFIX.rays (Ray8 x big) and stop: CPU replay input, no launch; refuses to overwrite)
 //   tmax=R (soup: ray tmax) bigonly=1 (skip the probe launches, 2 big launches only: for ncu)
 #include <cuda_runtime.h>
 #include <optix.h>
@@ -25,6 +26,7 @@
 struct Tri { float3 a, b, c; };
 static std::string read_file(const char *p) { std::ifstream f(p); if (!f) { fprintf(stderr, "cannot read %s\n", p); exit(2); } std::stringstream s; s << f.rdbuf(); return s.str(); }
 
+static size_t g_gas_bytes = 0;
 static OptixTraversableHandle build_gas(OptixDeviceContext ctx, const std::vector<Tri> &v, unsigned gflag, CUdeviceptr *gas_out)
 {
     CUdeviceptr dv; CK(cudaMalloc((void **)&dv, v.size() * sizeof(Tri))); CK(cudaMemcpy((void *)dv, v.data(), v.size() * sizeof(Tri), cudaMemcpyHostToDevice));
@@ -35,7 +37,7 @@ static OptixTraversableHandle build_gas(OptixDeviceContext ctx, const std::vecto
     OptixAccelBufferSizes bs{}; OX(optixAccelComputeMemoryUsage(ctx, &ao, &bi, 1, &bs));
     CUdeviceptr tmp, gas; CK(cudaMalloc((void **)&tmp, bs.tempSizeInBytes)); CK(cudaMalloc((void **)&gas, bs.outputSizeInBytes));
     OptixTraversableHandle h; OX(optixAccelBuild(ctx, 0, &ao, &bi, 1, tmp, bs.tempSizeInBytes, gas, bs.outputSizeInBytes, &h, nullptr, 0)); CK(cudaDeviceSynchronize()); CK(cudaFree((void *)tmp));
-    *gas_out = gas; return h;
+    *gas_out = gas; g_gas_bytes = bs.outputSizeInBytes; return h;
 }
 
 int main(int argc, char **argv)
@@ -99,6 +101,11 @@ int main(int argc, char **argv)
         for (unsigned i = 0; i < NB; ++i) { float3 d{N(gr), N(gr), N(gr)}; const float l = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z); big.push_back(Ray8{{U(gr), U(gr), U(gr)}, 0.f, {d.x / l, d.y / l, d.z / l}, tmaxv}); }
         warp.assign(big.begin(), big.begin() + NW);
     } else { fprintf(stderr, "scene?\n"); return 2; }
+    if (kv.count("dump")) {   // replay input (model/predictions_tmax_replay.md): the GAS as built, the triangles, the rays; then stop
+        const std::string pre = kv["dump"]; auto w = [&](const std::string &e, const void *p, size_t n) { FILE *f = fopen((pre + e).c_str(), "wbx"); if (!f) { fprintf(stderr, "refuse to overwrite %s\n", (pre + e).c_str()); exit(2); } fwrite(p, 1, n, f); fclose(f); };
+        std::vector<char> b(g_gas_bytes); CK(cudaMemcpy(b.data(), (void *)gas, b.size(), cudaMemcpyDeviceToHost));
+        w(".gas", b.data(), b.size()); w(".tris", v.data(), v.size() * sizeof(Tri)); w(".rays", big.data(), big.size() * sizeof(Ray8)); printf("dumped %s (%zu gas bytes)\n", pre.c_str(), g_gas_bytes); return 0;
+    }
     OptixModuleCompileOptions mo{}; OptixPipelineCompileOptions po{};
     po.traversableGraphFlags = instancing ? OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING : OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
     po.numPayloadValues = 4; po.numAttributeValues = 2; po.pipelineLaunchParamsVariableName = "params"; po.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE;
