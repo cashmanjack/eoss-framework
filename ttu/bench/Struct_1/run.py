@@ -6,13 +6,13 @@ import gpucfg
 CFG = gpucfg.load(); ENV = CFG.env()
 W, TAG = sys.argv[1], sys.argv[2]; rest = sys.argv[3:]; DO_NCU = bool(rest) and rest[0] == 'ncu'
 if DO_NCU: rest = rest[1:]
-TS = time.strftime('%Y%m%dT%H%M%S'); D = '/dev/shm/st1'; os.makedirs(W, exist_ok=True)
+TS = time.strftime('%Y%m%dT%H%M%S'); D = '/dev/shm/st1'; os.makedirs(W, exist_ok=True); os.makedirs(D + '/dumps', exist_ok=True)
 METRICS = 'l1tex__t_sectors.sum,l1tex__t_sectors_pipe_lsu.sum,l1tex__m_xbar2l1tex_read_sectors.sum,smsp__thread_inst_executed.sum,smsp__inst_executed.sum,gpu__time_duration.sum'
 base = os.path.join(W, '%s_%s' % (TAG, TS))
 if any(os.path.exists(base + e) for e in ('.json', '.ncu.csv')): sys.exit('refuse to overwrite ' + base)
 CFG.check_idle()
 args = []
-for a in rest: args.append(a.replace('@BASE', base))
+for a in rest: args.append(a.replace('@BASE', base).replace('@DUMP', '/dev/shm/st1/dumps/%s_%s' % (TAG, TS)))
 p = subprocess.run(['timeout', '-k', '2', '120', D + '/struct', D + '/struct_dev.ptx', base + '.json'] + args, env=ENV, capture_output=True, text=True)
 print(TAG, 'rc', p.returncode, p.stdout.strip()[-80:], p.stderr[-300:], flush=True)
 if p.returncode: sys.exit('STOP')
