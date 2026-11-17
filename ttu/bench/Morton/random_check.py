@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(ROOT, 'model')); sys.path.insert(0, HERE); sys.p
 import performance_model as PM, run_model as RM  # noqa: E402
 import morton_run as mr  # noqa: E402
 M = mr.M; RP = '/dev/shm/rp'; CK = '/dev/shm/rt/ck'
-NSM, L2_MB = 60, 48.0
+NSM, L2_MB = int(os.environ.get('RC_NSM', 60)), float(os.environ.get('RC_L2_MB', 48.0))   # defaults: the 4070 Ti; tethys 4090: RC_NSM=128 RC_L2_MB=72
 
 
 def scene_box(scene):
