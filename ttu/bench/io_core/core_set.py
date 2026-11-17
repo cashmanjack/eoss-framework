@@ -63,7 +63,9 @@ def t_chase(work):
     p = sh([os.path.expanduser('~/opt/cuda-12.8/bin/nvcc'), '-O2', '-arch=sm_89', '-o', exe, os.path.join(HERE, '..', 'mem_latency', 'chase.cu')])
     if p.returncode: sys.exit(p.stderr)
     cases = [(16, 'ca'), (64, 'ca'), (1024, 'ca'), (4096, 'ca'), (16384, 'ca'), (16, 'cg'), (16, 'cross'), (64, 'cross'),
-             (24576, 'ca'), (32768, 'ca'), (40960, 'ca'), (49152, 'ca'), (57344, 'ca'), (65536, 'ca'), (98304, 'ca'), (131072, 'ca'), (524288, 'ca'),
+             (24576, 'ca'), (32768, 'ca'), (40960, 'ca'), (49152, 'ca'), (57344, 'ca'), (65536, 'ca'),
+             (69632, 'ca'), (71680, 'ca'), (73728, 'ca'), (75776, 'ca'), (77824, 'ca'),   # 68 to 76 MB: the 72 MB L2 ramp of the 4090 (predictions_4090.md item 1)
+             (98304, 'ca'), (131072, 'ca'), (524288, 'ca'),
              (64, 'cold'), (4096, 'cold')]
     rows = []
     for kb, mode in cases:

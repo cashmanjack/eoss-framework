@@ -8,5 +8,6 @@
  },
  "cufunction_offset": {"580": "0x68"},
  "validated_drivers": ["580.178.04", "580.196.07"],
- "validated_note": {"580.196.07": "triton 2026-11-16: live OptiX code (memdump) byte identical to 580.178.04 for the GAS traversal group and the IAS prelude, group and following code; system libnvoptix matches the driver"}
+ "validated_note": {"580.178.04": "tethys 2026-11-16 (RTX 4090, system libnvoptix absent, extracted copy used): memdump of our own OptiX launch, GAS traversal group, its ISETP and all code from fnaddr-0x10000 to fnaddr-0xdca0 byte identical to the earlier dump; already validated on io and triton",
+  "580.196.07": "triton 2026-11-16: live OptiX code (memdump) byte identical to 580.178.04 for the GAS traversal group and the IAS prelude, group and following code; system libnvoptix matches the driver"}
 }
