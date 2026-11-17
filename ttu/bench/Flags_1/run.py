@@ -1,6 +1,6 @@
 """Flags_1 runner (predictions: model/predictions_flags.md). OptiX launches only, no TTU code.
 
-    run.py WORK STEP     STEP: t1 | t2 | t3 | t4 | t5 | all     (WORK = private raw data directory, e.g. notes/flags1)
+    run.py WORK STEP     STEP: t1 | t2 | t3 | t4 | t5 | t6 | all     (WORK = private raw data directory, e.g. notes/flags1)
 
 Per configuration: (a) the app with probe launches (32 rays, 100 launches, 3 traces each) and 20 timed launches of 262,144 rays (/dev/shm/flags1,
 /dev/shm/flags1_dev.ptx), (b) the same configuration with bigonly=1 under ncu (kernel optixLaunch, 2 launches, the second is read).
@@ -31,6 +31,7 @@ CONFIGS = {
            ('t3_cull_both', 'scene=layers:16:alt gopaque=1 rflags=48')],
     't4': [('t4_C_one_instance', 'scene=ias:64:C gopaque=1 rmask=2'), ('t4_D_none_masked', 'scene=ias:64:D gopaque=1 rmask=2'), ('t4_A_63_masked', 'scene=ias:64:A gopaque=1 rmask=2'),
            ('t4_B_nearest_visible', 'scene=ias:64:A gopaque=1 rmask=255')],
+    't6': [('t6_%s' % m, 'scene=ias:256:%s raymiss=1 gopaque=1 rmask=1' % m) for m in ('V', 'R16', 'L16', 'E', 'Q')],
     't5': [('t5_tmax_%g' % r, 'scene=soup:100000 gopaque=1 tmax=%g' % r) for r in (0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 1e16)],
 }
 

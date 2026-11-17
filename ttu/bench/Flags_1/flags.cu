@@ -1,6 +1,6 @@
 // Flags_1 host (OptiX only, no TTU code). Predictions: model/predictions_flags.md.
 //   flags PTX OUT.json key=value ...
-//   scene=layers:L[:alt] | ias:K:A|C|D | soup:N      rflags=<OptixRayFlags bits> rmask=<ray visibility mask> ah=0|1 (any hit program in the hit group) gopaque=0|1 (build time DISABLE_ANYHIT)
+//   scene=layers:L[:alt] | ias:K:A|C|D|V|L<n>|R<n>|E|Q (raymiss=1: rays in the boxes, outside the triangle) | soup:N      rflags=<OptixRayFlags bits> rmask=<ray visibility mask> ah=0|1 (any hit program in the hit group) gopaque=0|1 (build time DISABLE_ANYHIT)
 //   nrep=1..3 (traces per raygen in the probe launches) probe=N (probe launches of 32 rays, default 100) big=NB (rays of the big launches, default 262144) nbig=N (timed big launches, default 20)
 //   tmax=R (soup: ray tmax) bigonly=1 (skip the probe launches, 2 big launches only: for ncu)
 #include <cuda_runtime.h>
@@ -67,10 +67,19 @@ int main(int argc, char **argv)
         v.push_back(Tri{{-4.f, -4.f, 0.f}, {4.f, -4.f, 0.f}, {0.f, 4.f, 0.f}});
         const OptixTraversableHandle hg = build_gas(ctx, v, gflag, &gas);
         std::vector<OptixInstance> inst; const int k0 = (!strcmp(mode, "C")) ? K - 1 : 0;
+        const int modeN = atoi(mode + 1);   // V, L<n>, R<n>, E, Q: lone masked / removed instances (masklone predictions): every n-th (k % n == n/2), E: odd masked, Q: even only
+        const char mc = mode[0];
         for (int k = k0; k < K; ++k) {
+            if (mc == 'R' && k % modeN == modeN / 2) continue;
+            if (mc == 'Q' && (k & 1)) continue;
             OptixInstance I{}; const float m[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 2.f * k}; memcpy(I.transform, m, 48);
             I.instanceId = 100 + k; I.sbtOffset = 0; I.flags = OPTIX_INSTANCE_FLAG_NONE; I.traversableHandle = hg;
-            I.visibilityMask = (!strcmp(mode, "A") && k < K - 1) ? 1 : 2; inst.push_back(I);
+            if (mc == 'A') I.visibilityMask = (k < K - 1) ? 1 : 2;
+            else if (mc == 'V' || mc == 'R' || mc == 'Q') I.visibilityMask = 1;
+            else if (mc == 'L') I.visibilityMask = (k % modeN == modeN / 2) ? 2 : 1;
+            else if (mc == 'E') I.visibilityMask = (k & 1) ? 2 : 1;
+            else I.visibilityMask = 2;   // C, D
+            inst.push_back(I);
         }
         CUdeviceptr di; CK(cudaMalloc((void **)&di, inst.size() * sizeof(OptixInstance))); CK(cudaMemcpy((void *)di, inst.data(), inst.size() * sizeof(OptixInstance), cudaMemcpyHostToDevice));
         OptixBuildInput ib{}; ib.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES; ib.instanceArray.instances = di; ib.instanceArray.numInstances = (unsigned)inst.size();
@@ -78,8 +87,9 @@ int main(int argc, char **argv)
         OptixAccelBufferSizes is{}; OX(optixAccelComputeMemoryUsage(ctx, &ao, &ib, 1, &is));
         CUdeviceptr itmp, ias; CK(cudaMalloc((void **)&itmp, is.tempSizeInBytes)); CK(cudaMalloc((void **)&ias, is.outputSizeInBytes));
         OX(optixAccelBuild(ctx, 0, &ao, &ib, 1, itmp, is.tempSizeInBytes, ias, is.outputSizeInBytes, &root, nullptr, 0)); CK(cudaDeviceSynchronize());
-        for (unsigned i = 0; i < NB; ++i) { Ray8 r{{0.5f * U(g), 0.5f * U(g), -1.f}, 0.f, {0.f, 0.f, 1.f}, tmaxv}; big.push_back(r); }
-        warp.assign(NW, Ray8{{0.1f, 0.05f, -1.f}, 0.f, {0.f, 0.f, 1.f}, tmaxv});
+        const bool rmiss = geti("raymiss", 0) != 0;   // origin near (3.5, 3.5): inside every instance's box, outside the triangle
+        for (unsigned i = 0; i < NB; ++i) { Ray8 r{{rmiss ? 3.5f + 0.3f * U(g) : 0.5f * U(g), rmiss ? 3.5f + 0.3f * U(g) : 0.5f * U(g), -1.f}, 0.f, {0.f, 0.f, 1.f}, tmaxv}; big.push_back(r); }
+        warp.assign(NW, Ray8{{rmiss ? 3.5f : 0.1f, rmiss ? 3.5f : 0.05f, -1.f}, 0.f, {0.f, 0.f, 1.f}, tmaxv});
     } else if (sscanf(scene.c_str(), "soup:%ld", &soupn) == 1) {   // the soup of setup3 / BVH_4 (same generator); random rays, tmax = tmaxv
         strcpy(kind, "soup");
         const float e = 3.f / std::cbrt((float)soupn);
