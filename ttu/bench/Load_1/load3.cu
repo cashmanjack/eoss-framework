@@ -1,5 +1,5 @@
 // Load_1 host (OptiX only, no TTU code of our own): loaded point query test.
-//   load3 PTX DATASET NQ REPEAT IAS   Mochi dataset (Morton order as Mochi sorts it), GAS with the update flag only (as Mochi), optional instance level; prints one JSON line.
+//   load3 PTX DATASET NQ REPEAT IAS [SEQ WARM DUMPDIR]  SEQ 0 back to back, 1 update kernel before each launch, 2 update kernel + refit of GAS and instance group (+ host sync between, as Mochi);    Mochi dataset (Morton order as Mochi sorts it), GAS with the update flag only (as Mochi), optional instance level; prints one JSON line.
 // Lattice 50 x 50 x 40 = 100,000 disjoint boxes (half width 0.4, spacing 1), custom primitives; query i = centre of particle order[i].
 #include <cuda_runtime.h>
 #include <optix.h>
@@ -24,11 +24,15 @@ struct Params { const Particle *particles; const float *boxes; float3 *acc; unsi
 static std::string read_file(const char *p) { std::ifstream f(p); if (!f) { fprintf(stderr, "cannot read %s\n", p); exit(2); } std::stringstream s; s << f.rdbuf(); return s.str(); }
 
 
+__global__ void upd(Particle *p, float3 *acc, float dt, int n) {   // Mochi's update kernel traffic: read particle and force, write particle, clear force (values unchanged: velocity 0)
+    int i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= n) return; Particle q = p[i]; float3 a = acc[i]; q.velocity.x += 0.f * a.x * dt; q.center.x += q.velocity.x * dt; q.center.y += q.velocity.y * dt; q.center.z += q.velocity.z * dt; p[i] = q; acc[i] = make_float3(0.f, 0.f, 0.f); }
+__global__ void bnd(const Particle *p, float *bx, int n) {   // Mochi's bounds program: centre -/+ 2 radius
+    int i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= n) return; Particle q = p[i]; float r = q.radius; bx[6 * i] = q.center.x - 2 * r; bx[6 * i + 1] = q.center.y - 2 * r; bx[6 * i + 2] = q.center.z - 2 * r; bx[6 * i + 3] = q.center.x + 2 * r; bx[6 * i + 4] = q.center.y + 2 * r; bx[6 * i + 5] = q.center.z + 2 * r; }
 static unsigned expandBits(unsigned v) { v = (v * 0x00010001u) & 0xFF0000FFu; v = (v * 0x00000101u) & 0x0F00F00Fu; v = (v * 0x00000011u) & 0xC30C30C3u; v = (v * 0x00000005u) & 0x49249249u; return v; }
 int main(int argc, char **argv)
 {
     if (argc < 6) { fprintf(stderr, "usage: load3 PTX DATASET NQ REPEAT IAS\n"); return 2; }
-    const unsigned NQ = (unsigned)atoi(argv[3]); const int repeat = atoi(argv[4]), ias = atoi(argv[5]);
+    const unsigned NQ = (unsigned)atoi(argv[3]); const int repeat = atoi(argv[4]), ias = atoi(argv[5]), seq = argc > 6 ? atoi(argv[6]) : 0, warm = argc > 7 ? atoi(argv[7]) : 0; const char *dumpdir = argc > 8 ? argv[8] : nullptr;
     if (NQ % 32 || NQ > 100000) { fprintf(stderr, "NQ multiple of 32 and at most 100000\n"); return 2; }
     std::vector<Particle> P; std::vector<std::pair<unsigned, unsigned>> mc;   // as Mochi: Morton code from x*1024 clamped, ids popped from a max priority queue (largest code first)
     { FILE *f = fopen(argv[2], "r"); if (!f) { fprintf(stderr, "no dataset\n"); return 2; } float v[5]; while (P.size() < 100000 && fscanf(f, "%f %f %f %f %f", v, v + 1, v + 2, v + 3, v + 4) == 5) { unsigned id = (unsigned)P.size(); P.push_back({{v[0], v[1], v[2]}, {0.f, 0.f, 0.f}, v[3], v[4]});
@@ -41,12 +45,13 @@ int main(int argc, char **argv)
     CK(cudaMalloc((void **)&dacc, NP * 12)); CK(cudaMemset((void *)dacc, 0, NP * 12)); const unsigned NW = NQ / 32; CK(cudaMalloc((void **)&dcw, NW * 4));
     unsigned fl = OPTIX_GEOMETRY_FLAG_NONE; OptixBuildInput bi{}; bi.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES; bi.customPrimitiveArray.aabbBuffers = &db; bi.customPrimitiveArray.numPrimitives = NP; bi.customPrimitiveArray.strideInBytes = 24; bi.customPrimitiveArray.flags = &fl; bi.customPrimitiveArray.numSbtRecords = 1;
     OptixAccelBuildOptions ao{}; ao.buildFlags = OPTIX_BUILD_FLAG_ALLOW_UPDATE; ao.operation = OPTIX_BUILD_OPERATION_BUILD; OptixAccelBufferSizes bs{}; OX(optixAccelComputeMemoryUsage(ctx, &ao, &bi, 1, &bs));
-    CUdeviceptr tmp, gas; CK(cudaMalloc((void **)&tmp, bs.tempSizeInBytes)); CK(cudaMalloc((void **)&gas, bs.outputSizeInBytes)); OptixTraversableHandle hG, hW; OX(optixAccelBuild(ctx, 0, &ao, &bi, 1, tmp, bs.tempSizeInBytes, gas, bs.outputSizeInBytes, &hG, nullptr, 0)); hW = hG;
+    CUdeviceptr tmp, gas; const size_t tmpsz = std::max(bs.tempSizeInBytes, bs.tempUpdateSizeInBytes); CK(cudaMalloc((void **)&tmp, tmpsz)); CK(cudaMalloc((void **)&gas, bs.outputSizeInBytes)); OptixTraversableHandle hG, hW; OX(optixAccelBuild(ctx, 0, &ao, &bi, 1, tmp, bs.tempSizeInBytes, gas, bs.outputSizeInBytes, &hG, nullptr, 0)); hW = hG;
+    OptixBuildInput ib{}; CUdeviceptr di = 0, ias_ = 0, tmp2 = 0; size_t tmp2sz = 0, ias_sz = 0;
     if (ias) {   // as OWL: one instance (identity transform) of the GAS, built with the update flag
         OptixInstance inst{}; const float id[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}; memcpy(inst.transform, id, sizeof id); inst.instanceId = 0; inst.sbtOffset = 0; inst.visibilityMask = 255; inst.flags = OPTIX_INSTANCE_FLAG_NONE; inst.traversableHandle = hG;
-        CUdeviceptr di; CK(cudaMalloc((void **)&di, sizeof inst)); CK(cudaMemcpy((void *)di, &inst, sizeof inst, cudaMemcpyHostToDevice));
-        OptixBuildInput ib{}; ib.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES; ib.instanceArray.instances = di; ib.instanceArray.numInstances = 1; OptixAccelBufferSizes bs2{}; OX(optixAccelComputeMemoryUsage(ctx, &ao, &ib, 1, &bs2));
-        CUdeviceptr tmp2, ias_; CK(cudaMalloc((void **)&tmp2, bs2.tempSizeInBytes)); CK(cudaMalloc((void **)&ias_, bs2.outputSizeInBytes)); OX(optixAccelBuild(ctx, 0, &ao, &ib, 1, tmp2, bs2.tempSizeInBytes, ias_, bs2.outputSizeInBytes, &hW, nullptr, 0)); }
+        CK(cudaMalloc((void **)&di, sizeof inst)); CK(cudaMemcpy((void *)di, &inst, sizeof inst, cudaMemcpyHostToDevice));
+        ib.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES; ib.instanceArray.instances = di; ib.instanceArray.numInstances = 1; OptixAccelBufferSizes bs2{}; OX(optixAccelComputeMemoryUsage(ctx, &ao, &ib, 1, &bs2));
+        tmp2sz = std::max(bs2.tempSizeInBytes, bs2.tempUpdateSizeInBytes); ias_sz = bs2.outputSizeInBytes; CK(cudaMalloc((void **)&tmp2, tmp2sz)); CK(cudaMalloc((void **)&ias_, bs2.outputSizeInBytes)); OX(optixAccelBuild(ctx, 0, &ao, &ib, 1, tmp2, bs2.tempSizeInBytes, ias_, bs2.outputSizeInBytes, &hW, nullptr, 0)); }
     CK(cudaDeviceSynchronize());
     OptixModuleCompileOptions mo{}; OptixPipelineCompileOptions po{}; po.traversableGraphFlags = ias ? OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING : OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS; po.numPayloadValues = 2; po.numAttributeValues = 0;
     po.pipelineLaunchParamsVariableName = "params"; po.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_CUSTOM;
@@ -61,13 +66,22 @@ int main(int argc, char **argv)
     Params prm{}; prm.n = NQ; prm.particles = (const Particle *)dpt; prm.boxes = (const float *)db; prm.acc = (float3 *)dacc; prm.callw = (unsigned *)dcw; prm.handle = hW; prm.stiffness = 8e3f; prm.restitution = 0.5f * 0 + 2.f * (1.f / sqrtf(1.f + (float)((M_PI / std::log(0.5)) * (M_PI / std::log(0.5)))));
     CK(cudaMalloc((void **)&prm.rec, NW * sizeof(Rec))); CUdeviceptr dprm; CK(cudaMalloc((void **)&dprm, sizeof prm)); CK(cudaMemcpy((void *)dprm, &prm, sizeof prm, cudaMemcpyHostToDevice));
     OptixShaderBindingTable sbt{}; sbt.raygenRecord = drec; sbt.missRecordBase = drec + sizeof(SR); sbt.missRecordStrideInBytes = sizeof(SR); sbt.missRecordCount = 1; sbt.hitgroupRecordBase = drec + 2 * sizeof(SR); sbt.hitgroupRecordStrideInBytes = sizeof(SR); sbt.hitgroupRecordCount = 1;
-    std::vector<Rec> hr(NW); printf("{\"nq\":%u,\"ias\":%d,\"launches\":[", NQ, ias);
-    for (int k = -1; k < repeat; ++k) {
-        if (k == 0) for (int w = 0; w < 2; ++w) { CK(cudaMemset((void *)dcw, 0, NW * 4)); OX(optixLaunch(pipe, 0, dprm, sizeof prm, &sbt, NQ, 1, 1)); CK(cudaDeviceSynchronize()); }
-        CK(cudaMemset((void *)dcw, 0, NW * 4)); OX(optixLaunch(pipe, 0, dprm, sizeof prm, &sbt, NQ, 1, 1)); CK(cudaDeviceSynchronize());
+    std::vector<Rec> hr(NW); printf("{\"nq\":%u,\"ias\":%d,\"seq\":%d,\"warm\":%d,\"launches\":[", NQ, ias, seq, warm);
+    auto sequence = [&]() {
+        if (seq >= 1) { upd<<<(NP + 255) / 256, 256>>>((Particle *)dpt, (float3 *)dacc, 1e-4f, NP); CK(cudaDeviceSynchronize()); }
+        if (seq >= 2) {
+            bnd<<<(NP + 255) / 256, 256>>>((const Particle *)dpt, (float *)db, NP); CK(cudaDeviceSynchronize());
+            OptixAccelBuildOptions up = ao; up.operation = OPTIX_BUILD_OPERATION_UPDATE; OptixTraversableHandle hh = hG; OX(optixAccelBuild(ctx, 0, &up, &bi, 1, tmp, tmpsz, gas, bs.outputSizeInBytes, &hh, nullptr, 0)); CK(cudaDeviceSynchronize());
+            if (ias) { OptixTraversableHandle h2 = hW; OX(optixAccelBuild(ctx, 0, &up, &ib, 1, tmp2, tmp2sz, ias_, ias_sz, &h2, nullptr, 0)); CK(cudaDeviceSynchronize()); }
+        } };
+    for (int k = -warm - 1; k < repeat; ++k) {   // k < -1: warmup iterations (Mochi's 200), k = -1: first timed (cold flag), then repeat timed
+        sequence(); CK(cudaMemset((void *)dcw, 0, NW * 4)); OX(optixLaunch(pipe, 0, dprm, sizeof prm, &sbt, NQ, 1, 1)); CK(cudaDeviceSynchronize());
+        if (k < -1) continue; if (k == 0 && warm == 0) for (int w = 0; w < 2; ++w) { sequence(); CK(cudaMemset((void *)dcw, 0, NW * 4)); OX(optixLaunch(pipe, 0, dprm, sizeof prm, &sbt, NQ, 1, 1)); CK(cudaDeviceSynchronize()); }
         CK(cudaMemcpy(hr.data(), prm.rec, NW * sizeof(Rec), cudaMemcpyDeviceToHost));
-        unsigned long long gmin = ~0ull, gmax = 0, calls = 0; double cyc = 0; for (unsigned w = 0; w < NW; ++w) { gmin = std::min(gmin, hr[w].g0); gmax = std::max(gmax, hr[w].g1); calls += hr[w].calls; cyc += (double)(hr[w].c1 - hr[w].c0); }
-        printf("%s{\"cold\":%d,\"span_ns\":%llu,\"calls\":%llu,\"warp_cyc_mean\":%.1f}", k > -1 ? "," : "", k == -1, gmax - gmin, calls, cyc / NW);
+        unsigned long long gmin = ~0ull, gmax = 0, calls = 0; double cyc = 0; std::vector<double> wc(NW); for (unsigned w = 0; w < NW; ++w) { gmin = std::min(gmin, hr[w].g0); gmax = std::max(gmax, hr[w].g1); calls += hr[w].calls; wc[w] = (double)(hr[w].c1 - hr[w].c0); cyc += wc[w]; } std::sort(wc.begin(), wc.end());
+        printf("%s{\"cold\":%d,\"span_ns\":%llu,\"calls\":%llu,\"warp_cyc_mean\":%.1f,\"wc_p10\":%.0f,\"wc_med\":%.0f,\"wc_p90\":%.0f,\"wc_max\":%.0f}", k > -1 ? "," : "", k == -1, gmax - gmin, calls, cyc / NW, wc[NW / 10], wc[NW / 2], wc[NW * 9 / 10], wc[NW - 1]);
     }
+    if (dumpdir) { size_t sz = bs.outputSizeInBytes; std::vector<char> hg(sz); CK(cudaMemcpy(hg.data(), (void *)gas, sz, cudaMemcpyDeviceToHost)); char fn[512]; snprintf(fn, 512, "%s/gas_f00.bin", dumpdir); FILE *fo = fopen(fn, "wbx"); if (!fo) { perror(fn); return 5; } fwrite(hg.data(), 1, sz, fo); fclose(fo);
+        std::vector<Particle> hp(NP); CK(cudaMemcpy(hp.data(), (void *)dpt, NP * sizeof(Particle), cudaMemcpyDeviceToHost)); snprintf(fn, 512, "%s/particles_f00.bin", dumpdir); fo = fopen(fn, "wbx"); if (!fo) { perror(fn); return 5; } fwrite(hp.data(), sizeof(Particle), NP, fo); fclose(fo); }
     printf("]}\n"); return 0;
 }
