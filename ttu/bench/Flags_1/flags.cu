@@ -3,6 +3,7 @@
 //   scene=layers:L[:alt] | ias:K:A|C|D|V|L<n>|R<n>|E|Q (raymiss=1: rays in the boxes, outside the triangle) | soup:N      rflags=<OptixRayFlags bits> rmask=<ray visibility mask> ah=0|1 (any hit program in the hit group) gopaque=0|1 (build time DISABLE_ANYHIT)
 //   nrep=1..3 (traces per raygen in the probe launches) probe=N (probe launches of 32 rays, default 100) big=NB (rays of the big launches, default 262144) nbig=N (timed big launches, default 20)
 //   dump=PREFIX (soup: write PREFIX.gas, PREFIX.tris, PREFIX.rays (Ray8 x big) and stop: CPU replay input, no launch; refuses to overwrite)
+//   dumpres=FILE (write the per ray Out records of the last big launch; refuses to overwrite)
 //   tmax=R (soup: ray tmax) bigonly=1 (skip the probe launches, 2 big launches only: for ncu)
 #include <cuda_runtime.h>
 #include <optix.h>
@@ -62,8 +63,9 @@ int main(int argc, char **argv)
         std::vector<int> perm(L); std::iota(perm.begin(), perm.end(), 0); std::shuffle(perm.begin(), perm.end(), g);
         for (int k = 0; k < L; ++k) { const float z = 0.1f * perm[k]; Tri t{{-4.f, -4.f, z}, {4.f, -4.f, z}, {0.f, 4.f, z}}; if (alt && (perm[k] & 1)) std::swap(t.b, t.c); v.push_back(t); if (perm[k] == 0) nearest_prim = k; }
         root = build_gas(ctx, v, gflag, &gas);
-        for (unsigned i = 0; i < NB; ++i) { Ray8 r{{0.5f * U(g), 0.5f * U(g), -1.f}, 0.f, {0.f, 0.f, 1.f}, tmaxv}; big.push_back(r); }
-        warp.assign(NW, Ray8{{0.1f, 0.05f, -1.f}, 0.f, {0.f, 0.f, 1.f}, tmaxv});
+        const bool flip = geti("flip", 0) != 0;   // flip=1 (Flags_2 comparison): rays from z = +1 going -z (the other face of every plane)
+        for (unsigned i = 0; i < NB; ++i) { Ray8 r{{0.5f * U(g), 0.5f * U(g), flip ? 1.f : -1.f}, 0.f, {0.f, 0.f, flip ? -1.f : 1.f}, tmaxv}; big.push_back(r); }
+        warp.assign(NW, Ray8{{0.1f, 0.05f, flip ? 1.f : -1.f}, 0.f, {0.f, 0.f, flip ? -1.f : 1.f}, tmaxv});
     } else if (sscanf(scene.c_str(), "ias:%d:%7s", &K, mode) == 2) {   // K instances of one big triangle at z = 2k; A: masks 1 (k < K-1), 2 (last); D: all masks 2; C: the last instance only (mask 2)
         strcpy(kind, "ias"); instancing = true;
         v.push_back(Tri{{-4.f, -4.f, 0.f}, {4.f, -4.f, 0.f}, {0.f, 4.f, 0.f}});
@@ -157,6 +159,7 @@ int main(int argc, char **argv)
         std::vector<Out> res; std::vector<float> ms;
         launch_set(big, false, 1, res, nullptr, &ms, bigonly ? 1 : nbigl);
         double hit = 0, ah_ = 0, nearest = 0; for (const Out &o : res) { hit += o.hit; ah_ += o.ah; nearest += (o.hit && (int)o.prim == nearest_prim); }
+        if (kv.count("dumpres")) { FILE *rf = fopen(kv["dumpres"].c_str(), "wbx"); if (!rf) { fprintf(stderr, "refuse to overwrite %s\n", kv["dumpres"].c_str()); return 2; } fwrite(res.data(), sizeof(Out), res.size(), rf); fclose(rf); }   // per ray Out (hit, tbits, prim, ah, front, inst, 0, 0) of the last big launch
         fprintf(jf, " \"big_n\": %zu, \"big_hit_frac\": %.6f, \"big_ah_mean\": %.4f, \"big_nearest_frac\": %.6f, \"big_ms\": [", res.size(), hit / res.size(), ah_ / res.size(), nearest / res.size());
         for (size_t k = 0; k < ms.size(); ++k) fprintf(jf, "%s%.6f", k ? "," : "", ms[k]);
         fprintf(jf, "]}\n");
