@@ -11,12 +11,12 @@ Classes (per non exact query, first that applies):
 Usage: python3 check_tk_exact.py STAMP"""
 import sys, numpy as np
 from scipy.spatial import cKDTree
-D = '/dev/shm/pw/'; K = 5; ts = sys.argv[1]
+D = '/dev/shm/pw/'; K = 5; ts = sys.argv[1]; PRE = sys.argv[2] if len(sys.argv) > 2 else 'nb2'
 dt = np.dtype([('ind', '<i4'), ('dist', '<f4'), ('nn', '<i4'), ('pad', '<i4'), ('isect', '<i8')])
 def load(f, n): return np.array(open(D + 'data/' + f).read().replace(',', ' ').split(), dtype=np.float64).reshape(-1, 3)[:n]
 out = []
 for nm, f, n in (('road', '3droad.csv', 434874), ('uni1m', 'uni1m.csv', 1000000), ('porto1m', 'porto1m.csv', 1000000)):
-    x = np.fromfile(D + 'nb2_%s_fixed_%s.bin' % (nm, ts), dt).reshape(n, K)
+    x = np.fromfile(D + PRE + '_%s_fixed_%s.bin' % (nm, ts), dt).reshape(n, K)
     p = load(f, n).astype(np.float32).astype(np.float64); t = cKDTree(p); d0, t0 = t.query(p, k=K + 1)
     selfm = (t0 == np.arange(n)[:, None]); selfm[~selfm.any(axis=1), -1] = True  # drop self by index (duplicates: self need not be column 0); if absent drop the last
     keep = ~selfm; ti = t0[keep].reshape(n, K); d = d0[keep].reshape(n, K)

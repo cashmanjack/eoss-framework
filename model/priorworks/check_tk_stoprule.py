@@ -37,6 +37,9 @@ for nm, f, n, r0 in (('road', '3droad.csv', 434874, 2.745e-05), ('uni1m', 'uni1m
     good = (np.abs(pred - real) <= 1e-6 * np.maximum(real, 1e-30)).all(axis=1)
     print('## %s n %d: rounds %d, query stop round counts %s' % (nm, n, len(rounds), np.bincount(stop[stop >= 0]).tolist()))
     print('non exact (rel 1e-6 vs exact) %d; simulation matches the dumped list in %d of %d queries (%.4f percent); among non exact: matches %d of %d; among exact: matches %d of %d; unresolved %d' % (nonex.sum(), good.sum(), n, 100.0 * good.mean(), (good & nonex).sum(), nonex.sum(), (good & ~nonex).sum(), (~nonex).sum(), fail))
+    simne = (np.abs(pred - d) > 1e-6 * np.maximum(d, 1e-30)).any(axis=1); print('cube stop rule simulation itself is non exact (rel 1e-6 vs the true kNN) in %d queries (%.2f percent); program %d (%.2f percent); both non exact: %d; program non exact and simulation exact: %d; simulation non exact and program exact: %d' % (simne.sum(), 100.0 * simne.mean(), nonex.sum(), 100.0 * nonex.mean(), (simne & nonex).sum(), (nonex & ~simne).sum(), (simne & ~nonex).sum()))
+    rs = np.array(rounds)[stop]; inside = d[:, -1] <= rs
+    print('true k th distance inside the stop round radius (the cube holds the whole k th ball, the rule is guaranteed exact): %d queries, program non exact among them %d (%.3f percent); k th ball NOT inside the radius: %d queries, program non exact among them %d (%.2f percent)' % (inside.sum(), (nonex & inside).sum(), 100.0 * (nonex & inside).sum() / max(inside.sum(), 1), (~inside).sum(), (nonex & ~inside).sum(), 100.0 * (nonex & ~inside).sum() / max((~inside).sum(), 1)))
     # also: share of non exact queries whose stop cube holds more than k points beyond the kth ball (info)
     ne = np.where(nonex & ~good)[0][:5]
     for q in ne: print('  mismatch example', q, 'stop round', stop[q], 'dumped', real[q], 'pred', pred[q], 'true', d[q])
