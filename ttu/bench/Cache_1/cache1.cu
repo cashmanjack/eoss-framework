@@ -26,7 +26,8 @@ template <bool CG> __global__ void each(const unsigned *a, const unsigned *order
     unsigned s = 0;
     for (unsigned p = 0; p < warm_passes; ++p) for (unsigned k = 0; k < m; ++k) { const unsigned v = ld<CG>(a + order[k] + (s >> 31)); asm volatile("add.u32 %0, %0, %1;" : "+r"(s) : "r"(v)); }
     for (unsigned k = 0; k < m; ++k) {
-        const unsigned long long t0 = clock64(); const unsigned v = ld<CG>(a + order[k] + (s >> 31)); asm volatile("add.u32 %0, %0, %1;" : "+r"(s) : "r"(v));
+        unsigned o = order[k]; asm volatile("add.u32 %0, %0, 0;" : "+r"(o));   // the order entry is fetched (and waited for) before the clock starts: the first run timed its 1 in 8 sector misses
+        const unsigned long long t0 = clock64(); const unsigned v = ld<CG>(a + o + (s >> 31)); asm volatile("add.u32 %0, %0, %1;" : "+r"(s) : "r"(v));
         lat[k] = (unsigned)(clock64() - t0);
     }
     sink[0] = s;
@@ -58,6 +59,9 @@ int main(int argc, char **argv)
     } else if (mode == "l1assoc") {   // m addresses at stride S = 128 2^j: the m where latency rises is the ways once S covers the set period
         for (int j = 0; j <= 13; ++j) { const unsigned long long S = 128ull << j; printf("S %llu\n", S);
             for (unsigned m : {1u, 2u, 3u, 4u, 5u, 6u, 8u, 10u, 12u, 14u, 16u, 20u, 24u, 32u, 48u, 64u, 96u, 128u}) { if (S * m > BUFB / 2) break; printf("  m %u cyc %.2f\n", m, run(m, S, false, false)); } }
+    } else if (mode == "l1assoc2") {   // lines at a power of two stride up to the capacity (m 64 .. 1400): does the knee sit at the capacity (hashed set index) or at the ways
+        for (unsigned long long S : {128ull, 1024ull, 4096ull, 16384ull, 65536ull, 131072ull}) { printf("S %llu\n", S);
+            for (unsigned m = 600; m <= 1100; m += 50) { if (S * m > BUFB / 2) break; printf("  m %u cyc %.2f\n", m, run(m, S, false, false)); } }
     } else if (mode == "l1repl") {   // cyclic miss fraction just above the ways, sequential and random order, stride 128 * 2^j for the two largest conflict strides
         for (int j : {9, 11, 13}) { const unsigned long long S = 128ull << j; printf("S %llu\n", S);
             for (int rnd = 0; rnd < 2; ++rnd) for (unsigned m = 2; m <= 20; ++m) { if (S * m > BUFB / 2) break; printf("  order %s m %u cyc %.2f\n", rnd ? "random" : "seq", m, run(m, S, rnd, false, 200)); } }
@@ -65,7 +69,7 @@ int main(int argc, char **argv)
         for (int j = 5; j <= 14; ++j) { const unsigned long long S = 128ull << j; printf("S %llu\n", S);
             for (unsigned m : {1u, 2u, 4u, 8u, 12u, 16u, 20u, 24u, 32u, 48u, 64u, 96u, 128u, 160u}) { if (S * m > BUFB - (8ull << 20)) break; printf("  m %u cyc %.2f\n", m, run(m, S, false, true, 20)); } }
     } else if (mode == "l2lat") {   // per line L2 hit latency over 16 MB (warm, .cg), random order: histogram on the host
-        const unsigned lines = 131072; std::vector<unsigned> order(lines); for (unsigned k = 0; k < lines; ++k) order[k] = k * 32; std::mt19937 g(99); std::shuffle(order.begin(), order.end(), g);
+        const unsigned lines = 131072; std::vector<unsigned> order(lines); for (unsigned k = 0; k < lines; ++k) order[k] = k * 32; const int seed = argc > 2 ? atoi(argv[2]) : 99; if (seed >= 0) { std::mt19937 g(seed); std::shuffle(order.begin(), order.end(), g); }   // seed -1: ascending address order
         unsigned *dord, *dlat; CK(cudaMalloc(&dord, 4 * lines)); CK(cudaMalloc(&dlat, 4 * lines)); CK(cudaMemcpy(dord, order.data(), 4 * lines, cudaMemcpyHostToDevice));
         each<true><<<1, 1>>>(dbuf, dord, lines, 1, dlat, dsink); CK(cudaDeviceSynchronize());   // pass 1 warms the L2 (timed loop of the same kernel run again below)
         each<true><<<1, 1>>>(dbuf, dord, lines, 1, dlat, dsink); CK(cudaDeviceSynchronize());
