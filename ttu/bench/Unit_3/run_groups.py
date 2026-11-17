@@ -38,6 +38,14 @@ if __name__ == '__main__':
         go(B0, '%s/g_stage0_%s.json' % (work, TS), 'soup:1000000', 'file:' + rayfile('grp16', 1000000, 32), ['--warps', '32', '--repeat', '1'])
     elif step == 'first':
         go(B1, '%s/g_first_%s.json' % (work, TS), 'soup:1000', 'file:' + rayfile('grp2', 1000, 1), ['--warps', '1', '--repeat', '1'])
+    elif step == 'runsK':   # knee map: design B rays, W = 4 8 16 32 warps, 4 sizes x 6 g x 4 W = 96 runs (predictions: model/predictions_knee.md)
+        res = []
+        for n in SIZES:
+            for W in (4, 8, 16, 32):
+                for nm in SETS_B:
+                    j = go(B1, '%s/k_%s_%d_w%d_%s.json' % (work, nm, n, W, TS), 'soup:%d' % n, 'file:' + rayfile(nm, n, 32), ['--warps', str(W), '--repeat', '30'])
+                    s = stats(j); s.update(size=n, rays=nm); res.append(s); print('   ', s, flush=True)
+        json.dump(res, open('%s/k_summary_%s.json' % (work, TS), 'x'))
     elif step in ('runs', 'runsB'):
         res = []
         for n in SIZES:
