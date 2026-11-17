@@ -1,0 +1,15 @@
+# Held out scene results (2026-11-17, tethys RTX 4090 GPU 1; predictions model/predictions_heldout.md committed before any ordered launch was timed; scorer model/score_heldout.py; raw: notes/hs/measure_*.json, private)
+
+Sponza (262,266 triangles), Conference Room (124,619), Rungholt (6,704,264); 8,388,608 random rays each, six orders against the natural (random) order, 10 launches per order, median, 0 wrong results in all 21 launches. F123 form (kappa 1, parameters unchanged, no refit) and the Memory_4 form of the predict step, predicted / measured speedup over the natural order:
+| scene | order | measured | F123 | err | Memory_4 | err |
+|---|---|---|---|---|---|---|
+| Sponza | Morton k5 | 1.081 | 1.175 | +0.083 | 1.187 | +0.093 |
+| | oracle d1 / d2 / d3 / d4 / full | 1.036 / 1.052 / 1.062 / 1.070 / 1.071 | 1.115 / 1.153 / 1.159 / 1.160 / 1.160 | +0.074 to +0.091 | 1.073 to 1.149 | +0.036 to +0.077 |
+| Conference | Morton k5 | 1.058 | 1.056 | -0.002 | 1.203 | +0.128 |
+| | oracle d1 / d2 / d3 / d4 / full | 1.054 / 1.064 / 1.072 / 1.073 / 1.071 | 1.053 for all | -0.002 to -0.019 | 1.106 for all | +0.031 to +0.048 |
+| Rungholt | Morton k5 | 1.366 | 1.327 | -0.030 | 1.299 | -0.050 |
+| | oracle d1 / d2 / d3 / d4 / full | 1.287 / 1.480 / 1.593 / 1.666 / 1.683 | 1.143 / 1.267 / 1.347 / 1.422 / 1.504 | -0.119 to -0.168 | 1.080 to 1.516 | -0.105 to -0.246 |
+Error per scene (rms log), F123 / Memory_4 form / spread of the measured log speedups: Sponza 0.083 / 0.072 / 0.062; Conference 0.014 / 0.062 / 0.064; Rungholt 0.132 / 0.185 / 0.421. Pooled over the 18 points: F123 0.091, Memory_4 form 0.120 (F123's own held out error was 0.08 over 18 points on the 4070 Ti).
+
+Reading (rules of the predictions file): pass at 0.12 per scene: Sponza pass, Conference pass, Rungholt FAIL (0.132, just above). F123 beats the Memory_4 form on pooled error (0.091 against 0.120): reported as the better of the two. My written expectations: Sponza within 0.10 (held); Conference "the one I expect to fail" (WRONG: it is the best prediction, 0.014; the Memory_4 form is the one that failed on Morton, 1.20 against 1.06); Rungholt 0.10 to 0.20 with an under prediction because the form has no DRAM term (held: 0.132, all five oracle orders and Morton under predicted, mean signed -0.124).
+Caveats: on Sponza and Conference the measured gains are small (1.04 to 1.08, spread 0.06), so an error of 0.08 on Sponza is larger than the spread (a constant prediction of 1.0 would score 0.062 there); the Conference result is real but the gain to explain is as small. Rungholt is the informative scene (spread 0.42): the model gets the ordering of the orders right (Morton below depth 3 and above depth 1, full highest) and the size right within 12 percent on the oracle orders, under predicting; the missing DRAM term is the likely cause but this was not tested (a fit with a D term on these data would be a separate, labeled step). Random rays only; camera and bounce rays on these scenes are not tested. The predict step used the GPU once per scene to dump the GAS (time not read). BVHs 7.7 and 16.3 MiB (below the 72 MiB L2) and 416 MiB (above it).

@@ -30,12 +30,12 @@ if WHICH == 'd1b':    # near miss line: centres 0.72 r off the axis in x and y (
         ids = '%s/ids_%s.txt' % (W, TS); open(ids, 'w').write('7\n')
         for k in ARMS:
             run('d1b_%s_n%d' % (k, n), 'sphere_dev.ptx', ['kind=' + k, 'scene=line', 'off=0.72', 'jit=0.005', 'N=%d' % n, 'r=0.05', 'verify=%s/d1b_%s_n%d_%s.bin' % (W, k, n, TS), 'nver=4096', 'sat=4194304', 'reps=10', 'ncal=3', 'warp=' + ids, 'wreps=12'])
-if WHICH == 'ncu':    # warp instructions per candidate: ncu on one saturation launch, D1 N = 16, 64, 256 (the first launch, a warm up, is skipped)
+if WHICH in ('ncu', 'ncub'):    # warp instructions per candidate: ncu on one saturation launch, D1 N = 16, 64, 256 (the first launch, a warm up, is skipped)
     for n in (16, 64, 256):
         for k in ARMS:
-            out = '%s/ncu_%s_n%d_%s.csv' % (W, k, n, TS); assert not os.path.exists(out)
+            out = '%s/%s_%s_n%d_%s.csv' % (W, WHICH, k, n, TS); assert not os.path.exists(out)
             env = dict(ENV, TMPDIR=os.environ.get('NCU_TMP', '/dev/shm/sp1/ncutmp'))
-            p = subprocess.run(['timeout', '-k', '2', '300', 'ncu', '--csv', '--launch-skip', '1', '--launch-count', '1', '--metrics', 'smsp__inst_executed.sum,sm__cycles_elapsed.max,lts__t_sectors.sum', D + '/sphere', D + '/sphere_dev.ptx', '%s/ncujson_%s_n%d_%s.json' % (W, k, n, TS), 'kind=' + k, 'scene=line', 'N=%d' % n, 'r=0.05', 'sat=1048576', 'ncu=1'], env=env, capture_output=True, text=True)
+            p = subprocess.run(['timeout', '-k', '2', '300', 'ncu', '--csv', '-k', 'regex:optixLaunch', '--launch-skip', '1', '--launch-count', '1', '--metrics', 'smsp__inst_executed.sum,sm__cycles_elapsed.max,lts__t_sectors.sum', D + '/sphere', D + '/sphere_dev.ptx', '%s/ncujson_%s_n%d_%s.json' % (W, k, n, TS), 'kind=' + k, 'scene=line', 'N=%d' % n, 'r=0.05', 'sat=1048576', 'ncu=1'] + (['off=0.72', 'jit=0.005'] if WHICH == 'ncub' else []), env=env, capture_output=True, text=True)
             open(out, 'x').write(p.stdout); print('ncu', k, n, 'rc', p.returncode, p.stderr[-200:], flush=True)
             if p.returncode: sys.exit('STOP')
 if WHICH == 'd2':     # random rays on the same random point set, three radii

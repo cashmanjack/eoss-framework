@@ -1,0 +1,67 @@
+== D1 (axis 1.27 r from centres)
+count arm N=1: calls per ray min 1 max 1 (hits 0)
+count arm N=4: calls per ray min 4 max 4 (hits 0)
+count arm N=16: calls per ray min 16 max 16 (hits 0)
+count arm N=64: calls per ray min 64 max 64 (hits 0)
+count arm N=256: calls per ray min 256 max 256 (hits 0)
+SM clock GHz (median over cells) 2.516
+
+ one warp, cycles (identical lanes, median of 11 launches):
+arm             1        4       16       64      256    slope  intercept   R2
+sph          7461    11350    29793    99977   350073   1340.6      8300  0.999
+custom       6803    10581    28066    89736   320311   1225.7      7509  1.000
+tri0         4324     4294     4692     4590     5265      3.4      4402  0.873
+tri1         4307     5621     7112    20502    27890     88.5      7048  0.826
+
+ saturation, cycles per ray per SM:
+arm             1        4       16       64      256    slope  intercept   R2
+sph         22.23    33.05    88.13   274.56   907.88     3.45     29.60  0.998
+custom      21.42    32.56    87.35   243.06   792.54     3.00     31.10  0.998
+tri0        12.68    13.51    14.00    18.94    22.37     0.04     13.86  0.855
+tri1        12.69    13.66    18.30    89.45   111.64     0.38     22.97  0.758
+
+ratios of slopes: one warp C/S 0.91 C/T0 361.14 C/T1 13.84 ; saturation C/S 0.87 C/T0 83.64 C/T1 7.80
+GAS bytes N=256: sph 15508, custom 11264, tri0 334976, tri1 1335040
+
+== D1b (axis 1.018 r from centres)
+SM clock GHz (median over cells) 2.519
+
+ one warp, cycles (identical lanes, median of 11 launches):
+arm             1        4       16       64      256    slope  intercept   R2
+sph          7462    11350    31337   102057   343510   1312.3      9645  0.999
+custom       6803    10567    29668    95602   309208   1178.7      9984  0.998
+tri0         4978     7903    23288    77656   147078    541.0     15284  0.930
+tri1         6059     7531    29232    99453   225875    848.6     15757  0.967
+
+ saturation, cycles per ray per SM:
+arm             1        4       16       64      256    slope  intercept   R2
+sph         22.16    33.12    97.02   295.65   816.58     3.07     43.21  0.990
+custom      21.51    32.45    97.06   295.59   743.92     2.78     48.24  0.982
+tri0        14.50    28.29   113.50   441.75  1165.11     4.46     48.19  0.984
+tri1        17.69    26.56   149.36   549.42  1866.60     7.24     28.43  0.998
+
+ratios of slopes: one warp C/S 0.90 C/T0 2.18 C/T1 1.39 ; saturation C/S 0.91 C/T0 0.62 C/T1 0.38
+GAS bytes N=256: sph 15508, custom 11264, tri0 334976, tri1 1335040
+
+== D2 (random rays, 20,000 centres)
+r      mean IS calls (count arm)  min..max   hit fraction sph / custom / tri0 / tri1
+0.02  1.79  0..19   0.7972 / 0.7972 / 0.7417 / 0.7830
+0.04  3.09  0..26   0.9579 / 0.9579 / 0.9379 / 0.9530
+0.08  13.14  0..41   0.9989 / 0.9989 / 0.9962 / 0.9984
+
+correctness (vs built in sphere; first 1,048,576 rays): custom hit+sphere agree %, t within 1e-4 rel; tri arms: hit rate over rays the spheres hit, same sphere %, median |dt|/r
+r 0.02 custom: agree 0.99998, t rel within 1e-4 on 0.99988 of both-hit
+   tri0: hit rate on sphere hits 0.9303, same sphere 0.7548, median |dt|/r 0.2143, extra hits where spheres miss 0
+   tri1: hit rate on sphere hits 0.9821, same sphere 0.9250, median |dt|/r 0.0632, extra hits where spheres miss 0
+r 0.04 custom: agree 1.00000, t rel within 1e-4 on 0.99984 of both-hit
+   tri0: hit rate on sphere hits 0.9790, same sphere 0.6322, median |dt|/r 0.2111, extra hits where spheres miss 0
+   tri1: hit rate on sphere hits 0.9948, same sphere 0.8637, median |dt|/r 0.0620, extra hits where spheres miss 0
+r 0.08 custom: agree 1.00000, t rel within 1e-4 on 0.99873 of both-hit
+   tri0: hit rate on sphere hits 0.9973, same sphere 0.1427, median |dt|/r 0.1880, extra hits where spheres miss 0
+   tri1: hit rate on sphere hits 0.9995, same sphere 0.4457, median |dt|/r 0.0593, extra hits where spheres miss 0
+
+saturation: cycles per ray per SM (SM clock GHz in brackets), GAS MB
+r      sph             custom          tri0            tri1          
+0.02     83.7 (2.51)   1.0MB     86.2 (2.51)   0.7MB     84.3 (2.51)  24.8MB     99.8 (2.52)  99.4MB
+0.04     97.6 (2.51)   1.0MB    102.7 (2.52)   0.7MB    110.2 (2.52)  24.8MB    118.4 (2.52)  99.4MB
+0.08    221.6 (2.52)   1.0MB    262.7 (2.52)   0.7MB    282.2 (2.52)  24.8MB    249.4 (2.52)  99.4MB
