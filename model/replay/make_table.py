@@ -30,7 +30,7 @@ def build(gas_path, tris_path, out, tol=1e-3):
         rec = np.zeros(nn * 12, dtype=[('t', '<i4'), ('c', '<i4'), ('b', '<f4', 6)]); rec['t'] = typ.ravel(); rec['c'] = child.ravel(); rec['b'] = box.reshape(-1, 6)
         f.write(rec.tobytes()); f.write(tris.astype('<f4').tobytes())
     import subprocess
-    subprocess.run([os.environ.get('ASSIGN', os.path.join(HERE, 'assign')), pre, out + '.leaf', repr(tol)], check=True); os.remove(pre)
+    subprocess.run([os.environ.get('ASSIGN', os.path.join(HERE, 'assign')), pre, out + '.leaf', repr(tol), os.environ.get('ASSIGN_MODE', '0')], check=True)   # ASSIGN_MODE=1: triangles no slot contains go into every overlapping slot; os.remove(pre)
     pr = np.fromfile(out + '.leaf', np.int32).astype(np.int64).reshape(-1, 2); os.remove(out + '.leaf')
     order_t = np.lexsort((pr[:, 0], pr[:, 1])); pr = pr[order_t]; tri_ids = pr[:, 0]
     cnt = np.bincount(pr[:, 1], minlength=nl); start = np.concatenate([[0], np.cumsum(cnt)]).astype(np.int32)

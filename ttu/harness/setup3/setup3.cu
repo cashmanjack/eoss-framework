@@ -361,10 +361,11 @@ int main(int argc, char **argv)
     const bool random_fill = !strcmp(argv[4], "random");
     double energy_s = 0;
     int sib_sm = -1, sib_kb = 4096, sib_passes = 4; unsigned sib_poll = 0, sib_mode = 0;
-    bool ias = false; bool decoy = false, thrash_near = false, thrash_node = false; size_t tlbpages = 0; bool run_ttu = true, thrash = false, thrash_gas = false; unsigned thrash_lane = 128; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int oclk = 0, lclock = 0, onrep = 1, orot = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    unsigned imask = 255; bool ias = false; bool decoy = false, thrash_near = false, thrash_node = false; size_t tlbpages = 0; bool run_ttu = true, thrash = false, thrash_gas = false; unsigned thrash_lane = 128; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int oclk = 0, lclock = 0, onrep = 1, orot = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--ias")) ias = true;
+        else if (!strcmp(argv[a], "--imask") && a + 1 < argc) imask = (unsigned)strtoul(argv[++a], nullptr, 0);   // --ias: instance visibility mask (default 255; Mask_1)
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
         else if (!strcmp(argv[a], "--thrash-gas")) thrash_gas = true;
         else if (!strcmp(argv[a], "--sibling") && a + 1 < argc) { if (sscanf(argv[++a], "%d:%d:%d:%u:%u", &sib_sm, &sib_kb, &sib_passes, &sib_poll, &sib_mode) < 3 || sib_mode > 9 || sib_sm < 0 || sib_kb < 1 || sib_passes < 0) { fprintf(stderr, "--sibling SM:KB:PASSES[:POLLNS]\n"); return 2; } }   // q20: needs build_patch --sibling --smfilter and --sms A,A (the block that lands on SM A runs, the others leave)
@@ -472,7 +473,7 @@ int main(int argc, char **argv)
     CUdeviceptr iasbuf = 0; OptixTraversableHandle ih = 0; size_t ias_size = 0; unsigned long long ias_off = 0;
     if (ias) {
         OptixInstance inst{}; const float idm[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}; memcpy(inst.transform, idm, sizeof idm);
-        inst.instanceId = 0; inst.sbtOffset = 0; inst.visibilityMask = 255; inst.flags = OPTIX_INSTANCE_FLAG_NONE; inst.traversableHandle = h;
+        inst.instanceId = 0; inst.sbtOffset = 0; inst.visibilityMask = imask; inst.flags = OPTIX_INSTANCE_FLAG_NONE; inst.traversableHandle = h;
         CUdeviceptr dinst; CK(cudaMalloc((void **)&dinst, sizeof inst)); CK(cudaMemcpy((void *)dinst, &inst, sizeof inst, cudaMemcpyHostToDevice));
         OptixBuildInput ib{}; ib.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES; ib.instanceArray.instances = dinst; ib.instanceArray.numInstances = 1;
         OptixAccelBufferSizes ibs{}; OX(optixAccelComputeMemoryUsage(ctx, &ao, &ib, 1, &ibs));

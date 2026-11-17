@@ -5,6 +5,26 @@
 #include <cstdlib>
 #include <vector>
 #include <algorithm>
+#include <cmath>
+// exact triangle / box overlap (separating axis test, double precision; Akenine-Moeller): used by mode 1 (argv[4] = 1) for triangles that no leaf slot contains
+static bool tri_box(const float *v, const float *lo, const float *hi, double tol)
+{
+    double c[3], h[3], a[3][3];
+    for (int i = 0; i < 3; ++i) { c[i] = 0.5 * (lo[i] + hi[i]); h[i] = 0.5 * (hi[i] - lo[i]) + tol; }
+    for (int k = 0; k < 3; ++k) for (int i = 0; i < 3; ++i) a[k][i] = (double)v[k * 3 + i] - c[i];
+    for (int i = 0; i < 3; ++i) { double mn = std::min(a[0][i], std::min(a[1][i], a[2][i])), mx = std::max(a[0][i], std::max(a[1][i], a[2][i])); if (mn > h[i] || mx < -h[i]) return false; }
+    double e[3][3]; for (int k = 0; k < 3; ++k) for (int i = 0; i < 3; ++i) e[k][i] = a[(k + 1) % 3][i] - a[k][i];
+    for (int k = 0; k < 3; ++k) for (int i = 0; i < 3; ++i) {   // 9 edge x axis tests
+        const int j = (i + 1) % 3, l = (i + 2) % 3;   // axis = unit_i x edge: (0, -e_l, e_j) style
+        double ax[3] = {0, 0, 0}; ax[j] = e[k][l]; ax[l] = -e[k][j]; (void)ax;
+        double p0 = a[0][j] * e[k][l] - a[0][l] * e[k][j], p1 = a[1][j] * e[k][l] - a[1][l] * e[k][j], p2 = a[2][j] * e[k][l] - a[2][l] * e[k][j];
+        double r = h[j] * std::fabs(e[k][l]) + h[l] * std::fabs(e[k][j]);
+        if (std::min(p0, std::min(p1, p2)) > r || std::max(p0, std::max(p1, p2)) < -r) return false;
+    }
+    double n[3] = {e[0][1] * e[1][2] - e[0][2] * e[1][1], e[0][2] * e[1][0] - e[0][0] * e[1][2], e[0][0] * e[1][1] - e[0][1] * e[1][0]};
+    double d = n[0] * a[0][0] + n[1] * a[0][1] + n[2] * a[0][2], r = h[0] * std::fabs(n[0]) + h[1] * std::fabs(n[1]) + h[2] * std::fabs(n[2]);
+    return std::fabs(d) <= r;
+}
 struct Slot { int32_t type, child; float b[6]; };
 int main(int argc, char **argv)
 {
@@ -32,6 +52,23 @@ int main(int argc, char **argv)
         }
         multi += nc > 1;
         if (bl >= 0) { pairs.push_back(p); pairs.push_back(bl); used[bl] = 1; } else un.push_back(p);
+    }
+    const int mode = argc > 4 ? atoi(argv[4]) : 0;   // mode 1: a triangle no leaf slot contains goes into EVERY leaf slot it overlaps (exact test): superset, the nearest hit is then always reachable (F189 limitation fix)
+    if (mode == 1) {
+        for (int p : un) {
+            float lo[3], hi[3]; bounds(p, lo, hi); std::vector<int> st{0}; int got = 0;
+            while (!st.empty()) {
+                int n = st.back(); st.pop_back();
+                for (int s = 0; s < 12; ++s) {
+                    const Slot &S = sl[(size_t)n * 12 + s]; if (!S.type) continue;
+                    bool ov = true; for (int a = 0; a < 3; ++a) ov &= S.b[a] <= hi[a] + tol && lo[a] <= S.b[3 + a] + tol;
+                    if (!ov || !tri_box(&tr[(size_t)p * 9], S.b, S.b + 3, tol)) continue;
+                    if (S.type == 1) st.push_back(S.child); else { pairs.push_back(p); pairs.push_back(S.child); ++got; }
+                }
+            }
+            nun += 1; nsplit += got > 0; n3 += got == 0;
+        }
+        un.clear();
     }
     for (int p : un) {
         float lo[3], hi[3]; bounds(p, lo, hi); int got = 0;
