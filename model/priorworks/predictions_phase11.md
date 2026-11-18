@@ -1,0 +1,25 @@
+# Predictions, Phase 11 (2026-11-18, triton GPU 1, OptiX and plain CUDA only, no TTU code). Written before any run of these items.
+
+## A. Where does the 58 to 6,200 times managed memory cost of F207 and F218 come from? (our port, not the original)
+Our port's host code, in the managed memory build, copies the whole frame buffer to a host vector every round (cudaMemcpy from the managed pointer) and then scans all of it. Hypothesis: that full host read per round is the cost. Test on 3DRoad (434,874 points), uniform 1M and Porto first 1M points, k 5, same start radii as F218, the same source with one new macro in a copy of the port (original port untouched):
+- D: device buffer (as F207). A: managed buffer, port as it was (full copy and full scan per round). B: managed buffer, no copy, the host reads the managed pointer directly and stops at the first query that still needs a round (the access pattern of the unmodified sample). C: managed buffer, no copy, the host scans all of the managed buffer through its pointer each round.
+Written predictions:
+1. A reproduces F218 (24.5 s road, 57.0 s uniform, 62.6 s Porto) within a factor 1.5. Probability 85 percent.
+2. B total time is within 1.3 times of D (D from F218: 0.090, 0.069, 1.29 s), so road 0.07 to 0.12 s, uniform 0.05 to 0.09 s, Porto 1.0 to 1.7 s. Probability 75 percent. If B is more than 3 times D the hypothesis is wrong and the cost belongs to the managed buffer of the port's newer OWL (or to the device writes), not to the copy.
+3. C is at least 10 times D on road and within a factor 2 of A (reading every page from the host is what costs). Probability 60 percent.
+4. Rounds, radii and final neighbour buffers (index, distance, counters) are bit identical in A, B, C and D. Probability 90 percent.
+
+## B. RT against CLOVER, one table (RTNN knn mode, TrueKNN, CLOVER hubs, CLOVER warpwise)
+Datasets: 3DRoad, Porto 1M, uniform 1M, bunny, dragon, Gowalla, Glove 3D and Manuscript (the last three as the repo preprocessing gives them, as in F237); K 5, 50 and 128. Time = device time for building the index and searching, data already on the device, result left there: CLOVER's own span (hubs includes its index build), RTNN query sort plus geometry plus search compute (its own timers), TrueKNN total of the program's rounds (the unmodified sample's printed total). Warpwise: 10,000 random queries, scaled linearly to all points. RTNN radius: the smallest radius at which 99 percent of 3,000 sampled queries have K other points. Exactness: fraction of sampled queries (the same 20,000 query rows for RTNN, hubs; CLOVER's own sample check for warpwise) whose list is exactly the true K nearest (distance ties are not errors).
+1. Hubs is the fastest or within 2 times of the fastest method on at least 18 of the 24 (dataset, K) cells. Probability 70 percent.
+2. RTNN knn mode beats hubs (total on device) only on dragon at K 5 and 50, and on at most two other cells at K 5 and 50; at K 128 hubs beats RTNN on every dataset including dragon (RTNN search time grows about 2 times from K 50 to K 128, hubs 1.0 to 1.4 times). Probability 55 percent.
+3. RTNN knn mode is exact (up to short lists where the ball holds fewer than K points) on every cell; hubs is 100 percent exact on every cell; warpwise 0 wrong. Probability 85 percent.
+4. TrueKNN does not finish within 300 s on at least 4 of the 24 cells (dragon, Manuscript or K 128 cells). Probability 60 percent.
+5. RTNN does not run (error) at K 128 on at least one dataset (buffer size). Probability 25 percent.
+
+## C. Divergence on the real data rows (cheap probe, report only, model v1 stays frozen)
+Rows: RTNN bunny and dragon (the two F207 radii each), TrueKNN 3DRoad k 5, Porto k 5, uniform 1M k 5 (and 3DRoad k 659 if it finishes), Arkade (fixed build) on Gowalla, Glove 3D, Manuscript at their F207 radii and 10,000 queries. The probe is the Div_1 lane histogram of F231 (full probe in Arkade and TrueKNN, one warp in eight for RTNN).
+1. Mean lanes per callback on real data is 6 to 16 of 32 for every row (F231 synthetic range 7 to 19). Probability 80 percent.
+2. Arkade has the lowest lane efficiency of the three programs (mean lanes under RTNN's on both RTNN datasets), and its share of warp time at 8 or fewer lanes is 0.35 to 0.6. Probability 60 percent.
+3. Across the 14 model v1 rows, the rank correlation between the lane efficiency of the row (mean lanes per callback, time weighted) and the model's miss (log of measured over predicted time) is between 0.2 and 0.6 in absolute value, not above 0.7: low lane efficiency goes with underprediction a little but does not explain it (RTNN rows with similar lanes are also under predicted by 1.9 to 2.4 times, and TrueKNN rows with low lanes are not). Probability 55 percent.
+4. Gowalla and Manuscript (clustered) show lower lane efficiency than Glove 3D. Probability 50 percent.
