@@ -53,15 +53,15 @@ def main():
     for K in Ks:
         r = radius99(tree, pts, K); C, S = m1.replay_counts(pts, r, tree); pred[K] = dict(radius=r, **m1.predict(N, K, C, S)); print('replay K', K, 'r', r, 'pred launch ms %.3f' % pred[K]['ms'], flush=True)
     pj = os.path.join(out, 'predictions_%s.json' % ts); pm = os.path.join(out, 'predictions_%s.md' % ts)
-    json.dump(dict(name=a.name, data=os.path.basename(a.data), sha256=sha, N=N, ts=ts, model='v1 (FORM_combined_v1.md), callback cost = uniform reference, K generalized from 50', pred={str(k): v for k, v in pred.items()}), open(pj, 'x'), indent=1)
+    json.dump(dict(name=a.name, data=os.path.basename(a.data), sha256_prefix12=sha[:12], N=N, ts=ts, model='v1 (FORM_combined_v1.md), callback cost = uniform reference, K generalized from 50', pred={str(k): v for k, v in pred.items()}), open(pj, 'x'), indent=1)
     with open(pm, 'x') as f:
-        f.write('# Model v1 predictions for %s, written %s BEFORE any timed run\n\nData: %s (%d points used, sha256 %s). Model: model_v1_rtnn.py, frozen v1 form, replay counts on the CPU, RTNN knn mode at the 99 percent radius, search launch only (no sort, no geometry, no result copy), SM 142, 2.5 GHz, cb = cbref.\n\n| K | radius | mean q | max q | throughput ms | chain ms | predicted launch ms |\n|---|---|---|---|---|---|---|\n' % (a.name, ts, os.path.basename(a.data), N, sha))
+        f.write('# Model v1 predictions for %s, written %s BEFORE any timed run\n\nData: %s (%d points used, sha256 prefix %s). Model: model_v1_rtnn.py, frozen v1 form, replay counts on the CPU, RTNN knn mode at the 99 percent radius, search launch only (no sort, no geometry, no result copy), SM 142, 2.5 GHz, cb = cbref.\n\n| K | radius | mean q | max q | throughput ms | chain ms | predicted launch ms |\n|---|---|---|---|---|---|---|\n' % (a.name, ts, os.path.basename(a.data), N, sha[:12]))
         for K in Ks: v = pred[K]; f.write('| %d | %.6g | %.2f | %.1f | %.3f | %.3f | %.3f |\n' % (K, v['radius'], v['mean_q'], v['max_q'], v['thr_ms'], v['chain_ms'], v['ms']))
     h1 = commit([rel(pj), rel(pm)], 'Blind predictions for %s (model v1, before any timed run)' % a.name, not a.no_push); print('COMMIT 1 (predictions):', h1, flush=True)
     if a.no_gpu: return
     env = dict(os.environ, CUDA_DEVICE_ORDER='PCI_BUS_ID', CUDA_VISIBLE_DEVICES=a.gpu)
     if 'RTNN_DRAM_GB' not in env:
-        tot = int(sh(['nvidia-smi', '-i', a.gpu, '--query-gpu=memory.total', '--format=csv,noheader,nounits']).stdout.strip()); env['RTNN_DRAM_GB'] = '%.4f' % (0.95 * tot / 1024)
+        tot = int(sh(['nvidia-smi', '-i', a.gpu, '--query-gpu=memory.total', '--format=csv,noheader,nounits']).stdout.strip()); env['RTNN_DRAM_GB'] = '%.4f' % min(0.95 * tot / 1024, 11.5958)   # RTNN builds a grid sized to this; on a 48 GB card it faults (F167), so capped at the 4070 Ti's 11.6 GB
     hb = sorted(glob.glob(PW + '/clvbench/benchh_clv3_*[0-9]'))[-1]; res = {}
     for K in Ks:
         rc, txt, wt = run([hb, '2', a.data, str(N), str(N), str(K), '3', '0', '7'], env, a.gpu, 600); ns = [int(m[1]) / 1e6 for m in re.finditer(r'^(\d+), rep', txt, re.M)]; res[K] = dict(hubs_ms=statistics.median(ns) if ns else None, hubs_rc=rc)
