@@ -39,6 +39,7 @@ static int classify(double cx, double cy, double r, const float2 *v)
 }
 
 struct V { std::string name, var; int L = 0; OptixTraversableHandle hg = 0; OptixPipeline pipe = nullptr; OptixShaderBindingTable sbt{}; Params prm{}; CUdeviceptr dprm = 0; Out *dout = nullptr; size_t gas_bytes = 0, omm_bytes = 0; double unk[4] = {0,0,0,0}; std::vector<float> ms; };
+__global__ void fill_tab(unsigned *t, unsigned n, unsigned a, unsigned b) { for (unsigned i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += gridDim.x * blockDim.x) t[i] = (i * a + b) & (n - 1); }   // affine permutation of 0..n-1 (a odd, n a power of two): random looking, one cycle structure
 int main(int argc, char **argv)
 {
     if (argc < 3) { fprintf(stderr, "usage\n"); return 2; }
@@ -55,6 +56,7 @@ int main(int argc, char **argv)
     CUdeviceptr dv; CK(cudaMalloc((void **)&dv, v.size() * sizeof(Tri))); CK(cudaMemcpy((void *)dv, v.data(), v.size() * sizeof(Tri), cudaMemcpyHostToDevice));
     std::vector<Ray8> big; { std::mt19937 gr(2026); for (unsigned i = 0; i < NB; ++i) { float3 d{Nn(gr), Nn(gr), Nn(gr)}; const float l = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z); big.push_back(Ray8{{U(gr), U(gr), U(gr)}, 0.f, {d.x / l, d.y / l, d.z / l}, 1e16f}); } }
     Ray8 *drays; CK(cudaMalloc((void **)&drays, (size_t)NB * sizeof(Ray8))); CK(cudaMemcpy(drays, big.data(), (size_t)NB * sizeof(Ray8), cudaMemcpyHostToDevice));
+    const unsigned tabn = 1u << (unsigned)geti("tablog", 27); unsigned *dtab = nullptr; if (geti("ahl", 0)) { CK(cudaMalloc((void **)&dtab, (size_t)tabn * 4)); fill_tab<<<1024, 256>>>(dtab, tabn, 2654435769u | 1u, 12345u); CK(cudaDeviceSynchronize()); }   // 2^27 u32 = 512 MB, far above the L2
     std::string ptx = read_file(argv[1]);
     for (V &x : vs) {
         const bool useomm = x.var == "B" || x.var == "C", noany = x.var == "D0" || x.var == "D" || x.var == "C", flag = x.var != "A0" && x.var != "D0"; const int L = x.L;
@@ -108,7 +110,7 @@ int main(int argc, char **argv)
         x.sbt.raygenRecord = drec; x.sbt.missRecordBase = drec + sizeof(Rec); x.sbt.missRecordStrideInBytes = sizeof(Rec); x.sbt.missRecordCount = 1;
         x.sbt.hitgroupRecordBase = drec + 2 * sizeof(Rec); x.sbt.hitgroupRecordStrideInBytes = sizeof(Rec); x.sbt.hitgroupRecordCount = 1;
         CK(cudaMalloc((void **)&x.dout, (size_t)NB * sizeof(Out))); CK(cudaMemset(x.dout, 0, (size_t)NB * sizeof(Out)));
-        x.prm.rays = drays; x.prm.out = x.dout; x.prm.handle = x.hg; x.prm.n = NB; x.prm.cnt = 0; x.prm.ahw = (unsigned)geti("ahw", 0); for (int p = 0; p < 4; ++p) x.prm.r2[p] = radii[p] * radii[p];
+        x.prm.rays = drays; x.prm.out = x.dout; x.prm.handle = x.hg; x.prm.n = NB; x.prm.cnt = 0; x.prm.ahw = (unsigned)geti("ahw", 0); x.prm.ahl = (unsigned)geti("ahl", 0); x.prm.tab = dtab; x.prm.tabmask = tabn - 1; for (int p = 0; p < 4; ++p) x.prm.r2[p] = radii[p] * radii[p];
         CK(cudaMalloc((void **)&x.dprm, sizeof x.prm));
     }
     FILE *jf = fopen(argv[2], "wx"); if (!jf) { fprintf(stderr, "refuse to overwrite or cannot write %s\n", argv[2]); return 2; }

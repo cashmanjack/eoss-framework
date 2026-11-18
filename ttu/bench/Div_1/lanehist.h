@@ -21,4 +21,14 @@ __device__ __forceinline__ void lh_exit(unsigned long long *lh, unsigned warp, c
 }
 __device__ __forceinline__ void lh_rg_start(unsigned long long *lh, unsigned warp) { if (lh && lh_lane() == 0) { unsigned long long *b = lh + (size_t)warp * LH_STRIDE; if (b[133] == 0ull) b[133] = clock64(); } }
 __device__ __forceinline__ void lh_rg_end(unsigned long long *lh, unsigned warp) { if (lh) { unsigned long long *b = lh + (size_t)warp * LH_STRIDE; atomicMax(&b[134], (unsigned long long)clock64()); } }   // every lane: lanes of a warp finish raygen at different times
+// Cheaper probe modes (Phase 10c): lh_gate returns null for warps outside the sample (warp & smask != 0); with notime the callbacks only count lanes (no clock reads, no raygen stamps).
+__device__ __forceinline__ unsigned long long *lh_gate(unsigned long long *lh, unsigned warp, unsigned smask) { return (lh && (warp & smask) == 0u) ? lh : nullptr; }
+__device__ __forceinline__ LHE lh_enter2(unsigned long long *lh, unsigned notime) { LHE e; e.mask = __activemask(); e.t0 = (lh && !notime) ? clock64() : 0ull; return e; }
+__device__ __forceinline__ void lh_exit2(unsigned long long *lh, unsigned warp, const LHE &e, unsigned notime)
+{
+    if (!lh) return;
+    if (!notime) { lh_exit(lh, warp, e); return; }
+    if (lh_lane() != (unsigned)(__ffs(e.mask) - 1)) return;
+    unsigned long long *b = lh + (size_t)warp * LH_STRIDE; b[__popc(e.mask)] += 1; b[135] += 1;
+}
 #endif

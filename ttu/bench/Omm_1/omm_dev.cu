@@ -25,5 +25,6 @@ extern "C" __global__ void __anyhit__ah()
     const float2 b = optixGetTriangleBarycentrics();
     const float du = b.x - (1.f / 3.f), dv = b.y - (1.f / 3.f);
     if (params.ahw) { float x = b.x + 1.f, y = b.y + 0.5f; for (unsigned k = 0; k < params.ahw; ++k) { x = fmaf(x, 1.0000001f, y); y = fmaf(y, 0.9999999f, x); } if (x == 12345.f) optixIgnoreIntersection(); }
+    if (params.ahl) { unsigned idx = (optixGetPrimitiveIndex() * 2654435761u ^ __float_as_uint(b.x) * 40503u) & params.tabmask; for (unsigned k = 0; k < params.ahl; ++k) idx = params.tab[idx]; if (idx == 0xFFFFFFFFu) optixIgnoreIntersection(); }   // never taken: results unchanged
     if (du * du + dv * dv <= params.r2[optixGetPrimitiveIndex() & 3]) optixIgnoreIntersection();
 }

@@ -131,15 +131,18 @@ __device__ void compute_body(int parity, int limit, int half, const volatile int
     __syncthreads(); if (!ok) return;
     float x = 1.f + threadIdx.x * 1e-3f, y = 0.5f; unsigned long long it = 0; uint4 acc = make_uint4(0, 0, 0, 0);
     const size_t base = ((size_t)blockIdx.x * 2048) % (nbuf > 4096 ? nbuf - 2048 : 1);
-    size_t pos = ((size_t)blockIdx.x * blockDim.x + threadIdx.x) * 7919 % (nbuf ? nbuf : 1);
+    size_t pos = ((size_t)blockIdx.x * blockDim.x + threadIdx.x) * 7919 % (nbuf ? nbuf : 1); size_t spos = ((size_t)blockIdx.x * 12288 * 37) % (nbuf ? nbuf : 1);
     while (!*stop) {
         if (TYPE == 0) { for (int k = 0; k < 1024; ++k) { x = fmaf(x, 1.0000001f, y); y = fmaf(y, 0.9999999f, x); } }
         else if (TYPE == 1) { for (int k = 0; k < 32; ++k) { const uint4 v = buf[base + ((threadIdx.x + 256 * k) & 2047)]; acc.x += v.x; acc.y ^= v.y; acc.z += v.z; acc.w ^= v.w; } }
         else if (TYPE == 5) { _Pragma("unroll 4") for (int k = 0; k < 32; ++k) { const uint4 v = buf[base + ((threadIdx.x + 256 * k) & wmask)]; acc.x += v.x; acc.y ^= v.y; acc.z += v.z; acc.w ^= v.w; } }
         else if (TYPE == 4) { for (int k = 0; k < 32; ++k) { const uint4 v = sm4[(threadIdx.x + 384 * k) & 1023]; acc.x += v.x; acc.y ^= v.y; acc.z += v.z; acc.w ^= v.w; sm4[(threadIdx.x * 5 + k) & 1023] = acc; } }
         else if (TYPE == 3) { for (int k = 0; k < 32; ++k) { const uint4 v = buf[(pos + (size_t)k * 4099) & wmask]; acc.x += v.x; acc.y ^= v.y; acc.z += v.z; acc.w ^= v.w; } pos += 1024 * 256 + 1; }
+        else if (TYPE == 7) { for (int k = 0; k < 32; ++k) { size_t ix = spos + (size_t)k * 384 + threadIdx.x; if (ix >= nbuf) ix -= nbuf; const uint4 v = buf[ix]; acc.x += v.x; acc.y ^= v.y; acc.z += v.z; acc.w ^= v.w; } spos += 12288; if (spos >= nbuf) spos -= nbuf; }   // memseq: coalesced contiguous stream
+        else if (TYPE == 6) { for (int k = 0; k < 32; ++k) { const uint4 v = __ldcg(buf + pos); pos += 1024 * 256 + 1; if (pos >= nbuf) pos -= nbuf; acc.x += v.x; acc.y ^= v.y; acc.z += v.z; acc.w ^= v.w; } }   // memcg: same stream, ld.global.cg (L1 bypass)
         else { for (int k = 0; k < 32; ++k) { const uint4 v = buf[pos]; pos += 1024 * 256 + 1; if (pos >= nbuf) pos -= nbuf; acc.x += v.x; acc.y ^= v.y; acc.z += v.z; acc.w ^= v.w; } }
         ++it; if (threadIdx.x == 0) atomicAdd(&iters[my_sm], 1ull);
+        if ((TYPE == 2 || TYPE == 6 || TYPE == 7) && wmask) { unsigned d = wmask; while (d) { const unsigned q = d > 1000000u ? 1000000u : d; __nanosleep(q); d -= q; } }   // throttle: wmask = sleep ns per iteration (set with the third field of --compute TYPE:PLACE:LIM:NS)
     }
     if (x == 12345.f || acc.x == 0xdeadbeef) iters[1023] += 1;
 }
@@ -942,8 +945,8 @@ int main(int argc, char **argv)
     if (comp) {
         const size_t colon = compute_opt.find(':'); const std::string ctype = compute_opt.substr(0, colon); std::string cplace = compute_opt.substr(colon + 1);
         int lim_opt = 0, kb_opt = 0; { const size_t c2 = cplace.find(':'); if (c2 != std::string::npos) { std::string rest = cplace.substr(c2 + 1); cplace = cplace.substr(0, c2); lim_opt = atoi(rest.c_str()); const size_t c3 = rest.find(':'); if (c3 != std::string::npos) kb_opt = atoi(rest.c_str() + c3 + 1); } }   // TYPE:PLACE[:LIM[:KB]]
-        const int tp = ctype == "alu" ? 0 : ctype == "l1" ? 1 : ctype == "mem" ? 2 : ctype == "l2" ? 3 : ctype == "smem" ? 4 : ctype == "l1w" ? 5 : -1; if (tp < 0 || (cplace != "all" && cplace != "odd" && cplace != "high" && cplace != "sib") || lim_opt < 0 || lim_opt > 4) { fprintf(stderr, "--compute alu|l1|mem|l2|smem|l1w:all|odd|high|sib[:LIM 1..4[:KB]]\n"); return 2; }
-        unsigned wmask = tp == 5 ? (unsigned)((kb_opt ? kb_opt : 32) * 64 - 1) : tp == 3 ? (unsigned)((kb_opt ? kb_opt : 32768) * 64 - 1) : 0;   // l1: KB per block window (default 32 KB = 2048 uint4); l2: KB window over the whole buffer (default 32 MB)
+        const int tp = ctype == "alu" ? 0 : ctype == "l1" ? 1 : ctype == "mem" ? 2 : ctype == "l2" ? 3 : ctype == "smem" ? 4 : ctype == "l1w" ? 5 : ctype == "memcg" ? 6 : ctype == "memseq" ? 7 : -1; if (tp < 0 || (cplace != "all" && cplace != "odd" && cplace != "high" && cplace != "sib") || lim_opt < 0 || lim_opt > 4) { fprintf(stderr, "--compute alu|l1|mem|memcg|memseq|l2|smem|l1w:all|odd|high|sib[:LIM 1..4[:KB]]\n"); return 2; }
+        unsigned wmask = (tp == 2 || tp == 6 || tp == 7) ? (unsigned)kb_opt : tp == 5 ? (unsigned)((kb_opt ? kb_opt : 32) * 64 - 1) : tp == 3 ? (unsigned)((kb_opt ? kb_opt : 32768) * 64 - 1) : 0;   // l1: KB per block window (default 32 KB = 2048 uint4); l2: KB window over the whole buffer (default 32 MB)
         if (tp == 5 && (wmask & (wmask + 1))) { fprintf(stderr, "l1 KB must be a power of two\n"); return 2; } if (tp == 3 && (wmask & (wmask + 1))) { fprintf(stderr, "l2 KB must be a power of two\n"); return 2; }
         CK(cudaStreamCreateWithFlags(&sc, cudaStreamNonBlocking)); CK(cudaStreamCreateWithFlags(&ss, cudaStreamNonBlocking));
         const size_t nbuf = (size_t)1 << 26;   // 1 GB of uint4
@@ -951,8 +954,8 @@ int main(int argc, char **argv)
         CK(cudaMalloc((void **)&dcbuf, nbuf * 16)); CK(cudaMemset(dcbuf, 1, nbuf * 16));
         const int parity = cplace == "odd" ? 1 : cplace == "high" ? 2 : cplace == "sib" ? 3 : -1, lim = lim_opt ? lim_opt : cplace != "all" ? 4 : 2, grid = NSM * lim * 40;
         auto setcarve = [&](const void *k) { if (ccarve >= 0) CK(cudaFuncSetAttribute(k, cudaFuncAttributePreferredSharedMemoryCarveout, ccarve)); if (csmem) CK(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, csmem)); };   // --ccarve P (percent shared), --csmem BYTES per block (unused, shrinks the L1)
-        setcarve((const void *)compute_k<0>); setcarve((const void *)compute_k<1>); setcarve((const void *)compute_k<2>); setcarve((const void *)compute_k<3>); setcarve((const void *)compute_k<4>); setcarve((const void *)compute_k<5>);
-        if (tp == 0) compute_k<0><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 1) compute_k<1><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 2) compute_k<2><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 3) compute_k<3><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 4) compute_k<4><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask); else compute_k<5><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask);
+        setcarve((const void *)compute_k<0>); setcarve((const void *)compute_k<1>); setcarve((const void *)compute_k<2>); setcarve((const void *)compute_k<3>); setcarve((const void *)compute_k<4>); setcarve((const void *)compute_k<5>); setcarve((const void *)compute_k<6>); setcarve((const void *)compute_k<7>);
+        if (tp == 0) compute_k<0><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 1) compute_k<1><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 2) compute_k<2><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 3) compute_k<3><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 4) compute_k<4><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 6) compute_k<6><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask); else if (tp == 7) compute_k<7><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask); else compute_k<5><<<grid, 384, csmem, sc>>>(parity, lim, NSM / 2, dstop, diters, dres, dcbuf, nbuf, wmask);
         CK(cudaGetLastError());
         wdog = std::thread([&]() { for (int k = 0; k < 250 && !cdone; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(100)); int o = 1; cudaMemcpyAsync(dstop, &o, 4, cudaMemcpyHostToDevice, ss); });   // watchdog: stop the compute kernel after 25 s
         std::this_thread::sleep_for(std::chrono::milliseconds(400));   // blocks settle on their SMs
@@ -989,7 +992,8 @@ int main(int argc, char **argv)
         if (e != cudaSuccess) break;
         const double w_after = now_s(); const unsigned long long c_after = csample();
         float launch_ms = 0; CK(cudaEventElapsedTime(&launch_ms, ev_a, ev_b));
-        char cinfo[160] = ""; if (comp) snprintf(cinfo, sizeof cinfo, ", \"citers\": %llu, \"cwin_s\": %.6f", c_after - c_before, w_after - w_before);
+        char cinfo[240] = ""; if (comp) snprintf(cinfo, sizeof cinfo, ", \"citers\": %llu, \"cwin_s\": %.6f", c_after - c_before, w_after - w_before);
+        { const size_t cl = strlen(cinfo); snprintf(cinfo + cl, sizeof cinfo - cl, ", \"t0\": %.6f, \"t1\": %.6f", w_before, w_after); }   // Conc_1 clock sampling: CLOCK_MONOTONIC stamps of this launch
         if (quick && it < repeat - 1) { fprintf(jf, "%s{\"ms\": %.6f%s}", it ? ", " : "", launch_ms, cinfo); continue; }
         std::vector<unsigned> o(out.size());
         if (coal) {   // compact records (4 words per ray): copy only those, then expand in place, last record first (record i is written at N i >= 4 i, never over a compact record still to be read)

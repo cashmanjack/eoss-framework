@@ -2,7 +2,7 @@
 import os, subprocess, sys, time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'config'))
 import gpucfg
-CFG = gpucfg.load(); ENV = CFG.env(); W, TAG = sys.argv[1], sys.argv[2]; D = '/dev/shm/om1'; os.makedirs(W, exist_ok=True)
+CFG = gpucfg.load(); ENV = CFG.env(); W, TAG = sys.argv[1], sys.argv[2]; D = os.environ.get('OMM_DIR', '/dev/shm/om1'); os.makedirs(W, exist_ok=True)
 base = os.path.join(W, '%s_%s' % (TAG, time.strftime('%Y%m%dT%H%M%S')))
 if os.path.exists(base + '.json'): sys.exit('refuse to overwrite ' + base)
 CFG.check_idle()
