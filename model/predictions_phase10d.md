@@ -33,3 +33,11 @@ Every arm and every alone run with the NVML sampler (about 1 ms between samples)
 ## 3. Sampler fix
 
 The sampler keeps a ring of the last 300 s of samples in memory and writes only rows inside launch windows (plus 10 ms margin) when the runner sends the window (CLOCK_MONOTONIC t0, t1 of every launch from the raw json). Expected file size per group under 20 MB (about 1,000 rows per second of launch). Any raw file over 100 MB gets gzipped after a lossless check (zcat compared with the original), including the old 3 GB file (expected compression 5 to 10 times, since the rows repeat the same clock values; the original is removed only after the check, which is Jack's explicit instruction).
+
+## 1b. Addendum (written after the full pg and mem groups ran, before any further run; the numbers below are disclosed here)
+Seen (raw notes/conc3/raw): random rays on sib 4 / hi 2: memcg 0.022 / 0.144, dramfew 0.023 / 0.142, pgfew 0.204 / 0.70, pgmany 0.082 / 0.72, pgfar 0.083 / 0.72, seqpg 0.185 / 0.36; compute rates (useful GB/s): memcg 118, dramfew 130, pgfew 969, pgmany 422, pgfar 419 (sib). With sleep 150 us on sib: pgfew 0.99, pgmany 0.86. So pgfew is NOT collapsed (my R prediction missed) and pgmany is 2.5 times lower than pgfew; pgfar equals pgmany.
+Confound I did not control: pgmany and pgfar use power of two strides (32 KB, 512 KB) between lines, which can map to few L2 slices or banks; the lower stream rate of pgmany (422 against 969 GB/s) could be that and not pages. New control arm pgodd: the same hash, the same 32,768 lines, stride 241 lines (30.8 KB, not a power of two), spread over 1.01 GB (about 504 large pages), same blocks, sleeps and checks. Arms: sib 4 and hi 2, random and coherent rays, 3 repetitions, alone before every arm, sampler on; plus pgodd with sleep 150 us.
+- If page diversity is the cause: pgodd within 15 percent of pgmany in RT ratio (sib random 0.07 to 0.095) and in stream rate (360 to 485 GB/s).
+- If power of two stride conflicts were the cause: pgodd close to pgfew (sib random 0.15 to 0.25, stream rate above 700 GB/s).
+My expectation: page diversity (70 percent), with the stream rate of pgodd up to 20 percent above pgmany.
+- hi random: pgodd 0.65 to 0.78 (no page effect on other TPCs); coherent sib 0.74 to 0.85.
