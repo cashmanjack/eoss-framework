@@ -146,7 +146,9 @@ def check(path):
                 else:
                     ok('B15 ownccctl: stage 0 has no TTUCCTL', not cc, cc)
             else:
-                ok('B15 no TTUCCTL in the sibling kernel unless --ownccctl', not [i for i, b in enumerate(body) if low12(b) == 0x3d5])
+                # --sibccctl (F161): the one TTUCCTL is in the B path (after the main EXIT); the (h) rules below pin it down (exactly one, bytes, position). The main path still may have none.
+                lim = meta['bpath'] if meta.get('sibccctl') else len(body)
+                ok('B15 no TTUCCTL in the sibling kernel unless --ownccctl (or, with --sibccctl, only in the B path, checked by the (h) rules)', not [i for i, b in enumerate(body[:lim]) if low12(b) == 0x3d5])
         elif meta.get('stream'):   # q32 --stream: exactly one backward @P5 BRA between the sessions (a counted loop of ordinary loads), no TTU instruction inside it
             off = lambda b: (W(b) >> 32) & 0xffffffff
             tgt = [i + 1 + ((off(body[i]) - (1 << 32 if off(body[i]) >> 31 else 0)) // 16) for i in brs]
