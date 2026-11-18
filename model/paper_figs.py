@@ -23,7 +23,7 @@ def bars(ax, groups, series, w=0.8):
 f, (a, b) = plt.subplots(1, 2, figsize=(6.8, 2.4))
 a.plot([1, 2, 3], [780, 830, 870], 'o-', color=C['ada'], label=GPU['ada'] + ' (F25)'); a.plot([1, 2, 3], [782, 827, 867], 's--', color=C['ti'], label=GPU['ti'] + ' (F104)'); a.plot([1], [782], '^', color=C['rtx4090'], label=GPU['rtx4090'] + ' (F176)')
 a.set_xlabel('internal BVH levels'); a.set_ylabel('cycles, second trace of the same ray'); a.set_xticks([1, 2, 3]); a.set_ylim(700, 900); a.legend(frameon=False); a.set_title('(a) L1 resident: 740 + about 43 per level', loc='left')
-bars(b, ['second trace\n(L1 warm)', 'L2 warm', 'cold (DRAM)'], [(GPU['ada'], [780, 1641, 2632], C['ada']), (GPU['rtx4090'], [782, 1630, 2627], C['rtx4090'])])
+bars(b, ['second trace\n(L1 warm)', 'L2 warm', 'cold (DRAM)'], [(GPU['ada'], [780, 1641, 2632], C['ada']), (GPU['ti'], [782, 1612, 2593], C['ti']), (GPU['rtx4090'], [782, 1630, 2627], C['rtx4090'])])
 b.set_ylabel('cycles, one triangle'); b.legend(frameon=False); b.set_title('(b) one triangle (F25, F104, F176)', loc='left')
 save(f, 'fig01_latency')
 
