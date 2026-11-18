@@ -1,6 +1,6 @@
 # Results Phase 10e (tethys, RTX 4090, 2026-11-18). Predictions: model/predictions_phase10e.md (commits e07d778, addendum 2b d1fffcc)
 
-## 1. Stage 1 of the transform sequence (F251)
+## 1. Stage 1 of the transform sequence (F253)
 The IAS group of F139 and F195 (checked builds rebuilt in /dev/shm/t9x, check_seq ALL PASS both stages), one warp, one launch per matrix and ray, 5 matrices (identity, rotation z 37 degrees with translation, rotation 90 degrees with scale 2, rotation x 37 degrees, non uniform scale) x 6 rays (hit, moved, moved2, miss, t2, back).
 - Stage 0 first (no TTU instruction): 30 of 30 agree with the float64 CPU reference on the moved triangle and inputs intact.
 - Stage 1: 30 of 30 launches exit 0, "no error", input registers unchanged, six decoded registers identical in all 32 lanes, hit flag equal to OptiX in the same process; the 20 launches that hit return distance, u and v bit identical to OptiX's (sign bit ignored; 0 ulp, my criterion was 2 ulp); the 10 misses return the miss encoding. The unit's u carries the sign of facing (set for front facing hits, clear for the back facing hit), as in F139. No fault, GPU idle after.
@@ -8,7 +8,7 @@ The IAS group of F139 and F195 (checked builds rebuilt in /dev/shm/t9x, check_se
 - Meaning: the unit applies the instance transform itself (world to object matrix read from the instance leaf, object space hit, parametric t unchanged) with the sequence exactly as OptiX issues it; the SM code before the group does not transform the ray (the register image holds world space words, F234).
 Raw: notes/xform1 (private, x1_s0_*, x1_s1_*). Code: ttu/bench/Xform_1/stage1.py.
 
-## 2. F243 close out: one curve test (F252)
+## 2. F243 close out: one curve test (F254)
 Setup: our checked TTU kernel (random rays, soup 100,000 triangles, 32 blocks) beside a plain stream of random 128 byte lines over a footprint F (new type l2fp, 32 lines per warp load, every lane its own line, ld.global.cg), sib = 4 blocks on each TPC sibling SM, high = 2 blocks on each SM of other TPCs. F = 40, 56, 72, 96, 120 (L2 is 72 MB), 512, 1024 MB (the last two DRAM sourced), unthrottled and with a 150 us sleep per iteration; 3 repetitions, alone run before every arm, clocks sampled in every arm; 0 wrong, 0 unstored in all 144 + 48 launches. Stream load latency: lane 0 of every warp times the first load of every 16th iteration (issue to consumption). O = stream lines per second x latency (lines in flight). dramfew has no latency sampling (type 11), so DRAM points come from F 512 and 1024 (addendum 2b). Table: notes/figures/f243_one_curve.png and the analysis output below (model/conc4_analyze.py).
 
 ```
