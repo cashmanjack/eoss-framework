@@ -1,0 +1,98 @@
+{
+ "5": {
+  "hubs_ms": 163.785336,
+  "hubs_rc": 0,
+  "rtnn_runs": [
+   {
+    "sort": 36.9012,
+    "sortp": null,
+    "geom": 6.90613,
+    "search": 77.6568,
+    "rc": 0
+   },
+   {
+    "sort": 37.6643,
+    "sortp": null,
+    "geom": 5.8648,
+    "search": 72.7608,
+    "rc": 0
+   },
+   {
+    "sort": 37.496,
+    "sortp": null,
+    "geom": 5.80787,
+    "search": 76.3805,
+    "rc": 0
+   }
+  ],
+  "search_ms": 76.3805,
+  "fixed_ms": 43.5291,
+  "total_dev_ms": 119.68437,
+  "callB": "RTNN",
+  "callA": "RTNN"
+ },
+ "50": {
+  "hubs_ms": 204.624125,
+  "hubs_rc": 0,
+  "rtnn_runs": [
+   {
+    "sort": 38.3494,
+    "sortp": null,
+    "geom": 5.88293,
+    "search": 305.618,
+    "rc": 0
+   },
+   {
+    "sort": 38.4315,
+    "sortp": null,
+    "geom": 6.71667,
+    "search": 305.765,
+    "rc": 0
+   },
+   {
+    "sort": 38.481,
+    "sortp": null,
+    "geom": 6.97889,
+    "search": 306.106,
+    "rc": 0
+   }
+  ],
+  "search_ms": 305.765,
+  "fixed_ms": 45.14817,
+  "total_dev_ms": 350.91317,
+  "callB": "RTNN",
+  "callA": "RTNN"
+ },
+ "128": {
+  "hubs_ms": 244.464165,
+  "hubs_rc": 0,
+  "rtnn_runs": [
+   {
+    "sort": 38.2403,
+    "sortp": null,
+    "geom": 5.88896,
+    "search": 969.773,
+    "rc": 0
+   },
+   {
+    "sort": 38.2437,
+    "sortp": null,
+    "geom": 5.90249,
+    "search": 985.625,
+    "rc": 0
+   },
+   {
+    "sort": 38.298,
+    "sortp": null,
+    "geom": 5.8991,
+    "search": 978.222,
+    "rc": 0
+   }
+  ],
+  "search_ms": 978.222,
+  "fixed_ms": 44.14619,
+  "total_dev_ms": 1022.4191,
+  "callB": "RTNN",
+  "callA": "RTNN"
+ }
+}
