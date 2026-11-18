@@ -35,6 +35,7 @@ def main(d, png=None):
             if max(a['O'], b['O']) / min(a['O'], b['O']) < 1.5:
                 pairs += 1; bad = abs(a['r'] - b['r']) > 0.10; fail += bad; print('pair %-20s r %.3f O %.0f | %-20s r %.3f O %.0f %s' % (a['name'], a['r'], a['O'], b['name'], b['r'], b['O'], 'FAIL' if bad else 'ok'))
     print('matched O pairs (within 1.5x): %d, outside 0.10: %d' % (pairs, fail))
+    if not png: return out
     if png:
         import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
         fig, ax = plt.subplots(figsize=(6, 4.2))
@@ -43,4 +44,5 @@ def main(d, png=None):
                 s = [o for o in out if o['pl'] == pl and ((o['F'] and o['F'] <= 72) if kind[0] == 'L' else (o['F'] >= 512))]
                 ax.scatter([o['O'] for o in s], [o['r'] for o in s], marker=mk, c=col, label='%s, %s' % (pl, kind))
         ax.set_xscale('log'); ax.set_yscale('log'); ax.set_xlabel('stream lines in flight (lines per s x latency)'); ax.set_ylabel('RT rays/us with stream over alone'); ax.legend(fontsize=7); fig.tight_layout(); fig.savefig(png, dpi=130)
+    return out
 if __name__ == '__main__': main(*sys.argv[1:3])
