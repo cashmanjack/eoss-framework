@@ -36,3 +36,13 @@ RTNN rebuilt from the overlay with two new runtime modes (env): LHSAMPLE=7 (only
 - Overhead against probe off: full probe 1.23 to 1.28 (F231), sampled 1/8 under 1.06, no timing 1.03 to 1.12.
 - Sampled lane statistics (mean lanes per callback) within 3 percent of the full probe; time share at 8 or fewer lanes within 0.03 absolute.
 - No timing: lane histogram identical to the full probe's (spread 0.0 percent as in F231, the lane counts do not depend on timing).
+
+## 1b. Addendum (written after the first full repetition of section 1, before any further run; the numbers below that repetition are disclosed here)
+Seen in that repetition (raw notes/conc2/smoke, I started the full cg group by mistake instead of smoke, it is repetition 0): the streaming kernel reaches only about 120 GB/s (alone) whatever the block count (1, 2 or 4 per SM), so block count does NOT set bandwidth levels; RT random 0.022 on sib for both mem and memcg and every block count, 0.14 to 0.15 on hi; coherent sib 0.45 to 0.48, hi 0.26 to 0.30. So in section 1: L1 eviction prediction held; "sib random rises at 1 block" missed (flat); the matched block flip prediction for coherent (1.0 to 1.5) missed (sib over hi 1.65 to 1.76 at 64 and 128 blocks).
+The stream is 16 bytes per thread at a 4 MB stride (every lane its own line and page), not a coalesced stream. New arms (group lvl):
+- Throttle: a sleep per iteration (150 us and 800 us, about 1/4 and 1/16 of the alone rate), on mem and memcg, sib (4 blocks per SM) and hi (2 per SM, the matched 128 blocks).
+- memseq: coalesced contiguous stream (each warp reads 512 contiguous bytes per load), plain load, sib at 1 and 4 blocks per SM and hi at 1 and 2.
+Predictions:
+- Throttled, random rays: RT ratio rises monotonically with the compute rate falling on sib: at 1/4 rate 0.08 to 0.4, at 1/16 rate 0.4 to 0.9. On hi: 1/4 0.5 to 0.9, 1/16 0.8 to 1.0. The sib ratio stays below the hi ratio at the same level (at least 1.3 times lower).
+- memseq on sib, random rays, 4 blocks: compute bandwidth at least 2 times the strided rate (240 GB/s or more) and RT ratio at least 5 times the strided 0.022 (0.11 or more), because the collapse is about the access pattern (one line and page per lane), not bytes. If memseq also gives about 0.02 the pattern is not the cause and bytes or request rate is.
+- Coherent rays, throttled: RT ratio rises with the rate falling on both placements (sib 1/16 above 0.8, hi 1/16 above 0.6); at each level sib above hi (placement effect), compute side lower on sib.
