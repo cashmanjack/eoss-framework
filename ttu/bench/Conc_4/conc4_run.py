@@ -18,6 +18,10 @@ def arms(group):
     def add(t, pl, lim, d=0):
         nm = '%s_%s%d' % ('hi' if pl == 'high' else pl, t, lim) + ('_d%d' % (d // 1000) if d else '')
         a.append((nm, Q, '%s:%s:%d:%d' % (t, pl, lim, d) if d else '%s:%s:%d' % (t, pl, lim)))
+    if group == 'pages':   # Phase 10i test 1 (c): pages per warp load, footprints 64 (L2 sized) and 512 MB (DRAM), siblings, unthrottled (model/predictions_phase10i.md)
+        for F in (64, 512):
+            for P in (1, 2, 4, 8, 16, 32): add('l2fp%dp%d' % (F, P), 'sib', 4)
+        return a
     pls = (('sib', 4), ('high', 2)) if group != 'smoke' else (('sib', 4),)
     for pl, lim in pls:
         for t in (('l2fp512', 'l2fp1024') if group == 'dram' else ('l2fp40', 'l2fp56', 'l2fp72', 'l2fp96', 'l2fp120', 'dramfew')):
