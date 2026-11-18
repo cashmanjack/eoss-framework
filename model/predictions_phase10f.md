@@ -21,3 +21,13 @@ Predictions with probabilities:
 4. Arkade fixed inside a factor 2: 45 percent (a 0.2 ms launch; launch overhead and the fixed part decide).
 5. TrueKNN total inside a factor 2: 65 percent; measured above predicted (the rebuild of this program was 1.4 to 3.3 times slower than the F160 build in rounds 1 to 3, F160): 65 percent.
 6. All eight scored rows (RTNN 2, kNN original total, kNN reg total, speedup, Arkade, TrueKNN; the per round kNN rows counted separately): at least 6 of the 8 headline rows inside a factor 2: 50 percent. The cycle form transfers to a second chip within a factor 2 on most rows: 55 percent.
+
+# Item 4: node state on the 4090, validated sequences (written before any TTU launch of these arms)
+Same arms as the triton runs, our TTU kernel (the checked group), one TTU warp on SM 0, two sessions of the same ray, scenes par:N:s (N 1,024 = 68 KB, 2,048 = 132 KB BVH, size independent of the GPU), 3 repetitions of 30 launches, medians, stage 0 of every build first then one stage 1 launch per arm, 128 blocks where the arm needs the sibling block (TPC = SM 2k, 2k+1 holds on the 4090: probe_placement; the F145 placement rule is in gpucfg). Saved fraction s = 1 - (second session cycles) / (single session cycles).
+Hold = the same qualitative outcome as on triton: 
+- F150 capacity curve: s between 0.45 and 0.70 up to N 2,048 (132 KB) with no trend, s at most 0.25 from N 4,096 (263 KB) on, at most 0.08 from N 16,384 on, and the TTUCCTL arm (cctl) within 0.05 of 0 at every N. Probability that all hold: 60 percent (the L1 is 128 KB per SM on both chips, but the 4090 has a smaller L2 and the knee position depends on the BVH shape; the knee location can move by one step: I accept a knee between 132 and 330 KB).
+- F159 fence decomposition (N 1,024 and 2,048): sibling polling without a fence s 0.45 to 0.70 (b1); cta fence on the sibling no loss (s above 0.45); gpu fence on the sibling s 0.15 to 0.40; gpu fence on the TTU's own SM s 0.15 to 0.40; gpu fences on both s at most 0.12. Probability all five hold: 55 percent.
+- F161 TTUCCTL alone on the sibling SM: s at most 0.06 at both sizes (0.00 on triton). Probability 75 percent. F162 own TTUCCTL (arm i): s at most 0.06. Probability 75 percent.
+- F174 own L1 stream (1 MB of ordinary loads on the TTU's SM between the sessions) against the same wait without loads: s(stream) at least 0.10 below s(wait) at both sizes (triton: 0.29 and 0.27 against 0.53 and 0.42). Probability 60 percent.
+Overall: at least 4 of the 5 result groups hold on the 4090: 60 percent.
+Run safety: only checked builds (check_seq ALL PASS), stage 0 first, smallest launch first, timeout 30 via run.py, GPU 1 idle, stop at the first fault, wrong exit, missing block or timeout.
