@@ -43,7 +43,7 @@ Safety: run only on an idle GPU, under `timeout`, smallest launch first, as in t
 ## Limits (read before relying on it)
 - OptiX's own kernels are invisible to NVBit and to the official profilers (F12, F60). BITTU compute mode applies to kernels with TTU code compiled by us or others directly.
 - A usable timing needs a twin build with no-ops in the group's place (F122); for OptiX kernels no twin exists.
-- One warp, one group shape, two GPUs in the validation (F119, F122, F260). Many warps and other group shapes (the IAS group) are not yet validated for BITTU.
+- Two GPUs in the validation (F119, F122, F260). Counts and decode are validated up to 16 warps and for the IAS group (F261); the timing correction is validated for one warp only (it fails with 2 or more warps, F261).
 - The tool must be built against the exact NVBit version (1.8.1) and the driver on the project's validated list.
 
 ## What may be released publicly
