@@ -1,4 +1,4 @@
-**SUPERSEDED (2026-11-18, F243): the RT against CLOVER comparison of this file is replaced by results_fair_table.md (one table, RTNN knn mode, TrueKNN, CLOVER hubs and warpwise, every dataset, K 5, 50 and 128, with an exactness column). The RTNN rows below are radius mode, which is not a kNN answer. The CLOVER timings below stand. The TrueKNN rows are the device buffer build of our port.**
+**SUPERSEDED (2026-11-18, F245): the RT against CLOVER comparison of this file is replaced by results_fair_table.md (one table, RTNN knn mode, TrueKNN, CLOVER hubs and warpwise, every dataset, K 5, 50 and 128, with an exactness column). The RTNN rows below are radius mode, which is not a kNN answer. The CLOVER timings below stand. The TrueKNN rows are the device buffer build of our port.**
 
 # CLOVER (non RT baseline) against the RT methods (2026-11-17, triton GPU 1, plain CUDA for CLOVER, OptiX for RTNN; no TTU code)
 
