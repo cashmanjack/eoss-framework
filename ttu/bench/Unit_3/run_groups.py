@@ -42,6 +42,14 @@ if __name__ == '__main__':
     elif step in ('stage0S', 'firstS'):   # shifted start files (predictions: model/predictions_knee2.md); the start file has 1,024 lines (lane pattern tiled)
         n, w, bn = (1000000, 32, B0) if step == 'stage0S' else (1000, 1, B1)
         go(bn, '%s/s_%s_%s.json' % (work, step, TS), 'soup:%d' % n, 'file:' + rayfile('cls4' if n == 1000000 else 'cls2', n, w), ['--warps', str(w), '--repeat', '1', '--start-file', '%s/sh%d_%d.txt' % (D, 4 if n == 1000000 else 2, n)])
+    elif step == 'runsN':   # Phase 10i test 2: far (cls g = 32 / D), near (near<D>) and the identical floor, D = 2 4 8 16 32, sizes 100,000 and 1,000,000, 32 warps, 3 rotated repetitions (predictions: model/predictions_phase10i.md)
+        res = []; cells = [(n, nm) for n in (100000, 1000000) for nm in ['cls32'] + ['cls%d' % (32 // d) for d in (2, 4, 8, 16, 32)] + ['near%d' % d for d in (2, 4, 8, 16, 32)] if os.path.exists(rayfile(nm, n, 32))]
+        for rep in range(3):
+            for k in range(len(cells)):
+                n, nm = cells[(k + rep * 4) % len(cells)]
+                j = go(B1, '%s/n_%s_%d_r%d_%s.json' % (work, nm, n, rep, TS), 'soup:%d' % n, 'file:' + rayfile(nm, n, 32), ['--warps', '32', '--repeat', '30'])
+                s = stats(j); s.update(size=n, rays=nm, rep=rep); res.append(s); print('   ', s, flush=True)
+        json.dump(res, open('%s/n_summary_%s.json' % (work, TS), 'x'))
     elif step == 'runsK2':   # W = 12 on six sizes, new sizes at W = 16 and 32, shifted variant (120 runs)
         res = []; S6 = (1000, 10000, 30000, 100000, 300000, 1000000)
         def one(kind, n, W, nm, extra=()):
