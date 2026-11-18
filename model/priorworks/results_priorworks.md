@@ -11,7 +11,7 @@ Ratio = measured / predicted (1 = exact; success rule set before: within a facto
 | dragon | 0.15333 | 1.737 | 4.317 (3) | 2.49 |
 | dragon | 0.6133 | 5.297 | 8.973 (3) | 1.69 |
 
-## TrueKNN (original = managed memory frame buffer, fixed = device buffer; launches only = sum of per round global timer spans; wall = sum of the program's per round times)
+## TrueKNN (CORRECTION 2026-11-18, F242: "original" below is the managed memory build of OUR PORT, not TrueKNN's own program; its 58 to 6,200 times launch time comes from the read mostly advice of the OWL copy under the port, and with that call removed it takes the device buffer time. Read the original columns as that build only. fixed = device buffer; launches only = sum of per round global timer spans; wall = sum of the program's per round times)
 
 | dataset | k | predicted rounds | measured rounds | predicted launches | fixed launches | ratio | original launches | original / fixed | fixed wall | original wall |
 |---|---|---|---|---|---|---|---|---|---|---|
