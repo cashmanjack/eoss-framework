@@ -2,7 +2,7 @@
 # Div_1 runs (tethys GPU 1, OptiX only, no TTU code). Lane histograms: LHOUT=<prefix> (files created with mode x, never overwritten).
 # usage: run_div.sh WORKLOAD REPS MODE   WORKLOAD mochi|knn|rtnn_r05|rtnn_r025|ark_r0112|ark_r005|tk100k|tk400k   MODE probe|plain
 export LD_LIBRARY_PATH=$HOME/opt/nvoptix-580.178.04:$LD_LIBRARY_PATH; export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=1 RTNN_DRAM_GB=11.5958; source ~/cuda128.sh
-O=$HOME/eoss/notes/div1/raw; ts=$(date +%Y%m%dT%H%M%S); W=$1; REPS=$2; MODE=$3; D=/dev/shm/dv
+O=$HOME/eoss/notes/div1/raw; ts=$(date +%Y%m%dT%H%M%S); W=$1; REPS=$2; MODE=$3; D=${DIV_DIR:-$HOME/thirdparty/div1}
 idle() { [ -z "$(nvidia-smi -i 1 --query-compute-apps=pid --format=csv,noheader)" ] || { echo "GPU 1 busy, stop"; exit 3; }; }
 for i in $(seq $REPS); do idle; b=$O/${W}_${MODE}_${ts}_$i; if [ $MODE = probe ]; then export LHOUT=$b; else unset LHOUT; fi
  case $W in
