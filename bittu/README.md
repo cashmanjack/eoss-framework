@@ -3,7 +3,7 @@
 BITTU counts, times and records the tree traversal unit (TTU, the RT core's SASS level interface) groups inside GPU kernels, so that a performance model can be checked against what the hardware does. It is part of the RETTU project (Purdue ECE, Kulkarni group), built on EoSS (Baddouh, Payer, Rogers, ASPLOS 2027) and NVBit (Villa et al., MICRO 2019). Finding numbers (F...) below refer to the Findings section of `MASTER_PLAN.md` in the repository root.
 
 ## Status in one paragraph
-Compute mode works for kernels with TTU code that we compile and run ourselves (decode, ray and result capture exact; timing exact to under 1 percent when a twin build with no-ops is available). It cannot instrument OptiX's own kernels, because NVBit never sees them (F12, F60); for OptiX programs the project uses a recorder (clock reads and counters written into the user's own device programs), which is not NVBit and whose patches are for third party programs and are not in this directory. Validated runs so far: one GPU (RTX 4070 Ti, SM89), the single level traversal group, one warp. No BITTU compute run on another GPU is recorded in the Findings.
+Compute mode works for kernels with TTU code that we compile and run ourselves (decode, ray and result capture exact; timing exact to under 1 percent when a twin build with no-ops is available). It cannot instrument OptiX's own kernels, because NVBit never sees them (F12, F60); for OptiX programs the project uses a recorder (clock reads and counters written into the user's own device programs), which is not NVBit and whose patches are for third party programs and are not in this directory. Validated runs so far: two GPUs (RTX 4070 Ti, F119 and F122; RTX 6000 Ada, F260), both SM89, the single level traversal group, one warp. On the 6000 Ada the corrected group time agrees with the harness clock to 1.2 percent at three depths (F260).
 
 ## What is here
 - `compute/`: the NVBit tool (`bittu.cu`, `inject_bittu.cu`, `bittu_rec.h`), the field table generated from the EoSS SM89 tables (`gen_tables.py` writes `ttu_tables.h`), a runner (`run_bittu.py`) and the timing check (`timing_fix.py`).
@@ -20,11 +20,12 @@ Build and run (needs NVBit 1.8.1 from NVIDIA Labs, CUDA 12.8, CMake only for NVB
     source ~/cuda128.sh
     bittu/compute/build.sh /dev/shm/bittu
     python bittu/compute/run_bittu.py BIN RAYS FILL OUT.json REPORT.txt      # BIN: a checked setup3 binary; run.py applies the safety checks
+    python bittu/compute/validate_gpu.py prepare|run|clean WORK ...          # the whole validation on the GPU gpucfg selects (F260); needs the project's private OptiX dump to build the checked group
 
 Environment: `BITTU_OUT` (report file), `BITTU_PRINT` (records printed), `BITTU_MODE=off` (decode only) or `empty` (the empty probe pair for the overhead subtraction), `BITTU_KERNEL`, `BITTU_GROUP_FILE`, `BITTU_GROUP_OFF`, `BITTU_GROUP_LEN`.
 Safety: run only on an idle GPU, under `timeout`, smallest launch first, as in the project's rules; never run a TTU sequence that was not checked.
 
-## Accuracy and overhead (all on an RTX 4070 Ti, one warp, the checked single level group)
+## Accuracy and overhead (RTX 4070 Ti unless the Finding says RTX 6000 Ada; one warp, the checked single level group)
 | Item | Result | Finding |
 |---|---|---|
 | NVBit sees the TTU instructions | no: the 19 instruction group is a gap in its list (decoded by our tables instead) | F60 |
@@ -35,13 +36,14 @@ Safety: run only on an idle GPU, under `timeout`, smallest launch first, as in t
 | Raw probe to probe window around the group | 11,335 cycles against 1,613 for the group measured by the harness clock without the tool: the raw window is about 7 times too long and not usable as a latency | F119 |
 | Window around a block of no-ops of the same length (twin build, same probes) | 9,733 to 9,917 cycles (2 percent spread across scenes, 0.4 percent between two runs of one scene) | F122 |
 | Corrected group time (window with the group minus the no-op window) at depths 1, 2, 3 | 1,522 / 1,855 / 2,163 cycles against 1,533 / 1,850 / 2,154 from the harness clock (group minus empty slots): within 11, 6, 9 cycles (0.7, 0.3, 0.4 percent) | F122 |
+| RTX 6000 Ada (`validate_gpu.py`): decode, 32 instances with full masks, results equal the plain run (except address words), probe cost 1,442 to 1,483 cycles, raw window 5.6 to 7.5 times the group, corrected group time 1,522 / 1,869 / 2,175 cycles against 1,504 / 1,891 / 2,148 from the harness clock (+1.2, -1.2, +1.2 percent), no fault | F260 |
 | Single probe subtraction (the first attempt) | wrong by a factor 6: a probe's register save and restore lies inside the window | F119 |
 | OptiX recorder (not NVBit; clock reads and a counter in RTNN's own programs) | costs 7 to 15 percent of kernel time (event timing; F118's 1.1 to 5 times was host timer artefact); counts valid (lane efficiency identical to 0.003 at every sampling rate), per warp trace time divergence not observable | F118, F121 |
 
 ## Limits (read before relying on it)
 - OptiX's own kernels are invisible to NVBit and to the official profilers (F12, F60). BITTU compute mode applies to kernels with TTU code compiled by us or others directly.
 - A usable timing needs a twin build with no-ops in the group's place (F122); for OptiX kernels no twin exists.
-- One warp, one group shape, one GPU in the validation (F119, F122). Many warps, other group shapes and the RTX 6000 Ada are not yet validated for BITTU.
+- One warp, one group shape, two GPUs in the validation (F119, F122, F260). Many warps and other group shapes (the IAS group) are not yet validated for BITTU.
 - The tool must be built against the exact NVBit version (1.8.1) and the driver on the project's validated list.
 
 ## What may be released publicly
