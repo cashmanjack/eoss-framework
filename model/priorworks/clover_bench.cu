@@ -1,6 +1,6 @@
 // CLOVER timing and correctness harness (2026-11-17). Our code; includes CLOVER's linear-scans.cu (third party, not copied) with its main renamed.
 // Build: nvcc -O3 -DNDEBUG -arch=sm_89 -std=c++20 -w -I<clover>/include -DCLOVER_SRC=<clover>/src clover_bench.cu -o clover_bench
-// Usage: ./clover_bench ALG FILE N Q K REPS CHECK [seed]
+// Usage: ./clover_bench ALG FILE N Q K REPS CHECK [seed [DUMPFILE]]   DUMPFILE (new, 2026-11-17): writes the Q x K result indices (idx_t) of the last rep, never overwrites (full correctness check in python, check_clover_full.py)
 //   ALG 0 bitonic, 1 warpwise, 2 hubs. FILE x,y,z csv (first N lines). Q queries: Q == N means every point, else a random subset (seed).
 //   Prints CLOVER's own span for each rep (ns, device synchronized, hubs include the index build) and, for CHECK sampled queries, wrong count against a CPU double brute force (tie tolerance 1e-6 relative).
 #include <set>
@@ -35,5 +35,6 @@ int main(int argc, char **argv) {
         recall += (double)hit / K; if (!ok) ++wrong;
     }
     std::cout << "CHECK alg " << alg << " N " << N << " Q " << Q << " K " << K << " sampled " << CH << " wrong " << wrong << " far " << far << " invalid " << bad << " recall " << (CH ? recall / CH : 1) << std::endl;
+    if (argc > 9) { FILE *fo = fopen(argv[9], "wbx"); if (fo) { fwrite(&knn[0], sizeof(idx_t), Q * K, fo); fclose(fo); } else std::cerr << "dump file exists or cannot open\n"; }
     return 0;
 }
