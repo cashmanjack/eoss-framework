@@ -370,7 +370,8 @@ static double t_start = now_s();
 #define TICK(name) do { if (getenv("SETUP3_TICKS")) fprintf(stderr, "tick %7.2f s  %s\n", now_s() - t_start, name); } while (0)
 // SM count and block placement come from the device (was 142 / 71, the RTX 6000 Ada): block b lands on SM 2b for b < NSM/2, then on the odd SMs (verified per GPU by ttu/config/probe_placement.cu)
 static int NSM = 0, HALF = 0;
-#define SMOF(b) ((unsigned)((b) < HALF ? 2 * (b) : 2 * ((b) - HALF) + 1))
+static std::vector<unsigned> SMTAB;   // --smtable FILE: measured block to SM table (pc14, RTX 5090: the Ada rule does not hold there); empty = the Ada rule
+static inline unsigned SMOF(unsigned b) { return !SMTAB.empty() ? SMTAB[b % SMTAB.size()] : (unsigned)(b < (unsigned)HALF ? 2 * b : 2 * (b - HALF) + 1); }
 __global__ void copy_node(const unsigned *s, unsigned *d, int n) { for (int i = threadIdx.x; i < n; i += blockDim.x) d[i] = s[i]; }
 int main(int argc, char **argv)
 {
@@ -378,10 +379,12 @@ int main(int argc, char **argv)
     const bool random_fill = !strcmp(argv[4], "random");
     double energy_s = 0;
     int sib_sm = -1, sib_kb = 4096, sib_passes = 4; unsigned sib_poll = 0, sib_mode = 0;
-    bool gopaque = false; unsigned imask = 255; std::string imat = "id"; bool ias = false; bool decoy = false, thrash_near = false, thrash_node = false; size_t tlbpages = 0; bool run_ttu = true, thrash = false, thrash_gas = false; unsigned thrash_lane = 128; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int oclk = 0, lclock = 0, onrep = 1, orot = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
+    bool gopaque = false; unsigned imask = 255; std::string imat = "id"; bool ias = false, sm120 = false; bool decoy = false, thrash_near = false, thrash_node = false; size_t tlbpages = 0; bool run_ttu = true, thrash = false, thrash_gas = false; unsigned thrash_lane = 128; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int oclk = 0, lclock = 0, onrep = 1, orot = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
         else if (!strcmp(argv[a], "--ias")) ias = true;
+        else if (!strcmp(argv[a], "--smtable") && a + 1 < argc) { std::ifstream tf(argv[++a]); std::string ln; while (std::getline(tf, ln)) { if (ln.empty() || ln[0] == '#') continue; std::istringstream ts(ln); unsigned v; while (ts >> v) SMTAB.push_back(v); } if (SMTAB.empty()) { fprintf(stderr, "empty --smtable\n"); return 2; } }
+        else if (!strcmp(argv[a], "--sm120")) sm120 = true;   // pc14 (RTX 5090): register image of the SM120 GAS group (build_patch.py --sm 120); plain builds only. Role table: see the block below
         else if (!strcmp(argv[a], "--gopaque")) gopaque = true;
         else if (!strcmp(argv[a], "--imat") && a + 1 < argc) imat = argv[++a];   // --ias (Xform_1): instance object to world transform: id (default) | rz37 | rz90s2 | rx37 | snu
         else if (!strcmp(argv[a], "--imask") && a + 1 < argc) imask = (unsigned)strtoul(argv[++a], nullptr, 0);   // --ias: instance visibility mask (default 255; Mask_1)
@@ -904,6 +907,18 @@ int main(int argc, char **argv)
             R[52] = words[4]; R[53] = words[5];                                                            // 0x80 (high pair = R48:R49 again)
             if (words[6] != words[2] || words[7] != words[3]) { fprintf(stderr, "--ias: words 6, 7 must equal words 2, 3 (R48:R49 serve stores 0 and 0x80)\n"); exit(2); }
             R[6] = (unsigned)iroot; R[7] = (unsigned)(iroot >> 32) + 0x10000000u;                          // 0x200 low pair; R24:R25 (its high pair), R90 stay 0
+        }
+        if (sm120) {   // register image of the SM120 GAS group (build_patch.py --sm 120; registers read from the SM120 live OptiX code, notes/protocol.md SM120). Every pair by the store that reads it:
+            for (int k = 0; k < N; ++k) R[k] = 0;
+            R[24] = fbits(y.o[0]); R[25] = fbits(y.o[1]); R[56] = fbits(y.o[2]); R[57] = fbits(y.tmin);   // 0xC0 (low pair Rc = R24, high pair Rb = R56)
+            R[32] = fbits(y.d[0]); R[33] = fbits(y.d[1]); R[30] = fbits(y.d[2]); R[31] = fbits(y.tmax);   // 0xD0 (Rc = R32, Rb = R30)
+            R[34] = (unsigned)(A >> 6); R[35] = ((((unsigned)(A >> 32) >> 6) | 0x402800u) & 0x1ffffffu) | 0x2000000u;   // 0x100 and 0x200 low pair (Rc = R34); high pair R54:R55 = 0
+            R[70] = (unsigned)(ray_start[(size_t)chunk * LANES + i % LANES] >> 7); R[71] = ((unsigned)(ray_start[(size_t)chunk * LANES + i % LANES] >> 32) >> 7) | start_flags;   // 0x180 low (Rc = R70); high R52:R53 and 0x190 (R38:R39, R66:R67) = unk fill below
+            { const unsigned long long u6[6] = {unk_vals[0], unk_vals[1], unk_vals[2], unk_vals[3], unk_vals[4], unk_vals[5]}; R[52] = (unsigned)u6[0]; R[53] = (unsigned)u6[1]; R[38] = (unsigned)u6[2]; R[39] = (unsigned)u6[3]; R[66] = (unsigned)u6[4]; R[67] = (unsigned)u6[5]; }
+            R[68] = words[0]; R[69] = words[1]; R[62] = words[2]; R[63] = words[3];                        // 0 (Rc = R68, Rb = R62)
+            R[60] = words[4]; R[61] = words[5]; R[58] = words[6]; R[59] = words[7];                        // 0x80 (Rc = R60, Rb = R58)
+            R[78] = fbits(y.o[0]); R[79] = fbits(y.o[1]); R[12] = fbits(y.o[2]); R[13] = fbits(y.tmin);   // 0x40 (Rc = R78, Rb = R12)
+            R[14] = fbits(y.d[0]); R[15] = fbits(y.d[1]); R[6] = fbits(y.d[2]); R[7] = fbits(y.tmax);     // 0x50 (Rc = R14, Rb = R6); R90 = 0 (P0 true)
         }
         if (decoy) { R[36] = (unsigned)(A2 >> 6); R[37] = ((((unsigned)(A2 >> 32) >> 6) | 0x402800u) & 0x1ffffffu) | 0x2000000u; R[38] = (unsigned)(root2 >> 7); R[39] = ((unsigned)(root2 >> 32) >> 7) | start_flags; }
         R[18] = sm_a; R[19] = sm_b;   // used only by --smfilter builds

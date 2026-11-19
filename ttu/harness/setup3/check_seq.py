@@ -40,7 +40,8 @@ def check(path):
     sec = [s for s in p.sections if s[2] == meta['section']]
     ok('one ttu_one section', len(sec) == 1)
     body = [b for _, b in elf.iter_instructions(p.data, sec[0])]
-    dec = Decoder(ISASpec.load(sm=89))
+    SM = meta.get('sm', 89)
+    dec = Decoder(ISASpec.load(sm=SM))
     ex = next(i for i, b in enumerate(body) if low12(b) == 0x94d and pred(b) == (7, 0))   # the unpredicated EXIT
     fails = [i for i in range(ex) if dec.decode(0, body[i]).n_failed]
     ok('A1 body decodes with 0 failed checks up to EXIT', not fails, fails[:5])
@@ -69,6 +70,13 @@ def check(path):
             shape = [ST] * 10 + [GO] + [ST] * 10 + [GO] + [LD] * 6 if meta.get('dualgo') else [ST] * 10 + [GO] + [LD] * 6
             if meta.get('ias'): shape = [ST] * 8 + [GO] + [LD] * 6   # F91 IAS group: fuse count 15
             ok(tag + ('A4 group is 10 ST, GO, 10 ST, GO, 6 LD (dualgo)' if meta.get('dualgo') else 'A4 group is 8 ST, GO, 6 LD (IAS)' if meta.get('ias') else 'A4 group is 10 ST, then 1 GO, then 6 LD'), kinds == shape, kinds)
+            if SM == 120:   # A13 (SM120 GAS group, pc14): the shape read from the SM120 live OptiX code (notes/protocol.md SM120): store offsets, load offsets, predicates, DUAL open, fuse 17, and the group equal to the dump's bytes
+                offs = lambda b: (W(b) >> 40) & 0xffff
+                ok(tag + 'A13 SM120 store offsets 0xC0, 0xD0, 0x200, 0x100, 0x180, 0x190, 0, 0x40, 0x50, 0x80', [offs(b) for b in grp[:10]] == [0xc0, 0xd0, 0x200, 0x100, 0x180, 0x190, 0, 0x40, 0x50, 0x80], [hex(offs(b)) for b in grp[:10]])
+                ok(tag + 'A13 SM120 load offsets 0x300 0x310 0x320 0x380 0x3C0 0x3D0', [offs(b) for b in grp[11:]] == [0x300, 0x310, 0x320, 0x380, 0x3c0, 0x3d0], [hex(offs(b)) for b in grp[11:]])
+                ok(tag + 'A13 SM120 predicates: @P0 on 0xC0 0xD0, @!P0 on 0x200, @P0 on 0x100 0x180 0x190, the other stores, GO and loads unpredicated',
+                   [pred(b) for b in grp[:10]] == [(0, 0), (0, 0), (0, 1), (0, 0), (0, 0), (0, 0)] + [(7, 0)] * 4 and all(pred(b) == (7, 0) for b in grp[10:]), [pred(b) for b in grp])
+                ok(tag + 'A13 SM120 fuse count is 17 and the open is TTUOPEN.DUAL (bit 72 on the open only)', n == 17 and bit(body[gi], 72) == 1, (n, bit(body[gi], 72)))
             if meta.get('ias'):   # A13 (IAS only): the F91 shape, in the harness's own (possibly remapped) registers: store and load offsets, which stores are predicated and how
                 offs = lambda b: (W(b) >> 40) & 0xffff
                 ok(tag + 'A13 IAS store offsets 0, 0x40, 0x50, 0x80, 0x100, 0x180, 0x190, 0x200', [offs(b) for b in grp[:8]] == [0, 0x40, 0x50, 0x80, 0x100, 0x180, 0x190, 0x200], [hex(offs(b)) for b in grp[:8]])
@@ -81,6 +89,9 @@ def check(path):
             ok(tag + 'A6 exactly one TTULD with bit 74, and it is last', close == [n - 1] and lds[-1] == n - 1, close)
             ok(tag + 'A7 CLOSE unpredicated', pred(grp[-1]) == (7, 0), pred(grp[-1]))
             ok(tag + 'A8 bit 72 only on TTUOPEN', not any(bit(b, 72) for b in grp))
+            if SM == 120 and len(sys.argv) > 2 and not meta.get('remap'):   # A10 plain SM120: the group is byte for byte the dump's (register fields included)
+                d = open(sys.argv[2], 'rb').read(); gd = [d[0x20000 - 0x10120 + 16 * k:0x20000 - 0x10120 + 16 * k + 16] for k in range(19)]
+                ok(tag + 'A10 SM120 group equals the SM120 dump byte for byte', body[gi:gi + 19] == gd)
             # A12 (2026-11-10, Cesar): TTUST Rb, Rc and TTULD Rd, Rd2 are even aligned 64 bit register pairs on SM89
             # and SM120 (IDEST_SIZE 64; the spec requires even Rd and Rd2). Each base register must be even or RZ.
             fld = lambda b, lo: (W(b) >> lo) & 0xff

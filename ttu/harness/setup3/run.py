@@ -40,11 +40,19 @@ def main():
     if not os.path.exists(chk) or open(chk).read().strip() != sha:
         sys.exit('refused: check_seq.py has not passed on this binary (%s)' % sha)
     cfg = gpucfg.load()   # first idle GPU (TTU_GPU overrides); refuses a driver without a validated TTU group
-    cfg.check_idle()
+    if os.environ.get('PC14_STAGE0'):   # pc14 (RTX 5090, display GPU, driver not validated for TTU): ONLY a stage 0 SM120 build (no TTU instruction, check_seq passed) and only when pc14_gpucheck.sh says the GPU is free
+        import json
+        meta = json.load(open(binp + '.layout.json'))
+        if meta.get('stage') != 0 or meta.get('sm') != 120: sys.exit('refused: PC14_STAGE0 runs only stage 0 SM120 builds')
+        chk_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'notes', 'pc14_gpucheck.sh')
+        if subprocess.run([chk_script]).returncode: sys.exit('refused: GPU not free (pc14_gpucheck.sh)')
+    else:
+        cfg.check_idle()
     GPU = cfg.index
     env = cfg.env(dict(os.environ, **({'CUDA_INJECTION64_PATH': inject} if inject else {})))
     ptx = os.path.join(os.path.dirname(binp), 'setup3_dev.ptx')
     cmd = ['timeout', '-k', '2', '30'] + ncu + [binp, ptx, os.path.join(os.path.dirname(binp), 'words.txt'), rays, fill, out] + extra
+    if cfg.placement_table and '--smtable' not in extra: cmd += ['--smtable', cfg.placement_table]   # measured block to SM table (GPUs where the Ada rule does not hold)
     print('sha256', sha)
     r = subprocess.run(cmd, env=env)
     print('exit', r.returncode)

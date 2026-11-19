@@ -88,6 +88,11 @@ class Config:
         self.driver_validated = self.driver in prof['validated_drivers']
         self.encodings = os.path.normpath(os.path.join(HERE, '..', 'encodings', p['encodings']))
         self.optix_lib = self._optix_lib()
+        self.placement_table = None   # measured block -> SM table (list in self.sm_table) for GPUs whose placement is not the Ada rule
+        self.sm_table = None
+        pt = os.path.join(HERE, 'placement', 'rtx%s_%dsm.txt' % ('5090' if '5090' in self.name else 'x', self.sm_count))
+        if p.get('placement') and os.path.exists(pt):
+            self.placement_table = pt; self.sm_table = [int(x) for ln in open(pt) if not ln.startswith('#') for x in ln.split()]
         if self.sm_count % 2: sys.exit('odd SM count: placement rule unknown')
 
     def _optix_lib(self):
@@ -100,6 +105,7 @@ class Config:
 
     def sm_of_block(self, b):
         """SM a block lands on when one block per SM is launched (the first half of the blocks on the even SMs, then the odd ones). Ada only."""
+        if self.sm_table: return self.sm_table[b % len(self.sm_table)]
         if self.profile.get('placement'): sys.exit('no block to SM rule coded for %s (placement %s): use the measured table' % (self.sm, self.profile['placement']))
         return 2 * b if b < self.half else 2 * (b - self.half) + 1
 

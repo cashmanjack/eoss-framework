@@ -7,7 +7,9 @@ OD = os.path.join(HERE, '..', '..', 'optix_dump')
 sys.path.insert(0, os.path.join(HERE, '..', '..', 'config'))
 import gpucfg
 CFG = gpucfg.load(); ENV = CFG.env()
-OUT = '/dev/shm/flagenc'; os.makedirs(OUT, exist_ok=True)
+OUT = os.environ.get('FE_OUT', '/dev/shm/flagenc'); os.makedirs(OUT, exist_ok=True)   # pc14: FE_OUT=notes/flagenc_sm120
+BUSY_CMD = os.environ.get('FE_GPUCHECK')   # pc14: script that exits 0 only when the GPU is free (the Steam helper counts as a compute process there)
+OPTIX = os.environ.get('OPTIX_ROOT', os.path.expanduser('~/optix_sdk'))
 F = dict(NONE=0, DISABLE_ANYHIT=1, ENFORCE_ANYHIT=2, TERMINATE=4, DISABLE_CLOSESTHIT=8, CULL_BACK=16, CULL_FRONT=32,
          CULL_OPAQUE=64, CULL_NON_OPAQUE=128)
 VARS = {'base': {}}
@@ -24,7 +26,7 @@ for name in sel:
     d = VARS[name]
     ptx = os.path.join(OUT, name + '.ptx')
     defs = ['-D%s=%s' % kv for kv in d.items()]
-    r = subprocess.run(['nvcc', '-O2', '-arch=sm_89', '-ptx', '-I' + os.path.expanduser('~/optix_sdk/include'), '-I' + OD,
+    r = subprocess.run(['nvcc', '-O2', '-arch=' + CFG.sm.replace('sm', 'sm_'), '-ptx', '-I' + OPTIX + '/include', '-I' + OD,
                         '-o', ptx, os.path.join(HERE, 'memdump_var_dev.cu')] + defs, capture_output=True, text=True)
     if r.returncode: sys.exit(r.stderr)
     # memdump loads memdump_dev.ptx from its own directory: copy the exe next to the variant ptx
@@ -32,8 +34,11 @@ for name in sel:
     subprocess.run(['cp', os.path.join(OD, 'memdump'), exe + '/memdump']); subprocess.run(['cp', ptx, exe + '/memdump_dev.ptx'])
     raw = os.path.join(OUT, '%s_%s.bin' % (name, stamp))
     if os.path.exists(raw): sys.exit('exists ' + raw)
-    r = subprocess.run(['nvidia-smi', '-i', str(CFG.index), '--query-compute-apps=pid', '--format=csv,noheader'], capture_output=True, text=True)
-    if r.stdout.strip(): sys.exit('GPU busy')
+    if BUSY_CMD:
+        if subprocess.run([BUSY_CMD], capture_output=True).returncode: sys.exit('GPU busy (check script)')
+    else:
+        r = subprocess.run(['nvidia-smi', '-i', str(CFG.index), '--query-compute-apps=pid', '--format=csv,noheader'], capture_output=True, text=True)
+        if r.stdout.strip(): sys.exit('GPU busy')
     cmd = ['timeout', '-k', '2', '30', exe + '/memdump', 'read', '--fn', '--fnrel', '-' + OFF, '--method', 'kernel', '--len', WIN, '--out', raw]
     r = subprocess.run(cmd, env=ENV, capture_output=True, text=True)
     print(name, 'exit', r.returncode, r.stdout.strip().splitlines()[-1:] , r.stderr.strip()[-200:])
