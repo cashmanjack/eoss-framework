@@ -45,10 +45,11 @@ Chips: 6000 Ada = RTX 6000 Ada (triton, 142 SMs = 71 TPCs, 96 MB L2); 4070 Ti (i
 | Request merging | cost follows distinct node paths: same ray moved by 1e-6 costs the identical lane floor at every D; distinct paths 85 cycles per ray at D 32 | n m | n m | floor 18 and 20.4 (100,000 and 1M triangles), 84 at D 32 | F263, F199 |
 | Node state | wait without loads between sessions, 68 / 132 KB, saving after 10 / 70 / 300 us (no wait: 0.62 / 0.54) | n m | n m | 0.57, 0.58, 0.57 / 0.46, 0.46, 0.46 | F265 |
 | Node state | 70 us wait loss, F175 (68 / 132 KB) | 0.08 / 0.15 (F175, F256 as quoted) | n m | 0.04 / 0.08 (F265; differs from F256) | F175, F256, F265 |
+| Node state | zero wait with the role block present, saving 68 / 132 KB (control 70 us in the same run) | n m | n m | 0.58 / 0.45 (control 0.58 / 0.46; loss equals the 70 us loss within 0.01) | F265 |
 | Encodings | canonical TTU instructions byte identical SM89 and SM120 | 9 of 10 (TTULD.CLOSE close bit only) | n m | n m | F258 |
 | BITTU | decode, 32 instances, counts exact; many warps and IAS group counts exact; timing correction fails with 2 or more warps | yes (1 warp checked group; many warps, IAS) | 4070 Ti (F119, F122) | n m | F260, F261 |
 | Blind pipeline | calibrated launch time inside 2x: 1 of 24 cells, winner call 14 of 24 | 24 cells | n m | n m | F259 |
-| TPC sharing | short query pair, same record loop build: one warp ran, final records disagree with OptiX; 64 and 128 block runs not done | n m | n m | GAP, still open (F264) | F264 |
+| TPC sharing | short query loop build (same record, compact records), 13 warps per block, rays per SM per cycle at 1 / 64 / 128 blocks, records equal to OptiX | n m | n m | 0.038 / 0.022 / 0.011; whole GPU 96 / 3,493 / 3,609 rays per us; one SM below the 0.06 rule, pair ratio 1.03 reported not scored (F264) | F264 |
 
 ## What is missing, and what I did about it
 Counting the 36 rows: all three chips only for the cost (hits, one triangle, depth), TPC sharing (long queries, other TPC, whole chip) and cache rows; two chips for the node state rows (6000 Ada and 4090, which are the same die, plus F104's coarse 4070 Ti numbers) and the short query pair rows (4070 Ti and 6000 Ada); the callback, flag, mask, micromap, partial warp, sibling DRAM and instance rows are one chip each (mostly the 4090).
@@ -65,3 +66,6 @@ Remaining gaps, each one run on an idle GPU, predictions first:
 4. 4090: callback latency alone (875), cost regression F67, request merging counters F135, whole GPU short queries (blocked by gap 1).
 5. F262 hit rate beside RT (measured alone), coherent rays in the page sweep.
 
+
+## Update 2026-11-19 (Phase 10k)
+F264: the 4090 short query loop build now gives records identical to OptiX at 1, 64 and 128 blocks (the earlier failure was my runner); one SM 0.038 rays per cycle is below the 0.06 my rule required, so the pair ratio (128 over 64 blocks 1.03 in whole GPU rate) is not scored and the pair claim (TPC sharing) is still open for a build with timing probes. F265: zero wait arm added (loss equals the 70 us loss, so the role block, not the wait). Table now 47 rows; gap 1 above is replaced by: short query pair with timing probes (block placement and overlap).
