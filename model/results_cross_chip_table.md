@@ -1,6 +1,6 @@
 # Cross chip table of the headline microbenchmark numbers (2026-11-18, from existing Findings; one new run, Phase 10g)
 
-Chips (5090 column added 2026-11-19 on pc14: RTX 5090, Blackwell SM120, 170 SMs = 85 TPCs assumed, 96 MB L2, F400 to F410; only the core set was measured there, "n m" = not measured): 6000 Ada = RTX 6000 Ada (triton, 142 SMs = 71 TPCs, 96 MB L2); 4070 Ti (io, 60 SMs = 30 TPCs, 48 MB L2); 4090 (tethys, 128 SMs = 64 TPCs, 72 MB L2). "n m" = not measured on that chip, "?" = the Finding text I read does not name the chip. Cycles are SM cycles. Every value is from the Finding named in the last column; nothing was re derived. The 6000 Ada and the 4090 are both AD102, the 4070 Ti is AD104 (so "second chip" is a second part of one family, not a second architecture).
+Chips (5090 column added 2026-11-19 on pc14: RTX 5090, Blackwell SM120, 170 SMs = 85 TPCs assumed, 96 MB L2, F400 to F413; only the core set was measured there, "n m" = not measured): 6000 Ada = RTX 6000 Ada (triton, 142 SMs = 71 TPCs, 96 MB L2); 4070 Ti (io, 60 SMs = 30 TPCs, 48 MB L2); 4090 (tethys, 128 SMs = 64 TPCs, 72 MB L2). "n m" = not measured on that chip, "?" = the Finding text I read does not name the chip. Cycles are SM cycles. Every value is from the Finding named in the last column; nothing was re derived. The 6000 Ada and the 4090 are both AD102, the 4070 Ti is AD104 (so "second chip" is a second part of one family, not a second architecture).
 
 | Group | Metric | 6000 Ada | 4070 Ti | 4090 | 5090 (pc14) | Findings |
 |---|---|---|---|---|---|---|
@@ -9,12 +9,12 @@ Chips (5090 column added 2026-11-19 on pc14: RTX 5090, Blackwell SM120, 170 SMs 
 | Cost | one triangle, L2 warm / cold | 1,641 / 2,632 | 1,612 / 2,593 | 1,630 / 2,627 | 1,788 / 3,306 | F104, F176 |
 | Cost | regression: 934 + 343 node + 113 leaf + 52 triangle (cold launch) | 934 / 343 / 113 / 52 | n m | n m | n m | F67, F163 |
 | Cost | saturated unit: triangle 0.67, node 1.3, leaf slot 0 (cycles) | n m | n m | 0.67 / 1.3 / 0 | n m | F194 |
-| Cost | one SM steady rate, short coherent queries (rays per cycle) | n m | 0.10 | 0.143 to 0.148 (core set steady state, F176); 0.100 tri1 (Phase 10g) | 0.104 (32 warps); 0.0907 (20 warps) | F105, F176, Phase 10g |
+| Cost | one SM steady rate, short coherent queries (rays per cycle) | n m | 0.10 | 0.143 to 0.148 (core set steady state, F176); 0.100 tri1 (Phase 10g) | 0.158 to 0.162 steady (completion gaps, 20 to 32 warps), 0.091 to 0.104 whole span rate: the same two statistics as the 4090 (0.143 to 0.148 and 0.090 to 0.100), so the 5090 is 7 to 14 percent above on the steady rate (F410; the F407 comparison of 0.104 with 0.14 mixed the statistics) | F105, F176, Phase 10g |
 | TPC sharing | sibling pair over one SM, long coherent queries | 1.04 | 1.03 to 1.05 | 1.02 to 1.05 | 1.08 to 1.10 (overlap 80 to 100 percent) | F62, F104, F176 |
-| TPC sharing | sibling pair over one SM, short (1 triangle) queries | 1.53 | 1.38 | GAP: first run invalid (overlap 0 of 5 at G 128); per block rate 0.91 of alone only bounds it; open | n m | F105, F27, Phase 10g |
+| TPC sharing | sibling pair over one SM, short (1 triangle) queries | 1.53 | 1.38 | GAP: first run invalid (overlap 0 of 5 at G 128); per block rate 0.91 of alone only bounds it; open | 1.36 (277 pairs overlapping 90 to 100 percent: 0.0705 per SM against 0.1039 alone; 50 to 90 percent overlap 0.0781) | F105, F27, Phase 10g |
 | TPC sharing | other TPC pair | 2.0 | 1.99 to 2.01 | 2.0 | 1.98 to 2.0 | F27, F104, F176 |
 | TPC sharing | whole chip, long coherent queries (times one SM) | 70.6 at 71 SMs | 29.8 at 30, 31.1 at 60 | 63.5 at 64 (one per TPC), 64.6 at 128 | 84.6 at 85 (one per TPC), 88.0 at 170 | F62, F104, F176 |
-| TPC sharing | whole chip, one triangle queries (times one SM) | n m | 30.0 at 30, 41.3 at 60 | 63.5 at 64; 128 invalid | n m | F105, Phase 10g |
+| TPC sharing | whole chip, one triangle queries (times one SM) | n m | 30.0 at 30, 41.3 at 60 | 63.5 at 64; 128 invalid | per SM rate 0.1039 to 0.1041 at G 1 to 85 but only 64 blocks ran at once (sum of rates 85.0 times); G 170 0.072 per SM (120.9 times, 125 at once): not a clean whole GPU number | F105, Phase 10g |
 | Handoff | one warp, one custom primitive callback (cycles) | 850 to 900 (about 875) | n m | n m | n m | F49 |
 | Handoff | loaded callback latency over alone, four programs | n m | 1.3 to 16 times | n m | n m | F133 |
 | Handoff | register heap speedup of the any hit kNN | n m | 4.0 | 4.45 | n m | F138, F255 |
@@ -22,14 +22,15 @@ Chips (5090 column added 2026-11-19 on pc14: RTX 5090, Blackwell SM120, 170 SMs 
 | Handoff | opacity micromap: any hit calls kept at levels 2, 4, 6, 8 | n m | n m | 0.55, 0.14, 0.04, 0.01 | n m | F228 |
 | Handoff | partial warp cost per ray, 16 / 8 / 1 lanes over 32 | n m | n m | 1.03 to 1.05 / 1.15 / 5.4 | n m | F230 |
 | Handoff | idle lanes cost unit time (1 active lane runs 2.3 times as many warp queries) | 6000 Ada (F44, chip not stated in my excerpt, triton era) | n m | n m | n m | F44 (F230 for the 4090 form) |
-| Node state | second session saving, flat up to about 130 KB | 0.53 to 0.64 (0.62 at 68 KB, 0.54 at 132) | node cache half lost near 100 to 115 KB (F104) | 0.58 to 0.63, 0.54 at 132 | n m | F150, F104, F256 |
-| Node state | saving at 199 / 263 KB, then 4 MB | 0.23 / 0.23, 0.00 | n m | 0.23 / 0.23, 0.00 | n m | F150, F256 |
-| Node state | TTUCCTL between sessions | removes all, 22 sizes | n m | removes all, 11 sizes | n m | F150, F256 |
-| Node state | gpu fence on sibling / on own SM / both (68, 132 KB) | 0.26, 0.23 / 0.26, 0.25 / 0.00 | n m | 0.26, 0.22 / 0.26, 0.25 / 0.00 | n m | F159, F256 |
-| Node state | TTUCCTL alone on the sibling SM | 0.00 / 0.00 | n m | 0.00 / 0.00 (GPU 1; GPU 0 the same) | n m | F161, F256 |
-| Node state | TTUCCTL on the own SM | 0.00 / 0.00 | n m | 0.00 / 0.00 | n m | F162, F256 |
-| Node state | 1 MB own L1 stream against wait only | 0.29, 0.27 against 0.53, 0.42 | n m | 0.27, 0.27 against 0.57, 0.45 | n m | F174, F256 |
+| Node state | second session saving, flat up to about 130 KB | 0.53 to 0.64 (0.62 at 68 KB, 0.54 at 132) | node cache half lost near 100 to 115 KB (F104) | 0.58 to 0.63, 0.54 at 132 | 0.60 to 0.70 up to 68 KB (0.65), 0.53 at 132 | F150, F104, F256 |
+| Node state | saving at 199 / 263 KB, then 4 MB | 0.23 / 0.23, 0.00 | n m | 0.23 / 0.23, 0.00 | 0.23 / 0.09 (6,144: 0.08, 8,192: 0.04, 4 MB: 0.00) | F150, F256 |
+| Node state | TTUCCTL between sessions | removes all, 22 sizes | n m | removes all, 11 sizes | removes all, 11 sizes | F150, F256 |
+| Node state | gpu fence on sibling / on own SM / both (68, 132 KB) | 0.26, 0.23 / 0.26, 0.25 / 0.00 | n m | 0.26, 0.22 / 0.26, 0.25 / 0.00 | 0.23, 0.16 / 0.24, 0.24 / 0.00 | F159, F256 |
+| Node state | TTUCCTL alone on the sibling SM | 0.00 / 0.00 | n m | 0.00 / 0.00 (GPU 1; GPU 0 the same) | 0.00 / 0.00 | F161, F256 |
+| Node state | TTUCCTL on the own SM | 0.00 / 0.00 | n m | 0.00 / 0.00 | 0.00 / 0.00 | F162, F256 |
+| Node state | 1 MB own L1 stream against wait only | 0.29, 0.27 against 0.53, 0.42 | n m | 0.27, 0.27 against 0.57, 0.45 | 0.24, 0.26 against 0.49, 0.37 | F174, F256 |
 | Caches | L1 about 90 KB falling to about 20 KB with the shared memory reservation | yes (F203) | yes (F104) | yes (F176, F202) | yes (F403: 88 to 124 KB edge, about 20 KB with 98,304 B reserved) | F104, F176, F202, F203 |
+| Caches | Memory_1 TTU: second trace, small L1 (20 KB) over big L1 (90 KB), R distinct rays | 1.9 to 2.5 from several paths on, about 1 below (F51) | 1.4 to 3.2 (F104) | n m | 2.35 at 1 ray, 2.58 / 2.35 / 1.91 / 1.70 at 4 / 8 / 16 / 32, then 1.20 / 1.27 / 1.37 at 64 / 128 / 256 (not the Ada pattern, F413) | F51, F104, F413 |
 | Caches | L1 sector 32 B, tag line 128 B, L2 capacity ramp at 72 to 76 MB | repeats the 4090 within a few percent | n m | measured (the ramp is later and wider than modelled, 354 / 451 / 572 cycles at 72 / 74 / 76 MB) | sector 32 B, tag line 128 B (F403); L2 ramp starts at 0.94 of 96 MB, 569 cycles at 96 MB | F202, F203, F176 |
 | Request merging | raw lane fetches per merged fetch, RT-BarnesHut | n m | 7.3 (sectors per traversal 3.17 and 4.39 measured) | n m | n m | F135 |
 | Request merging | model with held out error (reordering rays) | 0.08 rms log, chip: check F123 | n m | n m | n m | F123 |
@@ -43,7 +44,7 @@ Chips (5090 column added 2026-11-19 on pc14: RTX 5090, Blackwell SM120, 170 SMs 
 | Sibling slowdown | siblings, 64 MB footprint, all L2 hits, 1 / 2 / 4 / 8 / 16 / 32 pages per warp load (RT speed against alone) | n m | n m | 0.203, 0.192, 0.145, 0.121, 0.103, 0.091 | n m | F262 |
 | Sibling slowdown | stream hit rate alone by ncu at 40 / 72 / 96 / 120 / 512 / 1,024 MB | n m | n m | 1.00 / 0.98 / 0.60 / 0.49 / 0.22 / 0.23 | n m | F262 |
 | Request merging | cost follows distinct node paths: same ray moved by 1e-6 costs the identical lane floor at every D; distinct paths 85 cycles per ray at D 32 | n m | n m | floor 18 and 20.4 (100,000 and 1M triangles), 84 at D 32 | n m | F263, F199 |
-| Node state | wait without loads between sessions, 68 / 132 KB, saving after 10 / 70 / 300 us (no wait: 0.62 / 0.54) | n m | n m | 0.57, 0.58, 0.57 / 0.46, 0.46, 0.46 | n m | F265 |
+| Node state | wait without loads between sessions, 68 / 132 KB, saving after 10 / 70 / 300 us (no wait: 0.62 / 0.54) | n m | n m | 0.57, 0.58, 0.57 / 0.46, 0.46, 0.46 | 70 us only: 0.49, 0.37 | F265 |
 | Node state | 70 us wait loss, F175 (68 / 132 KB) | 0.08 / 0.15 (F175, F256 as quoted) | n m | 0.04 / 0.08 (F265; differs from F256) | n m | F175, F256, F265 |
 | Encodings | canonical TTU instructions byte identical SM89 and SM120 | 9 of 10 (TTULD.CLOSE close bit only) | n m | n m | n m | F258 |
 | BITTU | decode, 32 instances, counts exact; many warps and IAS group counts exact; timing correction fails with 2 or more warps | yes (1 warp checked group; many warps, IAS) | 4070 Ti (F119, F122) | n m | n m | F260, F261 |
@@ -65,3 +66,7 @@ Remaining gaps, each one run on an idle GPU, predictions first:
 4. 4090: callback latency alone (875), cost regression F67, request merging counters F135, whole GPU short queries (blocked by gap 1).
 5. F262 hit rate beside RT (measured alone), coherent rays in the page sweep.
 
+
+
+## Update 2026-11-19 (pc14, fourth batch)
+5090 column filled for the node state rows (F411), the short query pair and whole chip tri1 rows (F412, with the concurrency caveat: blocks last 3.9 us and did not all overlap), Memory_1 TTU (new row, F413), and the steady rate row corrected (F410: the earlier 0.104 against 0.14 compared a span rate with a completion gap rate). Counted from the table: 46 rows.

@@ -18,6 +18,8 @@ clk_s1 and twice_s1, one block, one warp, one launch each. The result words matc
 Latency_6 (one triangle, cold minus warm): 1,518 measured against 950 to 1,000 predicted: MISSED. Reading: the second trace (everything cached, the unit and L1 only) matches the Ada value (790 against 782), the warm launch cost is 9 to 18 percent above it and the cold cost 26 to 32 percent above it: the part of the cost that is L2 and DRAM is larger on this chip (L2 349 and DRAM 862 cycles in the plain chase against the Ada 290 and 650, F403), the unit and L1 part is the same. A rough check: the cold minus warm difference over the predicted one, 1.55, is of the order of the DRAM chase ratio 862 / 650 = 1.33 plus the L2 ratio 349 / 290 = 1.20; not tested further.
 
 ## Throughput_1 (one SM, tri1 coherent, warm; rays per cycle), item 5
+
+**CORRECTION 2026-11-19 (later, see model/results_5090_chip_inputs.md part 2):** the Throughput_1 steady state rows below compare the whole span rate (0.0958 to 0.1042) with the Ada number 0.14 to 0.148, which is a completion gap rate. Same statistic on the 5090: gap rate 0.158 to 0.162, so the prediction held (inside 10 percent of 0.148) and the 5090 saturates above Ada; the "MISSED" marks for 24 to 32 warps in this section and in the tally are withdrawn. The span rate 0.091 to 0.104 compares with Ada's 0.090 to 0.100 (held). Also: Latency_2/6 and Memory_5 misses are recomputed with the chip's own plain latencies in the same file (all rows close).
 | Warps | 1 | 2 | 4 | 8 | 16 | 20 | 24 | 28 | 32 |
 |---|---|---|---|---|---|---|---|---|---|
 | Measured | 0.0179 | 0.0288 | 0.0440 | 0.0610 | 0.0854 | 0.0907 | 0.0958 | 0.1007 | 0.1042 |

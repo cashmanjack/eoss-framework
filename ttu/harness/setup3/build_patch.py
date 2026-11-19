@@ -164,21 +164,34 @@ def bsync(b):
     return _instr(0x7941 | (b << 16), 0x3800000, 5, 1, 7, 7, 0)
 
 
+_BRA_SM = 89   # set by build(): the BRA offset field differs on SM120
+
+
+def bra_off_field(off_bytes):
+    """Bits 63:0 contribution of the branch offset. SM89: signed byte offset in bits 63:32. SM120 (read from nvcc output and the compiled host binary, 2026-11-19):
+    v = off_bytes / 4 (signed words from the next instruction); bits 23:16 = v & 0xff, bits 63:34 = v >> 8 (signed, 30 bits)."""
+    if _BRA_SM == 120:
+        assert off_bytes % 4 == 0
+        v = off_bytes // 4
+        return ((v & 0xff) << 16) | (((v >> 8) & ((1 << 30) - 1)) << 34)
+    return (off_bytes & 0xffffffff) << 32
+
+
 def bra_back_neg(pg, off_bytes, stall=5):
     """@!Pg BRA, target (q20 spin wait): bra_back with the guard predicate negated (bit 15)."""
-    return _instr(0x0947 | (pg << 12) | (1 << 15) | ((off_bytes & 0xffffffff) << 32), 0x03ffff | (7 << 23), stall, 1, 7, 7, 0)
+    return _instr(0x0947 | (pg << 12) | (1 << 15) | bra_off_field(off_bytes), 0x03ffff | (7 << 23), stall, 1, 7, 7, 0)
 
 
 def bra_fwd(pg, pp, off_bytes, stall=5):
     """@Pg BRA Pp, target for a FORWARD (positive) byte offset: as bra_back, but the sign extension bits above bit 63 are 0 (bra_back sets them for a negative offset)."""
     assert 0 <= off_bytes < (1 << 31)
-    return _instr(0x0947 | (pg << 12) | (off_bytes << 32), (pp << 23), stall, 1, 7, 7, 0)
+    return _instr(0x0947 | (pg << 12) | bra_off_field(off_bytes), (pp << 23), stall, 1, 7, 7, 0)
 
 
 def bra_back(pg, pp, off_bytes, stall=5):
-    """@Pg BRA Pp, target (nvcc 12.8: opcode 0x947, signed byte offset from the next instruction in bits 63:32, second
+    """@Pg BRA Pp, target (nvcc 12.8: opcode 0x947, signed byte offset from the next instruction (SM89 bits 63:32, SM120 see bra_off_field), second
     predicate Pp in bits 89:87)."""
-    return _instr(0x0947 | (pg << 12) | ((off_bytes & 0xffffffff) << 32), 0x03ffff | (pp << 23), stall, 1, 7, 7, 0)
+    return _instr(0x0947 | (pg << 12) | bra_off_field(off_bytes), 0x03ffff | (pp << 23), stall, 1, 7, 7, 0)
 
 
 def ffma(rd, ra, rb, rc):
@@ -188,15 +201,23 @@ def ffma(rd, ra, rb, rc):
 
 THRASH_PTR = 26                  # --thrash: logical slots 26, 27 = this lane's thrash buffer address
 def ownfence_words(binpath):
-    """q22: the 6 words (lo, hi per instruction) of MEMBAR.ALL.GPU, ERRBAR, CCTL.IVALL as nvcc compiled them in the host's sib_fence kernel, read with cuobjdump at build time (no instruction words stored in the repo)."""
+    """q22: the words (lo, hi per instruction) of the fence nvcc emits for fence.acq_rel.gpu, read from the host's sib_fence kernel with cuobjdump at build time (no instruction words stored in the repo).
+    SM89: MEMBAR.ALL.GPU, ERRBAR, CCTL.IVALL (6 words). SM120 (2026-11-19): MEMBAR.ALL.GPU, ERRBAR, CGAERRBAR, CCTL.IVALL (8 words); the first fence sequence of the kernel is taken."""
     import re, subprocess
     out = subprocess.run(['cuobjdump', '-sass', '-fun', 'sib_fence', binpath], capture_output=True, text=True).stdout.splitlines()
-    words = []
+    seq = ('MEMBAR.ALL.GPU', 'ERRBAR', 'CGAERRBAR', 'CCTL.IVALL')
+    ins = []
     for k, ln in enumerate(out):
-        for mn in ('MEMBAR.ALL.GPU', 'ERRBAR', 'CCTL.IVALL'):
-            if re.search(r'\b' + re.escape(mn) + r'\b', ln) and len(words) < 6 and len(words) // 2 == ('MEMBAR.ALL.GPU', 'ERRBAR', 'CCTL.IVALL').index(mn):
-                lo = int(re.findall(r'/\* (0x[0-9a-f]+) \*/', ln)[-1], 16); hi = int(re.findall(r'/\* (0x[0-9a-f]+) \*/', out[k + 1])[-1], 16); words += [lo, hi]
-    assert len(words) == 6, 'ownfence: MEMBAR.ALL.GPU, ERRBAR, CCTL.IVALL not found in sib_fence of %s' % binpath
+        m = re.search(r'/\*[0-9a-f]{4}\*/\s+(?:@!?P\d\s+)?([A-Z][A-Z0-9_.]*)', ln)
+        if m and len(re.findall(r'/\* (0x[0-9a-f]+) \*/', ln)) and k + 1 < len(out) and re.findall(r'/\* (0x[0-9a-f]+) \*/', out[k + 1]):
+            ins.append((m.group(1), int(re.findall(r'/\* (0x[0-9a-f]+) \*/', ln)[-1], 16), int(re.findall(r'/\* (0x[0-9a-f]+) \*/', out[k + 1])[-1], 16)))
+    names = [n for n, _, _ in ins]
+    a = names.index('MEMBAR.ALL.GPU')
+    run = [x for x in ins[a:a + 4]]
+    want = [x for x in seq if x != 'CGAERRBAR' or (len(run) > 2 and run[2][0] == 'CGAERRBAR')]
+    assert [n for n, _, _ in run[:len(want)]] == want and want[0] == 'MEMBAR.ALL.GPU' and want[-1] == 'CCTL.IVALL', 'ownfence: fence sequence not found in sib_fence of %s: %s' % (binpath, [n for n, _, _ in run])
+    words = []
+    for _, lo, hi in run[:len(want)]: words += [lo, hi]
     return words
 SM_A, SM_B, SM_ID = 18, 19, 20   # --smfilter: run only on SM A or SM B (VIRTUALSMID into R20)
 GT_START, GT_END = 22, 24       # --gtime: global timer before the start clock and after the end clock
@@ -271,15 +292,18 @@ def ttuccttl_bytes():
     ins = Encoder(sm='89').build('ttucctl_', {'ftz': 1}, opex=17)
     assert ins.valid, ins.failed_conditions
     assert struct.unpack('<QQ', ins.bytes)[0] & 0xfff == 0x3d5
+    i120 = Encoder(sm='120').build('ttucctl_', {'ftz': 1}, opex=17)   # SM120 (pc14): the SM120 encoder gives the same bytes (checked 2026-11-19)
+    assert i120.valid and i120.bytes == ins.bytes, 'SM120 TTUCCTL differs from SM89'
     return ins.bytes
 
 
 def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out=95, preclk=False, barnops=1,
           twice=False, compact_out=False, smfilter=False, gtime=False, remap=False, thrash=0, sr133=False, dualgo=False, sleepb=0, alu=0, slim=False, loop=0, outer=0, stride=0, lean=False, hoist=False, coal=False, lean_ld=False, lean_st=False, cctl=False, ias=False, prewarm=0, l1t=0, l1t_nofirst=False, sectors=1, bypass=False, decoy=False, bypass_first=False, sibling=False, ownfence=False, sibccctl=False, ownccctl=False, delay=0, stream=0, lclock=False, aluwarps=False, aluiters=600, aludelay=0, ttuwarp=0, aluunroll=12, same_record=False, sm=89):
-    global INPUTS, GROUP_LEN
+    global INPUTS, GROUP_LEN, _BRA_SM
+    _BRA_SM = sm
     d = open(dump, 'rb').read()
     if sm == 120:
-        assert not (ias or slim or loop or outer or dualgo or sr133 or thrash or hoist or coal or sibling or aluwarps), '--sm 120: plain, --remap, --smfilter, --gtime, --sleepb, --clock, --sync, --twice, --compact-out builds only (the S2R, CS2R and NOP encodings carry over: SR ids 0x43 and 0x52 checked against nvcc sm_120 output)'
+        assert not (ias or slim or loop or outer or dualgo or sr133 or thrash or hoist or coal or aluwarps), '--sm 120: plain, --remap, --smfilter, --gtime, --sleepb, --clock, --sync, --twice, --compact-out, --cctl and --sibling (with --ownfence, --ownccctl, --sibccctl; 2026-11-19, node state port) builds only (the S2R, CS2R and NOP encodings carry over: SR ids 0x43 and 0x52 checked against nvcc sm_120 output)'
         at = lambda o: d[SM120_DUMP_BASE + o:SM120_DUMP_BASE + o + 16]
         group = [at(SM120_GROUP_AT + 16 * k) for k in range(GROUP_LEN)]
         isetp = at(SM120_ISETP_AT)
@@ -541,7 +565,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
                 body.append(ttuccttl_bytes() if stage == 1 else ctrl.NOP_BYTES)
                 body += [ctrl.write_control(ctrl.NOP_BYTES, stall=15)] * 4
             if ownfence:   # q22 (f), (g): the TTU warp's own fence.acq_rel.gpu between the sessions, outside any session: the three instructions nvcc emits for it (MEMBAR.ALL.GPU, ERRBAR, CCTL.IVALL), copied with their control words from the compiled sib_fence kernel (cuobjdump of the host binary)
-                ow = ownfence_words(binpath); body += [ow[k].to_bytes(8, 'little') + ow[k + 1].to_bytes(8, 'little') for k in (0, 2, 4)]
+                ow = ownfence_words(binpath); body += [ow[k].to_bytes(8, 'little') + ow[k + 1].to_bytes(8, 'little') for k in range(0, len(ow), 2)]
                 body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=15))
             spin_top = len(body)
             body.append(field(field(field(ldg[32], 16, 8), 24, phys(THRASH_PTR)), 40, 128, 24))             # STRONG.SYS load of flag2 into junk R8

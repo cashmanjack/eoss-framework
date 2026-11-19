@@ -41,6 +41,13 @@ def check(path):
     ok('one ttu_one section', len(sec) == 1)
     body = [b for _, b in elf.iter_instructions(p.data, sec[0])]
     SM = meta.get('sm', 89)
+    def sbo(b):   # signed branch offset in bytes from the next instruction: SM89 bits 63:32; SM120 v = bits 23:16 | (signed bits 63:34) << 8, in 4 byte words
+        w = W(b)
+        if SM == 120:
+            hi = (w >> 34) & 0x3fffffff; hi -= (1 << 30) if hi >> 29 else 0
+            return 4 * ((((w >> 16) & 0xff)) | (hi << 8))
+        o = (w >> 32) & 0xffffffff
+        return o - (1 << 32 if o >> 31 else 0)
     dec = Decoder(ISASpec.load(sm=SM))
     ex = next(i for i, b in enumerate(body) if low12(b) == 0x94d and pred(b) == (7, 0))   # the unpredicated EXIT
     fails = [i for i in range(ex) if dec.decode(0, body[i]).n_failed]
@@ -120,7 +127,7 @@ def check(path):
         brs = [i for i, b in enumerate(body[:ex]) if low12(b) in (0x947, 0x949, 0x943)]
         if meta.get('loop'):   # --loop: exactly one backward BRA, after the group, back to TTUOPEN; never inside a session
             off = lambda b: (W(b) >> 32) & 0xffffffff
-            tgt = [i + 1 + ((off(body[i]) - (1 << 32 if off(body[i]) >> 31 else 0)) // 16) for i in brs]
+            tgt = [i + 1 + (sbo(body[i]) // 16) for i in brs]
             if meta.get('outer'):   # --outer: the inner branch to the TTUOPEN, then one outer backward BRA to the record's pointer set up, after the stores
                 oa = meta['outer_at']
                 ok('B15 outer: two backward BRAs: to the TTUOPEN (after the CLOSE), then to the record start (after the stores, before EXIT)',
@@ -131,7 +138,7 @@ def check(path):
             ok('B15 loop: no TTU instruction after the branch target other than the one group', len(hits) == 19, len(hits))
         elif meta.get('sibling'):   # q20 --sibling: exactly one branch, an @!P6 backward BRA to the spin load, after the first session's CLOSE and before the second group; no TTU instruction inside the spin
             off = lambda b: (W(b) >> 32) & 0xffffffff
-            tgt = [i + 1 + ((off(body[i]) - (1 << 32 if off(body[i]) >> 31 else 0)) // 16) for i in brs]
+            tgt = [i + 1 + (sbo(body[i]) // 16) for i in brs]
             g1 = groups[0]
             if meta.get('sibccctl'):   # (h): the one extra branch in the main code is the forward @P1 BRA to the B path; the backward spin test below is about the rest
                 fw = meta['sibccctl_bra']
@@ -141,10 +148,11 @@ def check(path):
             ok('B15 sibling: exactly one backward BRA (@!P6) between the sessions, to the spin load, no TTU instruction in the loop',
                len(brs) == 1 and low12(body[brs[0]]) == 0x947 and g1 + 18 < tgt[0] < brs[0] < groups[1] and ((W(body[brs[0]]) >> 12) & 0xf) == 0xe
                and low12(body[tgt[0]]) == 0x981 and not any(low12(body[i]) in TTU for i in range(tgt[0], brs[0] + 1)), (brs, tgt, groups))
-            fl = [i for i, b in enumerate(body[:ex]) if low12(b) in (0x992, 0x9ab, 0x98f)]   # MEMBAR, ERRBAR, CCTL (this build's only memory fence opcodes)
+            FOPS = (0x992, 0x9ab, 0x5ab, 0x98f) if SM == 120 else (0x992, 0x9ab, 0x98f)   # MEMBAR, ERRBAR, [SM120: CGAERRBAR], CCTL: nvcc's fence.acq_rel.gpu (SM120 has the extra CGAERRBAR; 2026-11-19)
+            fl = [i for i, b in enumerate(body[:ex]) if low12(b) in FOPS]   # this build's only memory fence opcodes
             if meta.get('ownfence'):
-                ok('B15 ownfence: exactly MEMBAR.ALL.GPU, ERRBAR, CCTL.IVALL in a row, unpredicated, after the first CLOSE and before the spin, outside every session',
-                   len(fl) == 3 and fl[1] == fl[0] + 1 and fl[2] == fl[0] + 2 and g1 + 18 < fl[0] and fl[2] < tgt[0] and [low12(body[i]) for i in fl] == [0x992, 0x9ab, 0x98f] and all(pred(body[i]) == (7, 0) for i in fl), (fl, tgt, groups))
+                ok('B15 ownfence: exactly MEMBAR.ALL.GPU, ERRBAR, %sCCTL.IVALL in a row, unpredicated, after the first CLOSE and before the spin, outside every session' % ('CGAERRBAR, ' if SM == 120 else ''),
+                   len(fl) == len(FOPS) and all(fl[k + 1] == fl[k] + 1 for k in range(len(fl) - 1)) and g1 + 18 < fl[0] and fl[-1] < tgt[0] and [low12(body[i]) for i in fl] == list(FOPS) and all(pred(body[i]) == (7, 0) for i in fl), (fl, tgt, groups))
             else:
                 ok('B15 no fence instruction in the TTU kernel unless --ownfence', not fl, fl)
             if meta.get('ownccctl'):   # q22 (i): exactly one TTUCCTL.IVALL (stage 1; NOP in stage 0) after the first CLOSE, before the spin, outside every session, followed by 4 stall 15 NOPs
@@ -162,13 +170,13 @@ def check(path):
                 ok('B15 no TTUCCTL in the sibling kernel unless --ownccctl (or, with --sibccctl, only in the B path, checked by the (h) rules)', not [i for i, b in enumerate(body[:lim]) if low12(b) == 0x3d5])
         elif meta.get('stream'):   # q32 --stream: exactly one backward @P5 BRA between the sessions (a counted loop of ordinary loads), no TTU instruction inside it
             off = lambda b: (W(b) >> 32) & 0xffffffff
-            tgt = [i + 1 + ((off(body[i]) - (1 << 32 if off(body[i]) >> 31 else 0)) // 16) for i in brs]
+            tgt = [i + 1 + (sbo(body[i]) // 16) for i in brs]
             g1 = groups[0]
             ok('B15 stream: exactly one backward BRA (@P5) after the first session and before the second, no TTU instruction in the loop',
                len(brs) == 1 and low12(body[brs[0]]) == 0x947 and pred(body[brs[0]]) == (5, 0) and g1 + 18 < tgt[0] < brs[0] < groups[1] and not any(low12(body[i]) in TTU for i in range(tgt[0], brs[0] + 1)), (brs, tgt, groups))
         elif meta.get('delay'):   # q32 --delay: exactly one backward @P5 BRA between the sessions (a counted ALU loop), no TTU instruction and no memory instruction inside it
             off = lambda b: (W(b) >> 32) & 0xffffffff
-            tgt = [i + 1 + ((off(body[i]) - (1 << 32 if off(body[i]) >> 31 else 0)) // 16) for i in brs]
+            tgt = [i + 1 + (sbo(body[i]) // 16) for i in brs]
             g1 = groups[0]
             ok('B15 delay: exactly one backward BRA (@P5) after the first session and before the second, loop body = IADD3, LOP3, BRA only',
                len(brs) == 1 and low12(body[brs[0]]) == 0x947 and pred(body[brs[0]]) == (5, 0) and g1 + 18 < tgt[0] < brs[0] < groups[1] and brs[0] - tgt[0] == 2
