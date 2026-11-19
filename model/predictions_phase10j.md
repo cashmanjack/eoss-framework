@@ -1,0 +1,6 @@
+# Phase 10j (tethys GPU 1, TTU_GPU=1, 2026-11-19): audit TEST rows that need only the 4090 and validated sequences, predicted before any run
+Rules as always: checked builds only (the Node_4090 builds: single, twice, sib; check_seq ALL PASS), stage 0 before stage 1, smallest launch first, run.py timeout 30, idle GPU, clock sampled, raw files timestamped (never overwritten), a fault or a wrong result stops the group.
+
+## Row: wait sweep (F175, F256: a 70 microsecond wait without loads removes part of the saving, cause not found)
+Design: arm own9_wait of Node_4090 (role block on the same SM waits SIB_DNS ns between the two sessions, no loads) at 10, 70 and 300 microseconds, scenes N 1,024 and 2,048 (68 and 132 KB), 3 repetitions x 30 launches, with single and twice as the references. Saving = 1 - arm / single (single = one session).
+Prediction (time decay, "retention"): the loss against twice (saving of twice minus saving of the arm) grows with the wait. 10 us: at most 0.03. 70 us: reproduces F256 (0.08 at 68 KB, 0.15 at 132 KB, each within 0.04). 300 us: at least 1.5 times the 70 us loss at each scene. Rival (one off cost, wait length does not matter): the three losses within 0.03 of each other; scored as the rival if so.
