@@ -42,6 +42,10 @@ extern "C" __global__ void __intersection__sph()
     const float b = oc.x * d.x + oc.y * d.y + oc.z * d.z, cc = oc.x * oc.x + oc.y * oc.y + oc.z * oc.z - params.radius * params.radius, disc = b * b - cc;
     if (disc < 0.f) return;
     const float s = sqrtf(disc); float t = -b - s;
+#ifdef ENTRY_ONLY   // pc14 (F428): report only the entry root, as the 5090's built in sphere does (it reports no exit hit for a ray that starts inside)
+    if (t < optixGetRayTmin()) return;
+#else
     if (t < optixGetRayTmin()) t = -b + s;
+#endif
     if (t >= optixGetRayTmin() && t <= optixGetRayTmax()) optixReportIntersection(t, 0);
 }
