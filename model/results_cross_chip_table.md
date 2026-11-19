@@ -17,7 +17,7 @@ Chips (5090 column added 2026-11-19 on pc14: RTX 5090, Blackwell SM120, 170 SMs 
 | TPC sharing | whole chip, one triangle queries (times one SM) | n m | 30.0 at 30, 41.3 at 60 | 63.5 at 64; 128 invalid | per SM rate 0.1039 to 0.1041 at G 1 to 85 but only 64 blocks ran at once (sum of rates 85.0 times); G 170 0.072 per SM (120.9 times, 125 at once): not a clean whole GPU number | F105, Phase 10g |
 | Handoff | one warp, one custom primitive callback (cycles) | 850 to 900 (about 875) | n m | n m | n m | F49 |
 | Handoff | loaded callback latency over alone, four programs | n m | 1.3 to 16 times | n m | n m | F133 |
-| Handoff | register heap speedup of the any hit kNN | n m | 4.0 | 4.45 | n m | F138, F255 |
+| Handoff | register heap speedup of the any hit kNN | n m | 4.0 | 4.45 | 3.08 (OptiX only, same program rebuilt for sm_120; F415) | F138, F255, F415 |
 | Handoff | built in sphere against custom primitive | n m | n m | same cost; tessellated 20 or 80 triangles no speedup | n m | F204 |
 | Handoff | opacity micromap: any hit calls kept at levels 2, 4, 6, 8 | n m | n m | 0.55, 0.14, 0.04, 0.01 | n m | F228 |
 | Handoff | partial warp cost per ray, 16 / 8 / 1 lanes over 32 | n m | n m | 1.03 to 1.05 / 1.15 / 5.4 | n m | F230 |
@@ -77,3 +77,8 @@ F264 closed 2026-11-19 (Jack): the 4090 short query pair is not measured (void b
 
 ## Update 2026-11-19 (pc14, fourth batch)
 5090 column filled for the node state rows (F411), the short query pair and whole chip tri1 rows (F412, with the concurrency caveat: blocks last 3.9 us and did not all overlap), Memory_1 TTU (new row, F413), and the steady rate row corrected (F410: the earlier 0.104 against 0.14 compared a span rate with a completion gap rate). Counted from the table: 46 rows.
+| Workloads | model v1 (frozen) measured / predicted: RTNN r 0.05 / 0.025 | triton basis (F250) lower bound | n m | 3.9 / 4.06 | 4.01 / 4.27 | F250, F255, F415 |
+| Workloads | model v1: kNN original total, register heap total, TrueKNN 400k, Arkade fixed 100k queries | 6000 Ada: TrueKNN, Arkade as basis | n m | 0.55, 0.50 (wrong kNN basis, F257), 1.07, 3.04 | 0.82, 1.07, 1.01, 0.91 (kNN basis 4070 Ti x 60/170) | F255, F257, F415 |
+
+## Update 2026-11-19 (pc14, fifth batch)
+F414: Memory_1 TTU one ray row is ray dependent (1.00 to 2.91, median 1.18), comparison with Ada not established. F415: workloads on the 5090 (2 rows added and the handoff speedup cell). Counted from the table: 48 rows.
