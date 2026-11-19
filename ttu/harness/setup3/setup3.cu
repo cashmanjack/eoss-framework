@@ -714,6 +714,7 @@ int main(int argc, char **argv)
     fprintf(jf, " \"gas\": \"0x%llx\", \"gas_size\": %zu, \"handle\": \"0x%llx\", \"root_off\": \"0x%llx\", \"root\": \"0x%llx\",\n",
             (unsigned long long)gas, (size_t)bs.outputSizeInBytes, (unsigned long long)h, off, root);
     fprintf(jf, " \"imat\": \"%s\",\n", ias ? imat.c_str() : "none");
+    fprintf(jf, " \"sm120\": %d,\n", sm120 ? 1 : 0);
     fprintf(jf, " \"ias\": %d, \"ias_addr\": \"0x%llx\", \"ias_handle\": \"0x%llx\", \"ias_root_off\": \"0x%llx\", \"ias_size\": %zu,\n", ias ? 1 : 0, (unsigned long long)iasbuf, (unsigned long long)ih, ias_off, ias_size);
     fprintf(jf, " \"inst\": \"0x%llx\", \"inst_ok\": %s, \"c3_34\": \"0x%08x\", \"handle_ok\": %s, \"align_ok\": %s,\n", A,
             inst_ok ? "true" : "false", c3_34, handle_ok ? "true" : "false", align_ok ? "true" : "false");

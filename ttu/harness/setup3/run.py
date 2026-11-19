@@ -32,7 +32,7 @@ def main():
             extra.remove('--ncu-instances'); skip += ['--print-metric-instances', 'values']
         if '--ncu-skip' in extra:   # profile only after the first K ttu_one launches (e.g. pass 0 of --passes 2)
             k = extra.index('--ncu-skip'); skip = ['--launch-skip', str(int(extra[k + 1]))]; del extra[k:k + 2]
-        ncu = [os.path.expanduser('~/opt/cuda-12.8/bin/ncu'), '--target-processes', 'all', '-k', 'ttu_one',
+        ncu = [os.path.join(os.environ['CUDA_HOME'], 'bin', 'ncu') if os.environ.get('CUDA_HOME') else os.path.expanduser('~/opt/cuda-12.8/bin/ncu'), '--target-processes', 'all', '-k', 'ttu_one',
                '--cache-control', 'none', '--clock-control', 'none', '--metrics', metrics, '--csv', '--page', 'raw',
                '--log-file', csv] + skip
     sha = hashlib.sha256(open(binp, 'rb').read()).hexdigest()
@@ -40,10 +40,13 @@ def main():
     if not os.path.exists(chk) or open(chk).read().strip() != sha:
         sys.exit('refused: check_seq.py has not passed on this binary (%s)' % sha)
     cfg = gpucfg.load()   # first idle GPU (TTU_GPU overrides); refuses a driver without a validated TTU group
-    if os.environ.get('PC14_STAGE0'):   # pc14 (RTX 5090, display GPU, driver not validated for TTU): ONLY a stage 0 SM120 build (no TTU instruction, check_seq passed) and only when pc14_gpucheck.sh says the GPU is free
+    if os.environ.get('PC14_STAGE0') or os.environ.get('PC14_TTU_APPROVED'):   # pc14 (RTX 5090, display GPU, driver not validated by the generic list)
+        # PC14_STAGE0: stage 0 SM120 builds only. PC14_TTU_APPROVED=cesar_jack_2026-11-19: SM120 stage 0 and 1 builds (Cesar approved TTU runs on this machine, Jack approved stage 1, 2026-11-19).
+        # Both need: check_seq passed on this exact file (above), pc14_gpucheck.sh free, and the build is SM120 (close on bit 74, from the SM120 OptiX dump).
         import json
         meta = json.load(open(binp + '.layout.json'))
-        if meta.get('stage') != 0 or meta.get('sm') != 120: sys.exit('refused: PC14_STAGE0 runs only stage 0 SM120 builds')
+        appr = os.environ.get('PC14_TTU_APPROVED') == 'cesar_jack_2026-11-19'
+        if meta.get('sm') != 120 or (meta.get('stage') != 0 and not appr): sys.exit('refused: this mode runs only SM120 builds (stage 1 only with PC14_TTU_APPROVED)')
         chk_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'notes', 'pc14_gpucheck.sh')
         if subprocess.run([chk_script]).returncode: sys.exit('refused: GPU not free (pc14_gpucheck.sh)')
     else:

@@ -21,6 +21,8 @@ from prep import make_rays  # noqa: E402
 import ncu_parse  # noqa: E402
 RS = [1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512]
 SEEDS = [2026, 2027]
+if os.environ.get('PC14_TTU_APPROVED'):   # pc14: fewer points (each ncu process takes seconds on the shared display GPU), host --sm120, TMPDIR for the ncu lock file
+    RS = [int(x) for x in os.environ.get('PC14_RS', '1,4,16,32,48,64,96,128,192,384').split(',')]; SEEDS = [2026]
 W = 16
 CARVE = [('big', []), ('small', ['--smem', '98304'])]
 M = 'l1tex__m_xbar2l1tex_read_sectors.sum,l1tex__t_sectors_lookup_hit.sum,l1tex__t_sectors.sum'
@@ -28,7 +30,7 @@ M = 'l1tex__m_xbar2l1tex_read_sectors.sum,l1tex__t_sectors_lookup_hit.sum,l1tex_
 
 def go(binp, rays, out, extra):
     p = subprocess.run([sys.executable, HARNESS, binp, 'file:' + rays, 'zero', out + '.json', '--scene', 'soup:100000', '--warps', str(W), '--repeat', '3',
-                        '--ncu', M, '--ncu-out', out + '.csv', '--ncu-skip', '2'] + extra, capture_output=True, text=True)
+                        '--ncu', M, '--ncu-out', out + '.csv', '--ncu-skip', '2'] + extra + (['--sm120'] if os.environ.get('PC14_TTU_APPROVED') else []), capture_output=True, text=True)
     ok = 'exit 0' in p.stdout and ' error' not in p.stdout.replace('no error', '')
     if not ok:
         sys.exit('FAILED ' + out + p.stdout[-1500:] + p.stderr[-1500:])

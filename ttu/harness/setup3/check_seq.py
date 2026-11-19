@@ -110,7 +110,7 @@ def check(path):
         ok('A6 no other TTU anywhere in the binary', len(hits) == total, (len(hits), total))
         if meta.get('remap') and len(sys.argv) > 2:   # A10 with remap: only register fields may differ
             d = open(sys.argv[2], 'rb').read()
-            dump = [d[0xbb60 + 16 * k:0xbb60 + 16 * k + 16] for k in range(17)] if meta.get('ias') else [d[0x14000 - 0xfb50 + 16 * k:0x14000 - 0xfb50 + 16 * k + 16] for k in range(19)]
+            dump = [d[0xbb60 + 16 * k:0xbb60 + 16 * k + 16] for k in range(17)] if meta.get('ias') else [d[0x20000 - 0x10120 + 16 * k:0x20000 - 0x10120 + 16 * k + 16] for k in range(19)] if SM == 120 else [d[0x14000 - 0xfb50 + 16 * k:0x14000 - 0xfb50 + 16 * k + 16] for k in range(19)]
             regmask = lambda b: W(b) & ~((0xff << 16) | (0xff << 32) | (0xff << 64)) if low12(b) in (ST, LD) else W(b)
             for gi in groups:
                 same = all(regmask(a) == regmask(b) for a, b in zip(body[gi:gi + len(dump)], dump))

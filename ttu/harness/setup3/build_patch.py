@@ -279,7 +279,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
     global INPUTS, GROUP_LEN
     d = open(dump, 'rb').read()
     if sm == 120:
-        assert not (ias or slim or loop or outer or dualgo or sr133 or smfilter or thrash or hoist or coal or sleepb or remap or sibling or aluwarps), '--sm 120: plain builds only (stage 0 and the checked shape)'
+        assert not (ias or slim or loop or outer or dualgo or sr133 or thrash or hoist or coal or sibling or aluwarps), '--sm 120: plain, --remap, --smfilter, --gtime, --sleepb, --clock, --sync, --twice, --compact-out builds only (the S2R, CS2R and NOP encodings carry over: SR ids 0x43 and 0x52 checked against nvcc sm_120 output)'
         at = lambda o: d[SM120_DUMP_BASE + o:SM120_DUMP_BASE + o + 16]
         group = [at(SM120_GROUP_AT + 16 * k) for k in range(GROUP_LEN)]
         isetp = at(SM120_ISETP_AT)
@@ -341,7 +341,7 @@ def build(stage, binpath, dump, out, clock=False, sync=False, regs=None, max_out
         group = [remap_ttu(b) for b in group]
         isetp = field(isetp, 24, P[90])
     phys = lambda r: P.get(r, r)
-    in_ptr = 6 if remap else IN_PTR
+    in_ptr = (2 if sm == 120 else 6) if remap else IN_PTR   # SM120 template: both IMAD.WIDE.U32 read the index in R7, so the remapped input pointer cannot be R6:R7 (found on the first remap run, 2026-11-19: nothing was stored); R2:R3 is free in the remap layout
 
     # --hoist / --coal (ablations of the persistent kernel, default off: every other build is unchanged).
     # Extra registers: at --regs > 72 from R72 up (pair and quad aligned), else from the free low registers (the declared

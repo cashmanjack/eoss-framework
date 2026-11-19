@@ -18,6 +18,10 @@ S3 = os.path.join(HERE, '..', '..', 'harness', 'setup3')
 VENV = os.path.expanduser('~/eoss/.venv/bin/python')
 BASE, D = '/dev/shm/t9/setup3', '/dev/shm/t9c'
 NSM, HALF = CFG.sm_count, CFG.half
+PC14 = bool(os.environ.get('PC14_TTU_APPROVED'))   # pc14 (RTX 5090): SM120 builds in /dev/shm/t9sm120, every run sampled (clocks) and under pc14_gpucheck.sh (run.py)
+if PC14:
+    BASE, D = '/dev/shm/t9sm120/setup3', '/dev/shm/t9sm120/c'; VENV = sys.executable
+    SAMPLED = os.path.join(HERE, '..', 'pc14', 'sampled.py'); CLKLOG = os.environ.get('PC14_CLKLOG', '/tmp/pc14_clk')
 f32 = lambda u: struct.unpack('<f', struct.pack('<I', u))[0]
 
 
@@ -26,7 +30,7 @@ def sh(c, **kw): return subprocess.run(c, capture_output=True, text=True, **kw)
 
 def build(name, stage, flags):
     out = '%s/%s_s%d' % (D, name, stage)
-    p = sh([VENV, os.path.join(S3, 'build_patch.py'), '--stage', str(stage), '--bin', BASE, '--out', out] + flags)
+    p = sh([VENV, os.path.join(S3, 'build_patch.py'), '--stage', str(stage), '--bin', BASE, '--out', out] + (['--sm', '120'] if PC14 else []) + flags)
     if p.returncode: sys.exit(p.stdout + p.stderr)
     c = sh([VENV, os.path.join(S3, 'check_seq.py'), out])
     if 'ALL PASS' not in c.stdout.strip().splitlines()[-1]: sys.exit('check_seq FAILED %s\n%s' % (out, c.stdout[-2500:]))
@@ -34,7 +38,9 @@ def build(name, stage, flags):
 
 
 def go(binp, rays, out, extra, need_blocks=None):
-    p = sh([sys.executable, os.path.join(S3, 'run.py'), binp, rays, 'zero', out] + extra)
+    cmd = [sys.executable, os.path.join(S3, 'run.py'), binp, rays, 'zero', out] + extra + (['--sm120'] if PC14 else [])
+    if PC14: cmd = [sys.executable, SAMPLED, CLKLOG + '_' + os.path.basename(out).replace('.json', ''), '--'] + cmd
+    p = sh(cmd)
     ok = 'exit 0' in p.stdout and ' error' not in p.stdout.replace('no error', '') and 'ttu_one: no error' in p.stdout
     if need_blocks is not None: ok = ok and ('%d block(s) ran' % need_blocks) in p.stdout
     print('   ', os.path.basename(out), 'OK' if ok else 'FAILED', flush=True)
@@ -45,6 +51,14 @@ def go(binp, rays, out, extra, need_blocks=None):
 def ref_ok(j):
     """Every stored warp output vs the OptiX reference (hit, primitive, t): return (checked, wrong). Skips lanes with pending entries."""
     bad = cnt = 0
+    if PC14:   # SM120 load registers (analyze.py SM120_ROLES, a HYPOTHESIS until the first stage 1 run is read): R39 = hit flag, R66 = prim | flags, R67 = -t (first stage 1 run, 2026-11-19)
+        for k, wo in enumerate(j['warp_out']):
+            if any(wo[x] for x in (56, 57, 58, 59, 60, 61, 70, 71)): continue
+            rr = j['ref'][32 * k] if len(j['ref']) > 32 * k else j['ref'][0]; cnt += 1; hit = wo[39] & 1
+            rt = f32(int(rr['t'], 16))
+            ok = (hit == 0 and rr['hit'] == 0) or (hit == 1 and rr['hit'] == 1 and (wo[66] & 0x1fffffff) == rr['prim'] and abs(-f32(wo[67]) - rt) <= 1e-6 * max(1, rt))
+            bad += not ok
+        return cnt, bad
     for k, wo in enumerate(j['warp_out']):
         if any(wo[x] for x in (56, 57, 58, 59, 60, 61, 70, 71)): continue
         rr = j['ref'][32 * k] if len(j['ref']) > 32 * k else j['ref'][0]; cnt += 1; hit = wo[3]

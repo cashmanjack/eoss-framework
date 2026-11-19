@@ -23,7 +23,10 @@ CARVE = [('l1big', []), ('l1small', ['--smem', '98304'])]
 
 
 def go(binp, rays, out, extra):
-    p = subprocess.run([sys.executable, HARNESS, binp, rays, 'zero', out, '--scene', 'soup:100000'] + extra, capture_output=True, text=True)
+    cmd = [sys.executable, HARNESS, binp, rays, 'zero', out, '--scene', 'soup:100000'] + extra
+    if os.environ.get('PC14_TTU_APPROVED'):   # pc14 (SM120): the host register image, and clock sampling around every run
+        cmd = [sys.executable, os.path.join(HERE, '..', 'pc14', 'sampled.py'), os.environ.get('PC14_CLKLOG', '/tmp/pc14_clk') + '_m2_' + os.path.basename(out).replace('.json', ''), '--'] + cmd + ['--sm120']
+    p = subprocess.run(cmd, capture_output=True, text=True)
     ok = 'exit 0' in p.stdout and ' error' not in p.stdout.replace('no error', '')
     print(os.path.basename(out), 'OK' if ok else 'FAILED', flush=True)
     if not ok:
