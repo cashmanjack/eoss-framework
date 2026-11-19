@@ -12,6 +12,7 @@ echo "built liboptixdump.so libcuptidump.so in $(pwd)"
 
 # memdump (Setup_4 fallback 3): OptiX launch plus one window device memory read
 OPTIX=${OPTIX_ROOT:-$HOME/optix_sdk}
-nvcc -O2 -arch=sm_89 -ptx -I"$OPTIX/include" -o memdump_dev.ptx memdump_dev.cu
-nvcc -O2 -arch=sm_89 -I"$OPTIX/include" -o memdump memdump.cu -lcuda
+SM=${SM:-sm_89}   # pc14 (RTX 5090): SM=sm_120
+nvcc -O2 -arch=$SM -ptx -I"$OPTIX/include" -o memdump_dev.ptx memdump_dev.cu
+nvcc -O2 -arch=$SM -I"$OPTIX/include" -o memdump memdump.cu -lcuda
 echo "built memdump memdump_dev.ptx in $(pwd)"

@@ -4,10 +4,24 @@
    "sms_per_tpc": 2,
    "encodings": "ttu_sm89.json",
    "note": "Ada. Two SMs per TPC (even/odd pair, SM 2k and 2k+1), one traversal unit per TPC (Throughput_8, Memory_5: measured on RTX 6000 Ada). Block placement with one block per SM: block b on SM 2b for b < SMs/2, then the odd SMs (measured on RTX 6000 Ada; re-measured per GPU by probe_placement.cu before any use)."
+  },
+  "sm120": {
+   "sms_per_tpc": 2,
+   "encodings": "../../data/encodings/ttu_sm120.json",
+   "placement": "blackwell_pairs",
+   "note": "Blackwell consumer (RTX 5090, GB202, 170 SMs, 96 MB L2), added 2026-11-19 on tgrogers-pc14 (shared desktop, GPU 0 drives the display). SMs per TPC 2 is ASSUMED (public GB202 layout, 85 TPCs); the only evidence here is that blocks always land on the SM pairs (2k, 2k+1) in consecutive order (probe_smid.cu, 6 launches identical). The Ada block placement rule does NOT hold (probe_placement: 825 mismatches over 5 launches): blocks go to the pairs 0,22,44,66,88,110,132, then 2,24,...; see notes/protocol.md SM120. No TTU run has been made on this GPU. Encodings: Cesar's data/encodings/ttu_sm120.json."
   }
  },
- "cufunction_offset": {"580": "0x68"},
- "validated_drivers": ["580.178.04", "580.196.07"],
- "validated_note": {"580.178.04": "tethys 2026-11-16 (RTX 4090, system libnvoptix absent, extracted copy used): memdump of our own OptiX launch, GAS traversal group, its ISETP and all code from fnaddr-0x10000 to fnaddr-0xdca0 byte identical to the earlier dump; already validated on io and triton",
-  "580.196.07": "triton 2026-11-16: live OptiX code (memdump) byte identical to 580.178.04 for the GAS traversal group and the IAS prelude, group and following code; system libnvoptix matches the driver"}
+ "cufunction_offset": {
+  "580": "0x68"
+ },
+ "validated_drivers": [
+  "580.178.04",
+  "580.196.07"
+ ],
+ "validated_note": {
+  "580.178.04": "tethys 2026-11-16 (RTX 4090, system libnvoptix absent, extracted copy used): memdump of our own OptiX launch, GAS traversal group, its ISETP and all code from fnaddr-0x10000 to fnaddr-0xdca0 byte identical to the earlier dump; already validated on io and triton",
+  "580.196.07": "triton 2026-11-16: live OptiX code (memdump) byte identical to 580.178.04 for the GAS traversal group and the IAS prelude, group and following code; system libnvoptix matches the driver",
+  "580.126.09": "pc14 2026-11-19: OptiX launch plus memdump only (no TTU code of ours); NOT validated for TTU runs"
+ }
 }

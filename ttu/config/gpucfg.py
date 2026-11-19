@@ -99,7 +99,8 @@ class Config:
         sys.exit('no OptiX library for driver %s (extract it to %s)' % (self.driver, d))
 
     def sm_of_block(self, b):
-        """SM a block lands on when one block per SM is launched (the first half of the blocks on the even SMs, then the odd ones)."""
+        """SM a block lands on when one block per SM is launched (the first half of the blocks on the even SMs, then the odd ones). Ada only."""
+        if self.profile.get('placement'): sys.exit('no block to SM rule coded for %s (placement %s): use the measured table' % (self.sm, self.profile['placement']))
         return 2 * b if b < self.half else 2 * (b - self.half) + 1
 
     def env(self, base=None):
