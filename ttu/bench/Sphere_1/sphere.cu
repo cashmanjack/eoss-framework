@@ -45,7 +45,7 @@ int main(int argc, char **argv)
     std::map<std::string, std::string> kv; for (int a = 3; a < argc; ++a) { std::string s = argv[a]; const size_t e = s.find('='); if (e == std::string::npos) { fprintf(stderr, "bad arg %s\n", argv[a]); return 2; } kv[s.substr(0, e)] = s.substr(e + 1); }
     auto I = [&](const char *k, long d) { return kv.count(k) ? atol(kv[k].c_str()) : d; };
     const std::string kind = kv.count("kind") ? kv["kind"] : "sph"; const long N = I("N", 20000); const float R = kv.count("r") ? (float)atof(kv["r"].c_str()) : 0.04f;
-    const bool is_sph = kind == "sph", is_cus = kind == "custom", is_tri = kind == "tri0" || kind == "tri1";
+    const bool is_sph = kind == "sph", is_cus = kind == "custom", is_stk = kind == "stack", is_tri = kind == "tri0" || kind == "tri1" || is_stk;   // stack (pc14 addition, F427): N one triangle candidates, same xy, stacked along z; the axis ray (jit 0) is inside every box and outside every triangle
     if (!is_sph && !is_cus && !is_tri) { fprintf(stderr, "kind?\n"); return 2; }
     CK(cudaFree(0)); OX(optixInit()); OptixDeviceContextOptions co{}; OptixDeviceContext ctx; OX(optixDeviceContextCreate(0, &co, &ctx));
     std::mt19937 g(4321); std::uniform_real_distribution<float> U(-1.f, 1.f);
@@ -62,6 +62,10 @@ int main(int argc, char **argv)
         std::vector<OptixAabb> bb(N); for (long k = 0; k < N; ++k) bb[k] = {cen[k].x - R, cen[k].y - R, cen[k].z - R, cen[k].x + R, cen[k].y + R, cen[k].z + R};
         CK(cudaMalloc((void **)&dA, N * sizeof(OptixAabb))); CK(cudaMemcpy((void *)dA, bb.data(), N * sizeof(OptixAabb), cudaMemcpyHostToDevice));
         bi.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES; bi.customPrimitiveArray.aabbBuffers = &dA; bi.customPrimitiveArray.numPrimitives = (unsigned)N; bi.customPrimitiveArray.flags = &gflag; bi.customPrimitiveArray.numSbtRecords = 1;
+    } else if (is_stk) {
+        std::vector<V3> vv; vv.reserve(N * 3); for (long k = 0; k < N; ++k) { const float z = -0.9f + 1.8f * (k + 0.5f) / N; vv.push_back({-1.1f, -1.1f, z}); vv.push_back({0.9f, -1.1f, z}); vv.push_back({-1.1f, 0.9f, z}); }
+        CK(cudaMalloc((void **)&dA, vv.size() * sizeof(V3))); CK(cudaMemcpy((void *)dA, vv.data(), vv.size() * sizeof(V3), cudaMemcpyHostToDevice));
+        bi.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES; bi.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3; bi.triangleArray.numVertices = (unsigned)vv.size(); bi.triangleArray.vertexBuffers = &dA; bi.triangleArray.flags = &gflag; bi.triangleArray.numSbtRecords = 1;
     } else {
         const std::vector<Tri> ico = icosphere(kind == "tri1" ? 1 : 0); tps = (unsigned)ico.size(); std::vector<V3> vv; vv.reserve((size_t)N * tps * 3);
         for (long k = 0; k < N; ++k) for (auto &t : ico) for (const V3 *p : {&t.a, &t.b, &t.c}) vv.push_back({cen[k].x + p->x * R, cen[k].y + p->y * R, cen[k].z + p->z * R});
