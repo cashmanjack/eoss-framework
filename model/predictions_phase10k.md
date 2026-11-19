@@ -1,0 +1,13 @@
+# Phase 10k (tethys GPU 1, TTU_GPU=1, 2026-11-19): F264 one more attempt and the F265 zero wait arm, predicted before any run
+Rules as always: checked builds only (same-record build and the Node_4090 builds, check_seq ALL PASS), stage 0 before stage 1, smallest launch first, run.py timeout 30, idle GPU checked before every run, SM clock sampled in every run, raw files timestamped and never overwritten, a fault or a wrong result stops the group. One day cap.
+
+## F264: why 30 of 32 records were unstored
+Reading of the code (before any run): the same-record build is made with --coal (one 16 byte record per ray at out + 16 x lane index: R3, R44, R45, rounds left). The host expands compact records only when it is given --coal (setup3.cu, the coal branch before the slim branch). My phase 10j runner did not pass --coal to the host, so the host read 96 word records at the wrong offsets. The build's store code is probably right and the fault was in my runner.
+Predictions:
+1. With --coal on the host, stage 0 (no TTU) at G 1 and one warp: 32 of 32 records stored (rounds left slot not the fill word), the same rounds left value in every lane, hit word 0 in every lane (no TTU result). Probability 85 percent.
+2. Stage 1, one block, one warp, 32 rays: 32 of 32 stored, 32 of 32 hit, t equal to the OptiX reference bit for bit (1.0), primitive 0, 0 wrong. Probability 75 percent. If it fails with the flag fixed, the build is wrong: the short query sibling pair is recorded as not measured on the 4090 and I stop.
+3. Only if 2 holds: G 1 with 13 warps, then G 64 and 128 with 13 warps, 6 launches each. Rate and overlap predictions unchanged from phase 10i test 3: one SM at least 0.06 rays per cycle (else void), G 64 at least 60 times one SM, G 128 over G 64 between 1.3 and 1.6 (60 percent), all blocks overlapping. Rays counted as lanes x 1000 rounds (the build's --outer), clock the sampled SM clock.
+
+## F265 zero wait arm: the role block present with no wait
+Design: Node_4090 builds single, twice, sib; arms single, twice, w0 (SIB_DNS 0), w70 (control, 70 us), scenes N 1,024 and 2,048, 3 repetitions x 30 launches, order rotated. Saving = 1 - arm / single; loss = saving of twice minus saving of the arm. F265 had a loss of 0.04 to 0.05 (68 KB) and 0.08 (132 KB) at 10, 70 and 300 us.
+Prediction (the block, not the wait, causes the loss): w0 loss within 0.03 of the w70 loss of the same run at both scenes (65 percent). Rival (the wait itself causes it): w0 loss at most 0.02 at both scenes, w70 reproducing F265 (20 percent). Other (neither, e.g. w0 larger than w70 by over 0.03): 15 percent.
