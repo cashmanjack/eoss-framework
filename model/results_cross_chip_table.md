@@ -17,7 +17,7 @@ Chips (5090 column added 2026-11-19 on pc14: RTX 5090, Blackwell SM120, 170 SMs 
 | TPC sharing | whole chip, one triangle queries (times one SM) | n m | 30.0 at 30, 41.3 at 60 | 63.5 at 64; 128 invalid | per SM rate 0.1039 to 0.1041 at G 1 to 85 but only 64 blocks ran at once (sum of rates 85.0 times); G 170 0.072 per SM (120.9 times, 125 at once): not a clean whole GPU number | F105, Phase 10g |
 | Handoff | one warp, one custom primitive callback (cycles) | 850 to 900 (about 875) | n m | n m | n m | F49 |
 | Handoff | loaded callback latency over alone, four programs | n m | 1.3 to 16 times | n m | n m | F133 |
-| Handoff | register heap speedup of the any hit kNN | n m | 4.0 | 4.45 (kernel 4.2 to 4.5; 1.4 to 1.5 times the L2 byte ratio: the original's L2 traffic is 68 to 75 percent writes, F419) | 3.08 (kernel 3.17; both builds near the L2 request limit, speedup = L2 byte ratio, F415, F417) | F138, F255, F415, F417, F419 |
+| Handoff | register heap speedup of the any hit kNN | n m | 4.0 | 4.45 (kernel 4.2 to 4.5; 1.4 to 1.5 times the L2 byte ratio: the original's L2 traffic is 68 to 75 percent writes, F419; predicted 3.98 from byte mix and measured write and read costs, F425) | 3.08 (kernel 3.17; both builds near the L2 request limit, speedup = L2 byte ratio, F415, F417) | F138, F255, F415, F417, F419, F425 |
 | Handoff | built in sphere against custom primitive | n m | n m | same cost; tessellated 20 or 80 triangles no speedup | n m | F204 |
 | Handoff | opacity micromap: any hit calls kept at levels 2, 4, 6, 8 | n m | n m | 0.55, 0.14, 0.04, 0.01 | n m | F228 |
 | Handoff | partial warp cost per ray, 16 / 8 / 1 lanes over 32 | n m | n m | 1.03 to 1.05 / 1.15 / 5.4 | n m | F230 |
@@ -77,7 +77,7 @@ F264 closed 2026-11-19 (Jack): the 4090 short query pair is not measured (void b
 
 ## Update 2026-11-19 (pc14, fourth batch)
 5090 column filled for the node state rows (F411), the short query pair and whole chip tri1 rows (F412, with the concurrency caveat: blocks last 3.9 us and did not all overlap), Memory_1 TTU (new row, F413), and the steady rate row corrected (F410: the earlier 0.104 against 0.14 compared a span rate with a completion gap rate). Counted from the table: 46 rows.
-| Workloads | model v1 (frozen) measured / predicted: RTNN r 0.05 / 0.025 | triton basis (F250) lower bound | n m | 3.9 / 4.06 scored; 3.09 / 1.98 against the GPU kernel duration (F418) | 4.01 / 4.27 scored; 3.33 / 2.22 against the GPU kernel duration (F416) | F250, F255, F415, F416, F418 |
+| Workloads | model v1 (frozen) measured / predicted: RTNN r 0.05 / 0.025 | triton basis (F250) lower bound | n m | 3.9 / 4.06 scored; 3.09 / 1.98 against the GPU kernel duration (F418); 1.27 / 1.09 with the stub calibrated callback (F424, same input) | 4.01 / 4.27 scored; 3.33 / 2.22 against the GPU kernel duration (F416) | F250, F255, F415, F416, F418, F424 |
 | Workloads | model v1: kNN original total, register heap total, TrueKNN 400k, Arkade fixed 100k queries | 6000 Ada: TrueKNN, Arkade as basis | n m | 0.55, 0.50 (wrong kNN basis, F257), 1.07, 3.04 | 0.82, 1.07, 1.01, 0.91 (kNN basis 4070 Ti x 60/170) | F255, F257, F415 |
 
 ## Update 2026-11-19 (pc14, fifth batch)
@@ -86,9 +86,10 @@ F414: Memory_1 TTU one ray row is ray dependent (1.00 to 2.91, median 1.18), com
 ## Update 2026-11-19 (pc14, sixth batch)
 F416: RTNN scope split on the 5090 (host 0.065, event gap 0.033, kernel 0.479 of 0.577 ms at r 0.05); the 4090 kernel time not measured (estimate 3.3 to 3.4 and 2.2 to 2.5). F417: register heap speedup per round and ncu on the 5090 (no Ada counters). Two cells changed, no rows added: 48 rows.
 F418 and F419 (4090, 2026-11-19): RTNN scope split by ncu (kernel 0.590 and 0.115 ms of the scored 0.745 and 0.236) and the register heap per round with ncu (byte ratio the same as the 5090, speedup 1.4 to 1.5 times it). Two cells changed, no rows added: 48 rows.
-| Workloads | RTNN callback cost, real minus stub: share of kernel; cb cycles per candidate (form 4.9) | triton real data 7 to 11 percent (F216) | n m | n m | 38 to 49 percent; 9.6 to 10.9 (F422); calibrated form inside 2: 1.46, 1.25 | F216, F422 |
-| Caches | L2 sectors per SM cycle, whole chip, 24 MB: read / write / 1:1 copy / 2:1 | n m | n m | n m | 82.7 / 41.3 / 66.0 / 91.2 (F421); L2 write cost 2.0 reads in stream rate | F421 |
+| Workloads | RTNN callback cost, real minus stub: share of kernel; cb cycles per candidate (form 4.9) | triton real data 7 to 11 percent (F216) | n m | 48 and 42 percent (stub / full kernel 0.48, 0.58); 9.4 to 10.9 (F424); calibrated form inside 2: 1.27, 1.09 | 38 to 49 percent; 9.6 to 10.9 (F422); calibrated form inside 2: 1.46, 1.25 | F216, F422, F424 |
+| Caches | L2 sectors per SM cycle, whole chip, 24 MB: read / write / 1:1 copy / 2:1 | n m | n m | other benchmark (l2rw, TB/s, 32 MB): read 5.05 / write 2.01 per lane sector (cost 2.5), coalesced 3.92 / 2.58 (1.5), F423 | 82.7 / 41.3 / 66.0 / 91.2 (F421); L2 write cost 2.0 reads in stream rate | F421, F423 |
 | Handoff | kNN write share of L2 sectors, original / register heap | n m | n m | 68 to 75 / 27 to 39 percent (F419) | 75 to 83 / 28 to 40 percent (F420) | F419, F420 |
 
 ## Update 2026-11-19 (pc14, seventh batch)
 F420 to F422: 3 rows added (kNN write share, L2 stream rates, RTNN callback calibration). Counted from the table: 51 rows.
+F423 to F425 (4090, session 7, merged after the 5090's F420 to F422; numbers renumbered): the 4090 cells of the L2 stream and RTNN callback rows filled, register heap speedup and RTNN scored cells extended (F424, F425). The method of F425 (byte mix x measured costs) predicts the 4090 within 5 to 11 percent and the 5090 19 percent high. No rows added: 51 rows.
