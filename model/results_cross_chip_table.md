@@ -49,7 +49,7 @@ Chips: 6000 Ada = RTX 6000 Ada (triton, 142 SMs = 71 TPCs, 96 MB L2); 4070 Ti (i
 | Encodings | canonical TTU instructions byte identical SM89 and SM120 | 9 of 10 (TTULD.CLOSE close bit only) | n m | n m | F258 |
 | BITTU | decode, 32 instances, counts exact; many warps and IAS group counts exact; timing correction fails with 2 or more warps | yes (1 warp checked group; many warps, IAS) | 4070 Ti (F119, F122) | n m | F260, F261 |
 | Blind pipeline | calibrated launch time inside 2x: 1 of 24 cells, winner call 14 of 24 | 24 cells | n m | n m | F259 |
-| TPC sharing | short query loop build (same record, compact records), 13 warps per block, rays per SM per cycle at 1 / 64 / 128 blocks, records equal to OptiX | n m | n m | 0.038 / 0.022 / 0.011; whole GPU 96 / 3,493 / 3,609 rays per us; one SM below the 0.06 rule, pair ratio 1.03 reported not scored (F264) | F264 |
+| TPC sharing | short query loop build (same record, compact records), 13 warps per block, rays per SM per cycle at 1 / 64 / 128 blocks, records equal to OptiX | n m | n m | 0.038 / 0.022 / 0.011; whole GPU 96 / 3,493 / 3,609 rays per us; one SM below the 0.06 rule, pair ratio 1.03 reported not scored; CLOSED: 4090 pair rate not measured, F105 stands on its original chips (F264) | F264 |
 
 ## What is missing, and what I did about it
 Counting the 36 rows: all three chips only for the cost (hits, one triangle, depth), TPC sharing (long queries, other TPC, whole chip) and cache rows; two chips for the node state rows (6000 Ada and 4090, which are the same die, plus F104's coarse 4070 Ti numbers) and the short query pair rows (4070 Ti and 6000 Ada); the callback, flag, mask, micromap, partial warp, sibling DRAM and instance rows are one chip each (mostly the 4090).
@@ -69,3 +69,5 @@ Remaining gaps, each one run on an idle GPU, predictions first:
 
 ## Update 2026-11-19 (Phase 10k)
 F264: the 4090 short query loop build now gives records identical to OptiX at 1, 64 and 128 blocks (the earlier failure was my runner); one SM 0.038 rays per cycle is below the 0.06 my rule required, so the pair ratio (128 over 64 blocks 1.03 in whole GPU rate) is not scored and the pair claim (TPC sharing) is still open for a build with timing probes. F265: zero wait arm added (loss equals the 70 us loss, so the role block, not the wait). Table now 47 rows; gap 1 above is replaced by: short query pair with timing probes (block placement and overlap).
+
+F264 closed 2026-11-19 (Jack): the 4090 short query pair is not measured (void by the rule); F105 stands on the chips it was measured on; no probed build. Gap 1 above is removed from the open list.
