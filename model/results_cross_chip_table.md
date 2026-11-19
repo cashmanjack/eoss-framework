@@ -93,3 +93,8 @@ F418 and F419 (4090, 2026-11-19): RTNN scope split by ncu (kernel 0.590 and 0.11
 ## Update 2026-11-19 (pc14, seventh batch)
 F420 to F422: 3 rows added (kNN write share, L2 stream rates, RTNN callback calibration). Counted from the table: 51 rows.
 F423 to F425 (4090, session 7, merged after the 5090's F420 to F422; numbers renumbered): the 4090 cells of the L2 stream and RTNN callback rows filled, register heap speedup and RTNN scored cells extended (F424, F425). The method of F425 (byte mix x measured costs) predicts the 4090 within 5 to 11 percent and the 5090 19 percent high. No rows added: 51 rows.
+| Caches | L2 write over read cost per sector (plain CUDA, in L2): coalesced 128 B / one sector per lane | n m | n m | 1.5 / 2.5 (F423) | 1.6 / 1.9 (F426; 2.0 for 512 B streams, F421) | F423, F421, F426 |
+| Handoff | register heap speedup predicted from byte mix and per sector costs (F425 method), against measured | n m | n m | within 5 to 11 percent | 15 to 30 percent high with the chip's own lane costs (F426); unweighted byte ratio 3 to 9 percent low | F425, F426 |
+
+## Update 2026-11-19 (pc14, eighth batch)
+F426: tethys's L2rw benchmark on the 5090, 2 rows added: 53 rows. Register heap thread closed in notes/performance_model.md.
