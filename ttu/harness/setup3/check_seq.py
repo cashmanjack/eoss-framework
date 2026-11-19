@@ -5,7 +5,7 @@
 Stage 0 binaries must contain no TTU instruction at all. Stage 1 binaries must
 contain exactly one fused group laid out as the SM89 rules require.
 """
-import hashlib, json, sys, os
+import hashlib, json, re, sys, os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(HERE))))
@@ -40,7 +40,23 @@ def check(path):
     sec = [s for s in p.sections if s[2] == meta['section']]
     ok('one ttu_one section', len(sec) == 1)
     body = [b for _, b in elf.iter_instructions(p.data, sec[0])]
+    # hardening (2026-11-19): the checker must not guess the architecture, skip the SM120 dump comparison, or accept a layout it does not model
+    archs = sorted(set(int(x) for x in re.findall(r'\.sm_(\d+)\.cubin', os.popen('cuobjdump -lelf %s' % path).read())))
     SM = meta.get('sm', 89)
+    early = []
+    if 'sm' not in meta and archs != [89]:
+        early.append(('H1 layout has no sm field and the binary is not SM89 only', 'cubin archs %s' % archs))
+    if 'sm' in meta and archs != [meta['sm']]:
+        early.append(('H1 layout sm field equals the binary cubin arch', 'sm %s, cubin archs %s' % (meta['sm'], archs)))
+    if SM == 120 and len(sys.argv) < 3:
+        early.append(('H2 SM120 needs the dump argument (A10 compares the group with the SM120 dump)', 'check_seq.py BIN DUMP'))
+    if SM == 120 and meta.get('ias'):
+        early.append(('H3 ias on SM120 is not supported (the SM120 A13 rules model the GAS group only)', 'ias'))
+    if early:
+        for name, info in early:
+            print('%-55s FAIL %s' % (name, info))
+        print('FAILED', sha)
+        return False
     def sbo(b):   # signed branch offset in bytes from the next instruction: SM89 bits 63:32; SM120 v = bits 23:16 | (signed bits 63:34) << 8, in 4 byte words
         w = W(b)
         if SM == 120:
