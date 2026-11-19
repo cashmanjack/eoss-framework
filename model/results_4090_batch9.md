@@ -1,0 +1,20 @@
+# RTX 4090 (tethys GPU 1) session 9 results, 2026-11-19: the 5090's stack scene (F429) on the 4090
+
+OptiX only (SDK 8.1 headers, system library missing so ~/opt/nvoptix-580.178.04, driver 580.178.04), no TTU code. Predictions model/predictions_4090_batch9.md (2110c2c, before any run). Sources ttu/bench/Sphere_1 unchanged, built sm_89 and PTX compute_89 in /dev/shm/sp1. Runner: a copy of ttu/bench/pc14/run_sphere_pc14.py with only the GPU number (1) and the idle check script changed (ttu/bench/Phase10f/run_sphere_tethys.py, tethys_gpucheck.sh); arm `stack`. Analysis model/analyze_5090_batch9_stack.py with NSM 128 (unchanged script). Raw (private, timestamped) notes/tethys_sphere. All 7 runs rc 0, no fault, 0 hits at every N. SM clock 2.45 to 2.73 GHz in the calibration launches (5090: 2.54 to 2.60). One run per cell.
+
+| N | 1 | 4 | 16 | 64 | 256 | 1,024 | 4,096 |
+|---|---|---|---|---|---|---|---|
+| 4090 one warp cycles | 4,647 | 5,109 | 6,417 | 8,669 | 27,216 | 67,465 | 287,015 |
+| 4090 saturation cycles per ray per SM | 13.46 | 17.01 | 34.02 | 89.99 | 351.0 | 1,414.9 | 5,514 |
+| 5090 / 4090 one warp | 1.08 | 1.09 | 1.12 | 1.11 | 1.14 | 1.10 | 1.19 |
+| 5090 / 4090 saturation | 1.08 | 0.95 | 1.01 | 0.73 | 0.75 | 0.59 | 0.70 |
+
+Slopes per stacked triangle (least squares): one warp 68.6 (all N, R2 0.9987), 68.7 (N >= 64), 68.7 (N >= 256); saturation 1.344 (R2 1.0000), 1.344, 1.342. Saturation / one warp ratio 51 (5090: 87). Intercept at saturation, N = 1: 13.3 (F186 14.4).
+
+Like for like (same scene, same OptiX method, same script), 5090 / 4090: saturation slope 0.941 / 1.344 = 0.70 (0.71 for N >= 64 and N >= 256), so the 5090 is 1.43 times cheaper per stacked triangle at saturation (1.41 to 1.43 over the three fits); one warp slope 81.8 / 68.6 = 1.19, so the 5090 is 1.19 times SLOWER per triangle in latency; N = 1: 1.08 (both overhead dominated). The step in the saturation ratio comes with N (0.95 to 1.01 at N = 4 and 16, 0.59 to 0.75 from N = 64). Whitepaper 2x: not reached (1.43; the 2x line is a ratio at or below 0.55). The F429 estimate 1.0 times on one triangle holds (1.08).
+
+Score (prediction numbers):
+Held: 1 saturation slope 1.344 inside 0.8 to 1.6 and the ratio 0.70 inside 0.6 to 1.1 (the "5090 cheaper" branch; at the upper edge of "gain": below 0.55 not seen); 3 intercept 13.3 within 10 percent of 14.4 (7.6 percent below) and N = 1 ratio 0.93 inside 0.9 to 1.1; 5 R2 1.0000; 7 zero hits.
+Missed: 1 central 1.15 (measured 1.344, 17 percent low); the reading rule "gain" needed a ratio below 0.7 and got 0.7002 (all N), 0.705, 0.711: not met by the rule as written, though the ratio is 1.4 times; 2 one warp slope 68.6 under 70 to 100 (just outside) and 5090 / 4090 1.19 outside 0.9 to 1.1; 4 saturation / one warp 51 under 60 to 110 (the 4090 has the lower one warp slope, so the ratio falls; the 5090 87 was in the prediction's range); 6 N = 4,096 5,514 over 3,300 to 5,500 by 14 cycles (clock sampled, NSM 128).
+
+Reading: on the same OptiX scene the 5090 is 1.4 times cheaper per stacked triangle at saturation and 1.2 times more expensive per triangle for one warp. The per triangle gain is therefore a throughput result: the RT core's saturated rate rose, its latency per extra triangle did not. This agrees in direction with the TTU results (F407: 1.56 times on par:64:s; one triangle query 1.07 to 1.14, F410) and gives the first like for like OptiX number: 1.4, not 2. As in F429, the stacked scene includes the builder's nodes (not separable), so 1.4 is a ratio of per stacked triangle costs, not of the triangle test alone; the TTU loop on the same chip costs about 0.76 per triangle at N = 4,096 on Ada (F194: 3,122 / 4,096) against 1.34 here, so OptiX adds a fixed share (raygen, scheduler) that the 5090's mixed method row of F429 (b) did not separate and that row is superseded by this like for like comparison (F429 text not edited). Caveats: one run per cell; closest hit only, no hits; the 4090 clock varies 2.45 to 2.73 GHz inside the matrix (cycles are corrected by the calibration clock per launch); the 5090 used driver 580.126.09, the 4090 580.178.04.
