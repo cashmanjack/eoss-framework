@@ -86,3 +86,9 @@ F414: Memory_1 TTU one ray row is ray dependent (1.00 to 2.91, median 1.18), com
 ## Update 2026-11-19 (pc14, sixth batch)
 F416: RTNN scope split on the 5090 (host 0.065, event gap 0.033, kernel 0.479 of 0.577 ms at r 0.05); the 4090 kernel time not measured (estimate 3.3 to 3.4 and 2.2 to 2.5). F417: register heap speedup per round and ncu on the 5090 (no Ada counters). Two cells changed, no rows added: 48 rows.
 F418 and F419 (4090, 2026-11-19): RTNN scope split by ncu (kernel 0.590 and 0.115 ms of the scored 0.745 and 0.236) and the register heap per round with ncu (byte ratio the same as the 5090, speedup 1.4 to 1.5 times it). Two cells changed, no rows added: 48 rows.
+| Workloads | RTNN callback cost, real minus stub: share of kernel; cb cycles per candidate (form 4.9) | triton real data 7 to 11 percent (F216) | n m | n m | 38 to 49 percent; 9.6 to 10.9 (F422); calibrated form inside 2: 1.46, 1.25 | F216, F422 |
+| Caches | L2 sectors per SM cycle, whole chip, 24 MB: read / write / 1:1 copy / 2:1 | n m | n m | n m | 82.7 / 41.3 / 66.0 / 91.2 (F421); L2 write cost 2.0 reads in stream rate | F421 |
+| Handoff | kNN write share of L2 sectors, original / register heap | n m | n m | 68 to 75 / 27 to 39 percent (F419) | 75 to 83 / 28 to 40 percent (F420) | F419, F420 |
+
+## Update 2026-11-19 (pc14, seventh batch)
+F420 to F422: 3 rows added (kNN write share, L2 stream rates, RTNN callback calibration). Counted from the table: 51 rows.

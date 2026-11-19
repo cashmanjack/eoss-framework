@@ -1,0 +1,44 @@
+# RTX 5090 (pc14) session 7: write share of the kNN L2 traffic (F420), L2 read and write stream microbenchmark (F421), RTNN callback calibration (F422), scored against model/predictions_5090_batch7.md (commit 2362bd4, before any run), 2026-11-19
+
+Runs: plain CUDA (l2stream) and OptiX only, no TTU code. GPU 0, pc14_gpucheck.sh before every process, timeout -k 2 30 to 240, ncu non admin with --clock-control none --cache-control none. No fault. Raw (private): notes/pc14_workloads (ncu, calib), notes/pc14_core/l2stream_*. Code: ttu/bench/pc14/l2stream.cu, run_rtnn_calib_pc14.sh, ncu_workloads_pc14.sh; scorers model/score_5090_batch7a.py and score_5090_batch7c.py.
+
+## 1. Write share of the kNN L2 traffic (F420): tethys's second metric list, 5090, per round
+```
+| round | write share orig / reg | sectors M orig / reg (atom+red orig / reg) | bytes/32 vs sectors orig / reg | sectors per us per pct orig / reg | reg over orig | L1 sector hit orig / reg | tex lookup hit rate orig / reg |
+| 1 | 74.9% / 28.3% | 18.0 / 6.2 (0 / 0) | 0.999 / 1.001 | 1261 / 1666 | 1.32 | 86.0 / 62.1 | 100.0 / 100.0 |
+| 2 | 77.3% / 29.9% | 27.1 / 8.5 (0 / 0) | 1.004 / 1.003 | 1256 / 1754 | 1.40 | 87.7 / 63.0 | 100.0 / 100.0 |
+| 3 | 83.0% / 39.9% | 94.6 / 25.9 (0 / 0) | 1.001 / 1.002 | 1204 / 1626 | 1.35 | 90.8 / 67.8 | 100.0 / 100.0 |
+| 4 | 78.0% / 39.2% | 298.8 / 110.0 (0 / 0) | 0.997 / 1.006 | 1224 / 1554 | 1.27 | 88.9 / 66.0 | 100.0 / 100.0 |
+```
+Predictions: 1 (original write share at least 60 percent every round and within 8 points of the 4090's per round value): HELD (75, 77, 83, 78 percent against 68, 70, 75, 71: +7, +7, +8, +7; round 3 at the edge). 2 (register heap 20 to 45 percent): HELD (28, 30, 40, 39). 3 (no atomics or reductions): HELD (0). 4 (register heap over original sectors per microsecond per percent of peak 1.15 to 1.45 every round): HELD (1.32, 1.40, 1.35, 1.27; the 4090 had 1.57 to 1.84). 5 (original L1 sector hit rate above the register heap's): HELD (86 to 91 against 62 to 68). 6 (L2 MB = sectors x 32 within 3 percent): HELD (0.997 to 1.006).
+So the sector mix is chip independent (write share 75 to 83 against 68 to 75 percent on the 4090; register heap 28 to 40 against 27 to 39), and the original's L2 traffic is 3 quarters writes on both chips (the heap write back).
+
+## 2. L2 throughput by stream type (F421), plain CUDA
+Sectors (32 B) per SM clock cycle for the whole chip, median of 3 runs (each: 5 timed launches), real clock 2.56 to 2.60 GHz from clock64 against globaltimer; L2 hit footprints 2 to 72 MB, 256 MB spills to DRAM:
+| mode | 2 MB | 8 MB | 24 MB | 48 MB | 72 MB | 256 MB | requested TB/s at 24 MB |
+|---|---|---|---|---|---|---|---|
+| read only | 63.2 | 76.5 | 82.7 | 82.9 | 83.1 | 20.5 | 6.80 |
+| write only | 35.3 | 38.4 | 41.3 | 41.4 | 41.5 | 20.5 | 3.42 |
+| copy 1 : 1 | 49.6 | 62.2 | 66.0 | 65.4 | 64.1 | 18.1 | 5.47 |
+| two reads one write | 63.9 | 82.9 | 91.2 | 93.0 | 94.4 | 18.9 | 7.57 |
+Run to run spread at 24 MB under 2 percent. ncu on the timed kernel (24 MB): sector counts equal bytes / 32 (187.2 M, reads and writes as designed), lts throughput 93.8 percent (read), 95.1 (write), 93.3 (copy), 105.5 (2 : 1; the metric is not capped at 100), DRAM bytes at most 25 MB.
+Predictions: 1 (read only 3.3 to 5.8 TB/s): MISSED, 6.80 TB/s (83 sectors per cycle; my range was too low, the kNN builds' 3.1 to 3.4 TB/s were 45 to 50 percent of the stream rate, not 70 to 80). 2 (write only 0.3 to 1.0 of read; 0.3 to 0.6; below 0.2): HELD, 0.50 (in the 0.3 to 0.6 range; not below 0.2). 3 (1 : 1 between write only and read only): HELD (66.0); (2 : 1 between the 1 : 1 and read only): MISSED, 91.2 is ABOVE read only. 4 (within 15 percent across 8 to 72 MB): HELD (read 76.5 to 83.1, write 38.4 to 41.5, copy 62.2 to 66.0, 2 : 1 82.9 to 94.4, the last spread 13.9 percent); 2 MB lower than 8 MB by more than 15 percent: HELD for read (17 percent), copy (20), 2 : 1 (23), not for write (8). 5 (256 MB at most 0.5 of the 24 MB rate): HELD (read 0.25, write 0.50 at the edge). 6 (ncu: read at least 85 percent of peak, write at least 85, sector counts): HELD (93.8, 95.1, counts exact).
+Reading: writing a sector costs about 2 reads in the L2 (write only runs at half the read rate and ncu calls both 94 to 95 percent of peak). The read and write paths partly overlap: a mix of one third writes carries 91 to 94 sectors per cycle, more than reads alone (83), so total sectors per cycle is not a cost: the sector cost sum read / 83 + write / 41 is 1.19 for the 1 : 1 copy and 1.50 for 2 : 1, above 1, i.e. not a time sum either. Against the 4090's post hoc fit (a write about 6.8 times a read in peak terms, F419): the 5090's pure stream gives 2.0 on this chip. The 4090 has not had this benchmark, so the 6.8 is untested on Ada.
+How it sits with the kNN builds (round 4 on the 5090): original 37 sectors per cycle at 78 percent writes (between the write only rate 41 and the 1 : 1 copy 66), register heap 41 sectors per cycle at 39 percent writes (the stream mix of the same share carries about 91). So neither build is at its own stream limit; the original is near the write only rate, the register heap at 45 percent of the rate of its mix. The write weighted sector ratio (read 1, write 2) of the two builds is 3.5 to 4.8, the measured kernel speedup 3.0 to 4.0 (the unweighted sector ratio 2.7 to 3.6 is closer); so on the 5090 the write cost does not show up as extra speedup (Ada's 1.4 to 1.5 times the byte ratio does).
+
+## 3. RTNN callback calibration (F422), model v1 variant S, CALIBRATED on the same input (not blind)
+Stub build: the one line of triton's rt_stub tree (radius intersection program returns at once) applied to the sm_120 tree. 3 repetitions each, interleaved. Medians in the block above: kernel time by the program's event and by ncu.
+Predictions: 1 (stub over real 0.35 to 0.8 at r 0.05; 0.4 to 0.9 at r 0.025; stub rc 0): HELD (0.55 event, 0.51 ncu; 0.73 event, 0.62 ncu; rc 0 everywhere). 2 (cb 3 to 15 cycles per candidate at r 0.05): HELD (9.5; 9.6 by ncu; 10.6 and 10.9 at r 0.025). 3 (calibrated prediction against the kernel inside a factor 2: r 0.05 65 percent, r 0.025 45 percent, both 35 percent; measured above in both 70 percent): HELD (ratios 1.46 and 1.25; both inside; above in both). 4 (F415 rows enter the factor 2, headline 7 of 7): HELD.
+Rescore of F415 with the calibrated RTNN rows against kernel time (label: calibrated): 15 of 15 rows inside a factor 2, median absolute log error 0.20 (was 13 of 15, 0.20), headline 7 of 7 (was 5 of 7). The uncalibrated v1 against the kernel (F416): 3.33 and 2.22.
+Reading: the callback share of the kernel is large on this input: real minus stub is 0.234 ms of 0.479 (49 percent) at r 0.05 and 0.037 of 0.098 (38 percent) at r 0.025 (ncu), against 7 to 11 percent on triton's real data (F216); the form's 4.9 cycles per candidate against the measured 9.6 to 10.9 (plus the form's cbref 1.011). The stub, which has no callback work at all, is still 1.8 (r 0.05) and 1.4 (r 0.025) times the uncalibrated v1 prediction, so about a third of the original miss is traversal and fixed cost the form's base (110 cycles plus 4.9 per candidate) does not hold on this chip. The stub also drops RTNN's stop after K hits, so the real build may traverse less than the stub: real minus stub underestimates the callback cost if anything. Caveats: calibrated on the same input and radius (the calibration IS a measurement of the answer's program), the form's CLK constant 2.5e9 kept (the chip runs 2,595), r 0.025 is a 0.1 ms launch near the floor.
+E3
+git add model/results_5090_batch7.md model/score_5090_batch7a.py model/score_5090_batch7c.py ttu/bench/pc14/l2stream.cu ttu/bench/pc14/run_rtnn_calib_pc14.sh; wc -l model/results_5090_batch7.md```
+r 0.05: C_mean 93.84 S_mean 50.55 q_mean 95.86 q_max 136 | event real 0.5197 stub 0.2882 (stub/real 0.55) | ncu real 0.4788 stub 0.2448 (0.51) | search compute real 0.5819 stub 0.3502
+   cb (event diff) 9.53, cb (ncu diff) 9.63 cycles per candidate; uncalibrated v1 0.1364 ms; chain 0.0313 ms
+   calibrated (cb event): predicted 0.3286 ms | kernel (ncu) 0.4788 ratio 1.46 in | event 0.5197 ratio 1.58 | search compute 0.5819 ratio 1.77
+   calibrated (cb ncu): predicted 0.3309 ms | kernel (ncu) 0.4788 ratio 1.45 in | event 0.5197 ratio 1.57 | search compute 0.5819 ratio 1.76
+r 0.025: C_mean 13.03 S_mean 7.35 q_mean 15.34 q_max 35 | event real 0.1309 stub 0.0950 (stub/real 0.73) | ncu real 0.0979 stub 0.0611 (0.62) | search compute real 0.1933 stub 0.1591
+   cb (event diff) 10.64, cb (ncu diff) 10.90 cycles per candidate; uncalibrated v1 0.0436 ms; chain 0.0081 ms
+   calibrated (cb event): predicted 0.0783 ms | kernel (ncu) 0.0979 ratio 1.25 in | event 0.1309 ratio 1.67 | search compute 0.1933 ratio 2.47
+   calibrated (cb ncu): predicted 0.0792 ms | kernel (ncu) 0.0979 ratio 1.23 in | event 0.1309 ratio 1.65 | search compute 0.1933 ratio 2.44
+```
