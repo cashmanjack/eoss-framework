@@ -29,7 +29,7 @@ struct Inst { const TtuClass *c; uint64_t lo, hi; int pg, pg_not, offset, rb, rc
 struct Group { bool ok = false; int fuse = 0; std::vector<Inst> ins; std::string why; std::vector<int> ray_regs, res_regs; };
 
 static FILE *out = stderr;
-static int print_n = 64, off_mode = 0, launches = 0;
+static int print_n = 64, off_mode = 0, launches = 0, g_tw = -1;   // g_tw: BITTU_WARP, record only this warp (-1 = all)
 static std::string kernel = "ttu_one";
 static std::set<CUfunction> done;
 static BittuRec *g_rec = nullptr, *h_rec = nullptr; static int *g_nseen = nullptr, *h_nseen = nullptr; static int g_nth = 0; static bool g_ready = false; static CUfunction g_func = nullptr;
@@ -88,9 +88,10 @@ static void print_group(const Group &g, size_t at) {
 void nvbit_at_init() {
     if (getenv("BITTU_OUT")) out = fopen(getenv("BITTU_OUT"), "w");
     if (getenv("BITTU_PRINT")) print_n = atoi(getenv("BITTU_PRINT"));
+    if (getenv("BITTU_WARP")) g_tw = atoi(getenv("BITTU_WARP"));
     if (getenv("BITTU_KERNEL")) kernel = getenv("BITTU_KERNEL");
     off_mode = getenv("BITTU_MODE") && !strcmp(getenv("BITTU_MODE"), "off");
-    fprintf(out, "bittu compute: kernel '%s', mode %s\n", kernel.c_str(), off_mode ? "off (decode only)" : "probes");
+    fprintf(out, "bittu compute: kernel '%s', mode %s, probed warp %d\n", kernel.c_str(), off_mode ? "off (decode only)" : "probes", g_tw);
 }
 
 static void collect(uint8_t b, void *u) { ((std::vector<uint8_t> *)u)->push_back(b); }
@@ -130,12 +131,12 @@ static void instrument(CUcontext ctx, CUfunction f, int nth) {
         const size_t nrec = (size_t)nth * BITTU_INST;
         cudaMalloc(&g_rec, nrec * sizeof(BittuRec)); cudaMalloc(&g_nseen, (size_t)nth * sizeof(int)); h_rec = (BittuRec *)malloc(nrec * sizeof(BittuRec)); h_nseen = (int *)malloc((size_t)nth * sizeof(int)); /* device memory, not managed: first touch page faults of managed memory cost 1.8 M cycles in the first probe */ g_nth = nth; g_func = fn;
         nvbit_insert_call(before, "bittu_cal", IPOINT_AFTER); nvbit_add_call_arg_guard_pred_val(before);
-        nvbit_add_call_arg_const_val64(before, (uint64_t)g_rec); nvbit_add_call_arg_const_val64(before, (uint64_t)g_nseen); nvbit_add_call_arg_const_val32(before, nth);
+        nvbit_add_call_arg_const_val64(before, (uint64_t)g_rec); nvbit_add_call_arg_const_val64(before, (uint64_t)g_nseen); nvbit_add_call_arg_const_val32(before, nth); nvbit_add_call_arg_const_val32(before, g_tw);
         nvbit_insert_call(before, "bittu_pre", IPOINT_AFTER); nvbit_add_call_arg_guard_pred_val(before);
-        nvbit_add_call_arg_const_val64(before, (uint64_t)g_rec); nvbit_add_call_arg_const_val64(before, (uint64_t)g_nseen); nvbit_add_call_arg_const_val32(before, nth);
+        nvbit_add_call_arg_const_val64(before, (uint64_t)g_rec); nvbit_add_call_arg_const_val64(before, (uint64_t)g_nseen); nvbit_add_call_arg_const_val32(before, nth); nvbit_add_call_arg_const_val32(before, g_tw);
         nvbit_add_call_arg_const_val32(before, (int)g.ray_regs.size()); for (int r : g.ray_regs) nvbit_add_call_arg_reg_val(before, r, true);
         nvbit_insert_call(after, "bittu_post", IPOINT_AFTER); nvbit_add_call_arg_guard_pred_val(after);
-        nvbit_add_call_arg_const_val64(after, (uint64_t)g_rec); nvbit_add_call_arg_const_val64(after, (uint64_t)g_nseen); nvbit_add_call_arg_const_val32(after, nth);
+        nvbit_add_call_arg_const_val64(after, (uint64_t)g_rec); nvbit_add_call_arg_const_val64(after, (uint64_t)g_nseen); nvbit_add_call_arg_const_val32(after, nth); nvbit_add_call_arg_const_val32(after, g_tw);
         nvbit_add_call_arg_const_val32(after, (int)g.res_regs.size()); for (int r : g.res_regs) nvbit_add_call_arg_reg_val(after, r, true);
         g_ready = true; (void)collect;
     }
