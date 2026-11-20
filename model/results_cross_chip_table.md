@@ -102,3 +102,7 @@ F426: tethys's L2rw benchmark on the 5090, 2 rows added: 53 rows. Register heap 
 
 ## Update 2026-11-19 (tethys, session 9)
 F430: the stack scene on the 4090, the stack row filled (53 rows). The 5090 triangle gain is 1.43 times at saturation, 1.19 times worse one warp.
+## Update 2026-11-19 (pc14, tenth batch)
+F431 and F432: 2 rows added (inside origin hits of the built in sphere, entry only sphere neighbour search against custom primitives); other chips "n m". Counted from the table: 55 rows.
+| Handoff | built in sphere (OptiX 8.1) reports a hit for a ray that starts inside: option variants with a hit | n m | n m | n m | 0 of 56 (F431; the guide says a back face hit) | F431, F428 |
+| Workloads | fixed radius search, entry only built in spheres over custom AABB primitives: candidates per query, time (1M queries uniform and clustered, K 5 and 50, device scope with Morton sort) | n m | n m | n m | 0.72 to 0.74 times the candidates, 1.04 to 1.61 times the time (count only 1.33 to 1.98); CLOVER hubs 95, 109, 94, 111 ms, custom 2.2, 38, 18, 275 ms | F432 |
