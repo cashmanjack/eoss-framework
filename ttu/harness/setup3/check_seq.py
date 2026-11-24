@@ -54,6 +54,14 @@ def variant_edits(name, body):
             if (int.from_bytes(body[i], 'little') >> 40) & 0xffff == 0xc0: e[i] = _setf(body[i], 15, 12, 0b1111)   # @!PT on the TTUST at 0xC0
     elif name == 'D1':
         for i in ix(0x3d0): e[i] = _setf(body[i], 72, 72, 0)                                             # TTUOPEN without DUAL
+    elif name.startswith('W_'):   # word variation (Jack 2026-11-24): MOV32I of one constant into one source register of one ray store, in the last NOP before the first TTUOPEN
+        _, so, k = name.split('_'); off = {'c0': 0xc0, 'd0': 0xd0, '40': 0x40, '50': 0x50}[so]; k = int(k)
+        st = [i for i in ix(0x3d1) if (int.from_bytes(body[i], 'little') >> 40) & 0xffff == off]; assert len(st) == 1
+        w = int.from_bytes(body[st[0]], 'little'); rc, rb = (w >> 64) & 0xff, (w >> 32) & 0xff; reg = [rc, rc + 1, rb, rb + 1][k]
+        const = {'c0': (0x3dcccccd, 0x3dcccccd, 0xc0000000, 0x3fc00000), '40': (0x3dcccccd, 0x3dcccccd, 0xc0000000, 0x3fc00000),
+                 'd0': (0x3dcccccd, 0x3dcccccd, 0x40000000, 0x3f000000), '50': (0x3dcccccd, 0x3dcccccd, 0x40000000, 0x3f000000)}[so][k]   # 0.1 0.1 -2.0 1.5 / 0.1 0.1 2.0 0.5
+        nop = [i for i in ix(0x918) if i < ix(0x3d0)[0]][-1]; tmpl = body[ix(0x802)[0]]
+        e[nop] = _setf(_setf(_setf(_setf(tmpl, 23, 16, reg), 63, 32, const), 109, 105, 15), 75, 72, 15)   # MOV32I Rreg, const; control = stall 15, no yield (as the NOP it replaces)
     else: raise KeyError(name)
     return e
 
@@ -67,6 +75,7 @@ def check_edit_variant(path, ent, sha):
     iv = list(elf.iter_instructions(pv.data, sv)); ib = list(elf.iter_instructions(pb.data, sb))
     bodyb = [b for _, b in ib]; exp = variant_edits(ent['name'], bodyb)
     diff = {i for i in range(len(ib)) if iv[i][1] != ib[i][1]} if len(iv) == len(ib) else None
+    res.append(('every edited instruction decodes with 0 failed checks', all(Decoder(ISASpec.load(sm=89)).decode(0, iv[i][1]).n_failed == 0 for i in exp), sorted(exp)))
     res.append(('same instruction count and layout as the base', len(iv) == len(ib) and mv['section'] == mb['section'] and sv[:2] == sb[:2], (len(iv), len(ib))))
     res.append(('instructions that differ from the base are exactly the approved edit', diff is not None and bool(exp) and diff == set(exp) and all(bytes(iv[i][1]) == exp[i] for i in exp), (sorted(diff) if diff is not None else None, sorted(exp))))
     res.append(('the rest of the file is byte for byte the base', len(pv.data) == len(pb.data) and all(pv.data[k] == pb.data[k] for k in range(len(pb.data)) if not any(iv[i][0] <= k < iv[i][0] + 16 for i in exp)), ''))

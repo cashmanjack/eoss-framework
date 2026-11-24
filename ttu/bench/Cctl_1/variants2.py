@@ -11,6 +11,8 @@ from eoss.binary import elf
 D = '/dev/shm/cctl1'; PJ = os.path.join(ROOT, 'notes', 'cctl_variant_sha.json')
 V = {'F0_fuse0': 'cctl', 'P1': 'cctl', 'P2': 'cctl', 'P3': 'cctl', 'O1': 'cctl', 'O2': 'cctl', 'O3': 'cctl', 'O4': 'cctl', 'W1': 'cctl', 'W2': 'cctl',
      'S1': 'twice', 'S2': 'twice', 'X1': 'twice', 'D1': 'twice'}
+for _so in ('c0', 'd0', '40', '50'):
+    for _k in range(4): V['W_%s_%d' % (_so, _k)] = 'single'
 def build():
     j = json.load(open(PJ)); j.setdefault('edits', {})
     for n, b in V.items():

@@ -27,9 +27,9 @@ def preflight(tag):
             return
         print('  GPU busy (pid,user):', p, 'waiting', flush=True); time.sleep(10)
     sys.exit('STOP: GPUs not free of compute processes for 10 minutes')
-def run_one(binp, N, rep, jsonout):
+def run_one(binp, N, rep, jsonout, scene=None):
     """returns (class, text). Our own child only."""
-    cmd = ['timeout', '-k', '2', '30', VENV, os.path.join(S3, 'run.py'), binp, 'hit', 'zero', jsonout, '--scene', 'par:%d:s' % N, '--warps', '1', '--blocks', '1', '--sms', '0,0', '--repeat', str(rep)]
+    cmd = ['timeout', '-k', '2', '30', VENV, os.path.join(S3, 'run.py'), binp, 'hit', 'zero', jsonout, '--scene', scene or 'par:%d:s' % N, '--warps', '1', '--blocks', '1', '--sms', '0,0', '--repeat', str(rep)]
     pr = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=ENV, start_new_session=True)
     try: out, _ = pr.communicate(timeout=50)
     except subprocess.TimeoutExpired:
@@ -50,10 +50,14 @@ def cycles(binp, N, rep, tag):
     if not all(l['ran'] == 1 for l in L): return 'wrong result', 'not exactly one TTU block', None
     return c, '', [l['warp_clk'][0][1] - l['warp_clk'][0][0] for l in L]
 def results_equal(binp, basep):
+    """MANDATORY (Jack, 2026-11-24): both a miss ray scene (par:1024:s, the matrix scene) and a hit ray scene (tri1) must be equal to the base; a variant that passes only the miss ray is NOT 'ran correctly'."""
+    r1 = results_equal_scene(binp, basep, 'par:1024:s'); r2 = results_equal_scene(binp, basep, 'tri1')
+    return (r1[0] and r2[0]), 'miss ray: %s | hit ray: %s' % (r1[1], r2[1])
+def results_equal_scene(binp, basep, scene):
     """one launch each: analyze.py PASS on the variant, and its result registers equal to the base build's except the words that differ between two base launches (addresses)."""
     ja, jb, jc = ['%s/out/cmp_%s_%d.json' % (D, k, os.getpid()) for k in 'abc']
     for b, j in ((basep, ja), (basep, jb), (binp, jc)):
-        preflight('cmp'); c, t = run_one(b, 1024, 1, j)
+        preflight('cmp'); c, t = run_one(b, 1024, 1, j, scene)
         if c != 'ran correctly': return False, 'launch for comparison: %s' % c
     a, b_, v = [json.load(open(j))['out'] for j in (ja, jb, jc)]
     nd = [(l, k) for l in range(len(a)) for k in range(len(a[l])) if a[l][k] != b_[l][k]]
