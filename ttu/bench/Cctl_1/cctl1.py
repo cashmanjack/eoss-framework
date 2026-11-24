@@ -15,7 +15,7 @@ S3 = os.path.join(ROOT, 'ttu', 'harness', 'setup3'); D = '/dev/shm/cctl1'; VENV 
 OPTIX = os.path.expanduser('~/optix_sdk/include'); NVCC = os.path.expanduser('~/opt/cuda-12.8/bin/nvcc')
 sys.path.insert(0, os.path.join(ROOT, 'ttu', 'config')); sys.path.insert(0, os.path.join(ROOT, 'notes', 'setup3'))
 C = ['--clock', '--remap', '--compact-out', '--regs', '104', '--smfilter']
-BUILDS = {'single': C, 'twice': C + ['--twice'], 'cctl': C + ['--twice', '--cctl']}
+BUILDS = {'single': C, 'twice': C + ['--twice'], 'cctl': C + ['--twice', '--cctl'], 'ces1': C + ['--cesar8', '1'], 'ces2': C + ['--cesar8', '2']}
 SIZES = [1024, 2048, 4096]
 def sh(c, **kw): return subprocess.run(c, capture_output=True, text=True, **kw)
 def die(m, p=None): sys.exit('STOP: ' + m + (('\n' + p.stdout[-1500:] + p.stderr[-1000:]) if p is not None else ''))
@@ -74,6 +74,8 @@ def variants():
          'V2_predoff': (pred(lo, 7, True), hi, 'predicate @!PT (Pg 7, not 1), never executes'),
          'V3_srcrel0': (lo, (hi & ~(7 << (113 - 64))) | (0 << (113 - 64)), 'src_rel_sb (115:113) = 0 (was 7)'),
          'V4_dstwr0': (lo, (hi & ~(7 << (110 - 64))) | (0 << (110 - 64)), 'dst_wr_sb (112:110) = 0 (was 7): the paper reports a FAULT; never run')}
+    pj = os.path.join(ROOT, 'notes', 'cctl_variant_sha.json'); jj = json.load(open(pj)) if os.path.exists(pj) else {}   # regenerated after every rebuild (builds are not byte reproducible)
+    jj['base'] = sha(base); jj['variants'] = {}
     s0 = D + '/cctl_s0'; rep = []
     for n, (l2, h2, what) in V.items():
         nb = struct.pack('<QQ', l2, h2); out = '%s/%s_s1' % (D, n)
@@ -87,10 +89,11 @@ def variants():
         ck, c = check(out)
         if not ck: fails = [l.split('FAIL')[0].strip() for l in c.stdout.splitlines() if ' FAIL' in l and not l.startswith('FAILED')]
         print('%s: %s; differs from baseline only in bytes %s (inside the one TTUCCTL: %s); changed bits %s; check_seq %s; failing rules %s' % (n, what, '0x%x..0x%x' % (min(d), max(d)), d_ok, bits, 'ALL PASS' if ck else 'FAILS (expected, see plan)', fails))
-        d_ok or die('variant differs outside the TTUCCTL: ' + n); rep.append((n, bits, ck, fails))
+        d_ok or die('variant differs outside the TTUCCTL: ' + n); rep.append((n, bits, ck, fails)); jj['variants'][sha(out)] = n
         EXP = ('sha256 matches build', 'cctl: exactly one TTUCCTL, ivall bit 80 set, unpredicated', 'cctl: bytes equal the EoSS encoder output for TTUCCTL.IVALL')
         print('  only the expected rules fail (sha of the baseline, the TTUCCTL bytes and its predicate/ivall rule): %s' % all(f in EXP for f in fails))
         if ck: print('  note: check_seq passed a variant (marker written): deleting it'); os.remove(out + '.checked')
+    json.dump(jj, open(pj, 'w'), indent=1)
     print('stage 0 of the variants is the baseline stage 0 binary (the slot is a NOP): sha %s' % sha(s0)[:8])
 def clean():
     shutil.rmtree(D, ignore_errors=True); print('removed', D)

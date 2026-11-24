@@ -166,7 +166,8 @@ def check(path):
             kinds = [low12(b) for b in grp]
             shape = [ST] * 10 + [GO] + [ST] * 10 + [GO] + [LD] * 6 if meta.get('dualgo') else [ST] * 10 + [GO] + [LD] * 6
             if meta.get('ias'): shape = [ST] * 8 + [GO] + [LD] * 6   # F91 IAS group: fuse count 15
-            ok(tag + ('A4 group is 10 ST, GO, 10 ST, GO, 6 LD (dualgo)' if meta.get('dualgo') else 'A4 group is 8 ST, GO, 6 LD (IAS)' if meta.get('ias') else 'A4 group is 10 ST, then 1 GO, then 6 LD'), kinds == shape, kinds)
+            if meta.get('cesar8'): shape = [ST] * (4 if meta['cesar8'] == 1 else 6) + [GO] + [LD] * 3   # non dual session after Cesar's SM120 layout (Jack 2026-11-24)
+            ok(tag + ('C8 group is %d ST, GO, 3 LD (non dual, Cesar layout)' % (4 if meta['cesar8'] == 1 else 6) if meta.get('cesar8') else 'A4 group is 10 ST, GO, 10 ST, GO, 6 LD (dualgo)' if meta.get('dualgo') else 'A4 group is 8 ST, GO, 6 LD (IAS)' if meta.get('ias') else 'A4 group is 10 ST, then 1 GO, then 6 LD'), kinds == shape, kinds)
             if SM == 120:   # A13 (SM120 GAS group, pc14): the shape read from the SM120 live OptiX code (notes/protocol.md SM120): store offsets, load offsets, predicates, DUAL open, fuse 17, and the group equal to the dump's bytes
                 offs = lambda b: (W(b) >> 40) & 0xffff
                 ok(tag + 'A13 SM120 store offsets 0xC0, 0xD0, 0x200, 0x100, 0x180, 0x190, 0, 0x40, 0x50, 0x80', [offs(b) for b in grp[:10]] == [0xc0, 0xd0, 0x200, 0x100, 0x180, 0x190, 0, 0x40, 0x50, 0x80], [hex(offs(b)) for b in grp[:10]])
@@ -186,6 +187,13 @@ def check(path):
             ok(tag + 'A6 exactly one TTULD with bit 74, and it is last', close == [n - 1] and lds[-1] == n - 1, close)
             ok(tag + 'A7 CLOSE unpredicated', pred(grp[-1]) == (7, 0), pred(grp[-1]))
             ok(tag + 'A8 bit 72 only on TTUOPEN', not any(bit(b, 72) for b in grp))
+            if meta.get('cesar8'):   # the only new rules (Jack 2026-11-24): fuse 8 (form 1) or 10 (form 2), the exact store and load offsets, predicates, an OPEN WITHOUT DUAL, close last
+                c8 = meta['cesar8']; offs8 = lambda b: (W(b) >> 40) & 0xffff
+                ok(tag + 'C8 fuse count is %d' % (8 if c8 == 1 else 10), n == (8 if c8 == 1 else 10), n)
+                ok(tag + 'C8 store offsets', [offs8(b) for b in grp[:n - 4]] == ([0, 0x40, 0x50, 0x80] if c8 == 1 else [0xc0, 0xd0, 0, 0x40, 0x50, 0x80]), [hex(offs8(b)) for b in grp[:n - 4]])
+                ok(tag + 'C8 store predicates (form 2: @P0 on 0xC0 and 0xD0 as OptiX, the rest unpredicated)', [pred(b) for b in grp[:n - 4]] == ([(7, 0)] * 4 if c8 == 1 else [(0, 0), (0, 0)] + [(7, 0)] * 4), [pred(b) for b in grp[:n - 4]])
+                ok(tag + 'C8 GO unpredicated, load offsets 0x300 0x320 0x3D0 unpredicated, the last closes', pred(grp[n - 4]) == (7, 0) and [offs8(b) for b in grp[n - 3:]] == [0x300, 0x320, 0x3d0] and all(pred(b) == (7, 0) for b in grp[n - 3:]), [hex(offs8(b)) for b in grp[n - 3:]])
+                ok(tag + 'C8 TTUOPEN has NO dual bit and is unpredicated', bit(body[gi], 72) == 0 and pred(body[gi]) == (7, 0), bit(body[gi], 72))
             if SM == 120 and len(sys.argv) > 2 and not meta.get('remap'):   # A10 plain SM120: the group is byte for byte the dump's (register fields included)
                 d = open(sys.argv[2], 'rb').read(); gd = [d[0x20000 - 0x10120 + 16 * k:0x20000 - 0x10120 + 16 * k + 16] for k in range(19)]
                 ok(tag + 'A10 SM120 group equals the SM120 dump byte for byte', body[gi:gi + 19] == gd)
