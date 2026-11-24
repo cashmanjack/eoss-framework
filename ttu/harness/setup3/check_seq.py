@@ -242,7 +242,9 @@ def check(path):
             pm = {int(k): v for k, v in meta['regmap'].items()}
             ok('A10 register map is a pair aligned one to one map', len(set(pm.values())) == len(pm) and all(pm[k] % 2 == k % 2 for k in pm))
         brs = [i for i, b in enumerate(body[:ex]) if low12(b) in (0x947, 0x949, 0x943)]
-        if meta.get('loop'):   # --loop: exactly one backward BRA, after the group, back to TTUOPEN; never inside a session
+        if meta.get('rtnn'):
+            pass   # rehosted loop (build_rtnn.py): its shape is checked by the L rules below
+        elif meta.get('loop'):   # --loop: exactly one backward BRA, after the group, back to TTUOPEN; never inside a session
             off = lambda b: (W(b) >> 32) & 0xffffffff
             tgt = [i + 1 + (sbo(body[i]) // 16) for i in brs]
             if meta.get('outer'):   # --outer: the inner branch to the TTUOPEN, then one outer backward BRA to the record's pointer set up, after the stores
@@ -411,6 +413,30 @@ def check(path):
         ok('sync: NOPs between BAR.SYNC and the clock read / group', all(low12(body[g - 1 - k - i]) == 0x918 for i in range(nb)))
         ok('sync: blocking BAR.SYNC 0 (bit 80 clear) before the clock read / group',
            low12(b) == 0xb1d and ((W(b) >> 80) & 1) == 0 and ((W(b) >> 77) & 7) == 0)
+    if meta.get('rtnn'):   # rehosted RTNN style loop (Jack 2026-11-24, R3 to R5): L rules, both stages; the group and ISETP rules E1 to E5 apply as for every emit build
+        fb = lambda b, lo: (W(b) >> lo) & 0xff
+        brs_l = [i for i, b in enumerate(body[:ex]) if low12(b) in (0x947, 0x949, 0x943)]
+        top, lb = meta['loop_top'], meta['loop_bra']
+        ok('L1 exactly one branch before EXIT: a backward @P4 BRA after the group to the NOP with stall 15 right before TTUOPEN, which is also B12 s NOP',
+           brs_l == [lb] and low12(body[lb]) == 0x947 and pred(body[lb]) == (4, 0) and lb > g + GL and lb + 1 + sbo(body[lb]) // 16 == top == g - 1 and low12(body[top]) == 0x918 and stall(body[top]) == 15, (brs_l, lb, top, g))
+        ok('L2 no BSSY, BSYNC, barrier, atomic, EXIT or call before the final EXIT', not any(low12(b) in (0x945, 0x941, 0xb1d, 0x98e, 0x9a8, 0x94d, 0x943) for b in body[:ex]))
+        rd_ = lambda b: fb(b, 16)
+        init = [i for i, b in enumerate(body[:g]) if low12(b) == 0x810 and rd_(b) == 118 and fb(b, 24) == 255]
+        dec_ = [i for i in range(g + GL, lb) if low12(body[i]) == 0x810 and rd_(body[i]) == 118 and fb(body[i], 24) == 118 and (W(body[i]) >> 32) & 0xffffffff == 0xffffffff]
+        cmp_ = [i for i in range(g + GL, lb) if low12(body[i]) == 0x20c and fb(body[i], 24) == 118 and fb(body[i], 32) == 255 and ((W(body[i]) >> 87) & 7) == 2 and ((W(body[i]) >> 81) & 7) == 4]
+        rounds = (W(body[init[0]]) >> 32) & 0xffffffff if init else 0
+        ok('L3 bounded loop: R118 starts at the recorded rounds (1..1000), is decremented once per round and P4 = (R118 != 0 and P2 = pending) is computed before the branch',
+           len(init) == 1 and rounds == meta['rounds'] and 1 <= rounds <= 1000 and len(dec_) == 1 and len(cmp_) == 1 and dec_[0] < cmp_[0] < lb, (init, rounds, dec_, cmp_))
+        stgs = [i for i, b in enumerate(body[:ex]) if low12(b) == 0x986]
+        nb = [i for i in stgs if fb(body[i], 24) == 116]
+        ok('L4 stores: all through the out pointer R4 at slots 0..95, except exactly one neighbour store [R116] (full inline test) or none, predicated @P6, offset 0',
+           all(fb(body[i], 24) in (4, 116) for i in stgs) and len(nb) == (1 if meta['inline'] == 'full' else 0) and all(pred(body[i]) == (6, 0) and (W(body[i]) >> 40) & 0xffffff == 0 for i in nb)
+           and all(((W(body[i]) >> 40) & 0xffffff) % 4 == 0 and ((W(body[i]) >> 40) & 0xffffff) < 4 * 96 for i in stgs if i not in nb), (len(stgs), len(nb)))
+        ldgs = [i for i, b in enumerate(body[:ex]) if low12(b) == 0x981]
+        ok('L5 loads: through the in pointer R92 or, in the inline test only, the record pointer R96 and the point pointer R100 (predicated @P4)',
+           all(fb(body[i], 24) in (92, 96, 100) for i in ldgs) and all(pred(body[i]) == (4, 0) for i in ldgs if fb(body[i], 24) in (96, 100)), sorted(set(fb(body[i], 24) for i in ldgs)))
+        ok('L6 the loop body between the CLOSE and the branch has no TTU instruction and no backward branch; exactly one session in the binary',
+           not any(low12(b) in TTU for b in body[g + 19:ex]) and (meta['stage'] == 0 or len([1 for b in body if low12(b) in TTU]) == 19), '')
     regs = int(next(l for l in os.popen('cuobjdump --dump-resource-usage %s' % path).read().split('Function ttu_one:')[1].split('\n') if 'REG:' in l).split('REG:')[1].split()[0])
     top = meta.get('top_reg', 95)
     ok('B14 declared registers >= highest register used + 3 (R%d)' % top, regs >= top + 3, regs)
