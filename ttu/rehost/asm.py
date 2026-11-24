@@ -59,6 +59,11 @@ def iadd3(rd, ra, rb, pg=None, stall=6):
     return _b('iadd3_noimm__RRR_RRR', {'Rd': R(rd), 'Ra': R(ra), 'Rb': R(rb), 'Rc': 'RZ'}, pg, stall)
 
 
+def lop3_imm(rd, ra, imm, rc, lut, pg=None, stall=6):
+    """LOP3.LUT Rd, Ra, imm, Rc, lut  (lut = the 8 bit truth table, a = Ra 0xF0, b = imm 0xCC, c = Rc 0xAA)."""
+    return _b('lop3_imm__RIR_RIR', {'Rd': R(rd), 'Ra': R(ra), 'Ra_offset': imm, 'Rc': R(rc), 'imm8': lut}, pg, stall)
+
+
 def mov(rd, rs, pg=None, stall=1):
     return _b('mov__RR', {'Rd': R(rd), 'Rb': R(rs), 'PixMaskU04': 15}, pg, stall)
 
@@ -97,7 +102,7 @@ def fsetp_le(pu, ra, rb, pp=PT, pg=None, stall=13):
 
 def ldg(rd, ra, imm=0, pg=None, sb=2, stall=1):
     """LDG.E.STRONG.SM Rd, [Ra.64 + imm] (L1 allocating, nvcc 12.8's ld.global.ca encoding, opcode 0x981, memory descriptor form). This is the form the project's loop builds already use on hardware
-    (build_patch.ldg_ca); the encoder's `ldg_uniform__Ra64` variant (no descriptor) did NOT make the consumers wait (stale registers, found in the R3 stage 0 run), so it is not used.
+    (build_patch.ldg_ca); an earlier attempt with the encoder's `ldg_uniform__Ra64` variant failed together with stall 1 waits; both were changed at once, so which mattered is NOT isolated.
     Writes scoreboard sb; the consumer waits with wt = 1 << sb. Optional predicate pg = (reg, not).
     A wait issued within about 2 cycles of the load does not see it pending (R3 stage 0 runs): give the last load of a batch stall >= 4 before the waiting instruction."""
     assert 0 <= imm < (1 << 23)

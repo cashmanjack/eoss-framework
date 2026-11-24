@@ -36,7 +36,10 @@ def pred_bits(b, p, neg=0):
     return B(W(b) & ~(0xf << 12) | (p << 12) | (neg << 15))
 
 
-def build(stage, binpath, out, rounds, inline='full', debug=False):
+TRACE_REGS = [2, 3, 30, 31, 32, 33, 34, 35, 44, 45, 56, 57, 58, 59, 60, 61, 62, 63, 68, 69, 70, 71]   # answer registers stored per session by --trace (R18:R19 = this lane's absolute trace address, 128 bytes per session)
+
+
+def build(stage, binpath, out, rounds, inline='full', debug=False, trace=False):
     p = BinaryPatcher(binpath)
     sec = [s for s in p.sections if s[2].endswith('.ttu_one')]
     assert len(sec) == 1
@@ -53,7 +56,7 @@ def build(stage, binpath, out, rounds, inline='full', debug=False):
 
     body = list(prologue)
     body.append(field(wide[0], 16, IN_PTR)); body.append(wide[1])                # in pointer -> R92:R93, out pointer -> R4:R5
-    inputs = sorted(set(BP.INPUTS) | set(EXTRA_IN))
+    inputs = sorted(set(BP.INPUTS) | set(EXTRA_IN) | ({18, 19} if trace else set()))   # R18:R19 = the lane's trace offset (--trace)
     for r in inputs:
         body.append(field(field(ldg[r], 16, r), 24, IN_PTR))
     body.append(A.iadd3_imm(R_CNT, A.RZ, 0)); body.append(A.iadd3_imm(R_SES, A.RZ, 0))
@@ -72,6 +75,10 @@ def build(stage, binpath, out, rounds, inline='full', debug=False):
     body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))      # session closed, results here
     body.append(ctrl.write_control(BP.cs2r_clock(R_T1), stall=8))             # the clock pair needs a few cycles before it is read
     body += [A.iadd3(R_T0S, R_T0S, R_T0, stall=2), A.iadd3(R_T1S, R_T1S, R_T1, stall=2), A.iadd3_imm(R_SES, R_SES, 1, stall=2)]
+    if trace:   # the answer registers of this session, before anything modifies them; then a wait until the stores have read them and R18
+        for k, reg in enumerate(TRACE_REGS):
+            body.append(field(field(field(stg[3], 24, 18), 32, reg), 40, 4 * k, 24))
+        body += [ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2), A.iadd3_imm(18, 18, 128, stall=6)]
     LEVELS = ['none', 'rec', 'pts', 'math', 'full']; lv = LEVELS.index(inline)
     P4, P5, P6 = (4, 0), (5, 0), (6, 0)
     if lv >= 1:   # decode the candidate, fetch its primitive index from the record
@@ -92,6 +99,8 @@ def build(stage, binpath, out, rounds, inline='full', debug=False):
              A.iadd3_imm(R_LEFT, R_LEFT, 0xffffffff, stall=6), A.isetp_reg(4, 'NE', R_LEFT, A.RZ, pp=2, stall=13)]     # P2 = pending, P4 = pending and rounds left
     for d, s in ((2, 70), (3, 71), (70, 56), (71, 57), (32, 58), (33, 59), (44, 60), (45, 61)):
         body.append(A.mov(d, s, pg=(4, 0), stall=1))
+    # the previous answer's 0x380 low words (R62:R63) become the next query's 0x100 high pair (R54:R55), as OptiX's loop does: R54 = R62, R55 = (R55 & 0x7C000000) | (R63 & ~0x7C000000)
+    body += [A.mov(54, 62, pg=(4, 0), stall=1), A.lop3_imm(55, 55, 0x7C000000, 63, 0xE2, pg=(4, 0), stall=6)]
     for r in RELOAD:
         body.append(A.ldg(r, IN_PTR, 4 * r, pg=(4, 0), sb=2, stall=4 if r == RELOAD[-1] else 1))
     body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
@@ -116,7 +125,7 @@ def build(stage, binpath, out, rounds, inline='full', debug=False):
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
     meta = {'stage': stage, 'remap': False, 'regmap': {}, 'top_reg': R_TMP, 'clk': [R_T0, R_T1], 'gt': [22, 24], 'twice': False, 'sibling': False, 'sm': 89, 'inputs': inputs,
             'outputs': sorted(set(s for s, _ in outs)), 'in_ptr': IN_PTR, 'section': sec[0][2], 'group_index': g, 'group_len': 19, 'groups': [g], 'sha256': sha, 'regs': 128,
-            'emit': True, 'rtnn': 1, 'rounds': rounds, 'inline': inline, 'loop_top': top, 'loop_bra': loop_bra}
+            'emit': True, 'rtnn': 1, 'rounds': rounds, 'inline': inline, 'trace': bool(trace), 'loop_top': top, 'loop_bra': loop_bra}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
     print('built %s stage %d: %d instructions of %d slots, group at %d, loop top %d, bra %d, sha256 %s' % (out, stage, loop_bra + 1 + len(outs) + 5, len(orig), g, top, loop_bra, sha))
     return out
@@ -125,6 +134,6 @@ def build(stage, binpath, out, rounds, inline='full', debug=False):
 if __name__ == '__main__':
     a = argparse.ArgumentParser()
     a.add_argument('--stage', type=int, choices=[0, 1], required=True); a.add_argument('--bin', required=True); a.add_argument('--out', required=True)
-    a.add_argument('--rounds', type=int, default=100); a.add_argument('--debug', action='store_true'); a.add_argument('--inline', choices=['full', 'none', 'rec', 'pts', 'math'], default='full')
+    a.add_argument('--rounds', type=int, default=100); a.add_argument('--debug', action='store_true'); a.add_argument('--trace', action='store_true'); a.add_argument('--inline', choices=['full', 'none', 'rec', 'pts', 'math'], default='full')
     x = a.parse_args()
-    build(x.stage, x.bin, x.out, x.rounds, x.inline, x.debug)
+    build(x.stage, x.bin, x.out, x.rounds, x.inline, x.debug, x.trace)

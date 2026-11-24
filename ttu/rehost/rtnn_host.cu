@@ -59,7 +59,7 @@ template <class T> static T *dalloc_lo32(size_t n)   // device buffer that does 
 int main(int argc, char **argv)
 {
     if (argc < 4) { fprintf(stderr, "usage: rtnn_host PTX WORDS OUT.json [options]\n"); return 2; }
-    std::string mode = "real"; int npts = 4096, warps = 1, blocks = 1, repeat = 1, orep = 0; unsigned seed = 7; float r = 0.08f; bool optix_only = false, stats_only = false, no_ttu = false;
+    std::string mode = "real"; int npts = 4096, warps = 1, blocks = 1, repeat = 1, orep = 0; unsigned seed = 7; float r = 0.08f; bool optix_only = false, stats_only = false, no_ttu = false, trace = false;
     for (int a = 4; a < argc; ++a) {
         if (!strcmp(argv[a], "--mode") && a + 1 < argc) mode = argv[++a];
         else if (!strcmp(argv[a], "--pts") && a + 1 < argc) npts = atoi(argv[++a]);
@@ -71,6 +71,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--optix-repeat") && a + 1 < argc) orep = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--optix-only")) optix_only = true;
         else if (!strcmp(argv[a], "--stats-only")) stats_only = true;
+        else if (!strcmp(argv[a], "--trace")) trace = true;   // for a build_rtnn.py --trace kernel: per session answer words in a per lane trace area (64 sessions of 128 bytes) behind the out records
         else { fprintf(stderr, "unknown option %s\n", argv[a]); return 2; }
     }
     if (warps < 1 || warps > 16 || blocks < 1 || blocks > 4096 || repeat < 1 || repeat > 100 || npts < 1 || (mode != "real" && mode != "inject")) { fprintf(stderr, "bad option value\n"); return 2; }
@@ -162,10 +163,11 @@ int main(int argc, char **argv)
     if (optix_only || (no_ttu)) { fprintf(jf, "\n}\n"); fclose(jf); printf("optix only: neighbours %zu candidates %zu\n", onb_total, ocand_total); return 0; }
     // ---- register image ----
     const size_t IMG = (size_t)TOTAL * N;
-    unsigned *dout = dalloc_lo32<unsigned>(IMG), *din; CK(cudaMalloc((void **)&din, IMG * 4));
+    const size_t TRW = trace ? (size_t)TOTAL * 2048 : 0;   // trace words (8 KB per lane)
+    unsigned *dout = dalloc_lo32<unsigned>(IMG + TRW), *din; CK(cudaMalloc((void **)&din, IMG * 4));
     unsigned long long *drecs = nullptr; std::vector<unsigned> fake_prim(TOTAL, 0);
     unsigned *dr = nullptr; if (mode == "inject") { dr = dalloc_lo32<unsigned>((size_t)TOTAL * 2); }
-    std::vector<unsigned> in(IMG, 0), outv(IMG, 0x77777777u);
+    std::vector<unsigned> in(IMG, 0), outv(IMG + TRW, 0x77777777u);
     const unsigned long long st0 = root; const unsigned start_flags = 0x2484000u;
     if (mode == "inject") { std::vector<unsigned> rv((size_t)TOTAL * 2, 0); std::mt19937 r2g(seed + 99); for (unsigned i = 0; i < TOTAL; ++i) { fake_prim[i] = (unsigned)(r2g() % npts); rv[2 * i] = fake_prim[i]; } CK(cudaMemcpy(dr, rv.data(), rv.size() * 4, cudaMemcpyHostToDevice)); }
     for (unsigned i = 0; i < TOTAL; ++i) {
@@ -176,21 +178,23 @@ int main(int argc, char **argv)
         R[54] = 0; R[55] = 0; R[34] = (unsigned)(A >> 6); R[35] = ((((unsigned)(A >> 32) >> 6) | 0x402800u) & 0x1ffffffu) | 0x2000000u;
         R[70] = (unsigned)(st0 >> 7); R[71] = ((unsigned)(st0 >> 32) >> 7) | start_flags;
         R[68] = words[0]; R[69] = words[1]; R[62] = words[2]; R[63] = words[3]; R[60] = words[4]; R[61] = words[5]; R[58] = words[6]; R[59] = words[7];
+        // the trace address is absolute: the template's stores are [R.64] with a memory descriptor, not base + offset
+        if (trace) { const unsigned long long tro = (unsigned long long)dout + (unsigned long long)IMG * 4 + (unsigned long long)i * 8192; R[18] = (unsigned)tro; R[19] = (unsigned)(tro >> 32); }
         R[90] = 0; R[6] = (unsigned)(unsigned long long)dP; R[7] = (unsigned)((unsigned long long)dP >> 32); R[8] = fbits(r2);
         if (mode == "inject") { const unsigned long long ra = (unsigned long long)(dr + 2 * i) >> 3; R[33] = 0xa0000001u; R[3] = 1; R[44] = (unsigned)ra; R[45] = (unsigned)(ra >> 32); }
     }
     CK(cudaMemcpy(din, in.data(), IMG * 4, cudaMemcpyHostToDevice));
     // the kernel adds to the out pointer in 32 bits (neighbour cursor): refuse a window that crosses 4 GB
-    if ((((unsigned long long)dout) & 0xffffffffull) + IMG * 4 >= 0x100000000ull) { fprintf(stderr, "out buffer straddles a 4 GB boundary\n"); return 2; }
+    if ((((unsigned long long)dout) & 0xffffffffull) + (IMG + TRW) * 4 >= 0x100000000ull) { fprintf(stderr, "out buffer straddles a 4 GB boundary\n"); return 2; }
     cudaEvent_t e0, e1; CK(cudaEventCreate(&e0)); CK(cudaEventCreate(&e1)); std::vector<float> ttu_ms; cudaError_t e = cudaSuccess;
     for (int it = 0; it < repeat && e == cudaSuccess; ++it) {
-        std::vector<unsigned> fill(IMG, 0x77777777u); CK(cudaMemcpy(dout, fill.data(), IMG * 4, cudaMemcpyHostToDevice));
+        std::vector<unsigned> fill(IMG + TRW, 0x77777777u); CK(cudaMemcpy(dout, fill.data(), (IMG + TRW) * 4, cudaMemcpyHostToDevice));
         CK(cudaDeviceSynchronize()); CK(cudaEventRecord(e0));
         ttu_one<<<blocks, LANES>>>(din, dout);
         CK(cudaEventRecord(e1)); e = cudaGetLastError(); if (e == cudaSuccess) e = cudaEventSynchronize(e1);
         if (e == cudaSuccess) { float ms; CK(cudaEventElapsedTime(&ms, e0, e1)); ttu_ms.push_back(ms); }
     }
-    if (e == cudaSuccess) CK(cudaMemcpy(outv.data(), dout, IMG * 4, cudaMemcpyDeviceToHost));
+    if (e == cudaSuccess) CK(cudaMemcpy(outv.data(), dout, (IMG + TRW) * 4, cudaMemcpyDeviceToHost));
     fprintf(jf, ",\n \"ttu_status\": \"%s\", \"ttu_ms\": [", cudaGetErrorString(e));
     for (size_t k = 0; k < ttu_ms.size(); ++k) fprintf(jf, "%s%.6f", k ? "," : "", ttu_ms[k]);
     fprintf(jf, "]");
@@ -239,6 +243,15 @@ int main(int argc, char **argv)
             fprintf(jf, "], \"last\": [%u,\"%08x\",\"%08x\",\"%08x\",\"%08x\"], \"dbg\": [", O[3], O[32], O[33], O[44], O[45]);
             for (int k = 20; k < 32; ++k) fprintf(jf, "%s\"%08x\"", k > 20 ? "," : "", O[k]);
             fprintf(jf, "]}");
+        }
+        fprintf(jf, "]");
+    }
+    if (trace && e == cudaSuccess) {   // the answer registers of every session of the first 64 lanes: [R2,R3,R30,R31,R32,R33,R34,R35,R44,R45,R56..R63,R68,R69,R70,R71]
+        fprintf(jf, ",\n \"trace\": [");
+        for (unsigned i = 0; i < std::min<unsigned>(TOTAL, 64); ++i) {
+            fprintf(jf, "%s[", i ? "," : "");
+            for (unsigned k = 0; k < std::min<unsigned>(ses[i], 64); ++k) { fprintf(jf, "%s[", k ? "," : ""); for (int w = 0; w < 22; ++w) fprintf(jf, "%s\"%08x\"", w ? "," : "", outv[IMG + (size_t)i * 2048 + k * 32 + w]); fprintf(jf, "]"); }
+            fprintf(jf, "]");
         }
         fprintf(jf, "]");
     }

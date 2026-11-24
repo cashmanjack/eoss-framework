@@ -429,9 +429,12 @@ def check(path):
            len(init) == 1 and rounds == meta['rounds'] and 1 <= rounds <= 1000 and len(dec_) == 1 and len(cmp_) == 1 and dec_[0] < cmp_[0] < lb, (init, rounds, dec_, cmp_))
         stgs = [i for i, b in enumerate(body[:ex]) if low12(b) == 0x986]
         nb = [i for i in stgs if fb(body[i], 24) == 116]
-        ok('L4 stores: all through the out pointer R4 at slots 0..95, except exactly one neighbour store [R116] (full inline test) or none, predicated @P6, offset 0',
-           all(fb(body[i], 24) in (4, 116) for i in stgs) and len(nb) == (1 if meta['inline'] == 'full' else 0) and all(pred(body[i]) == (6, 0) and (W(body[i]) >> 40) & 0xffffff == 0 for i in nb)
-           and all(((W(body[i]) >> 40) & 0xffffff) % 4 == 0 and ((W(body[i]) >> 40) & 0xffffff) < 4 * 96 for i in stgs if i not in nb), (len(stgs), len(nb)))
+        tr = [i for i in stgs if fb(body[i], 24) == 18]   # --trace: the answer registers of every session, unpredicated, through R18 (the lane's trace offset), 22 words at offsets 0 .. 84, before the loop's test
+        ntr = 22 if meta.get('trace') else 0
+        ok('L4 stores: all through the out pointer R4 at slots 0..95, except exactly one neighbour store [R116] (full inline test) or none, predicated @P6, offset 0, and, in a trace build only, 22 unpredicated stores [R18 + 4k] k < 22 inside the loop',
+           all(fb(body[i], 24) in (4, 116, 18) for i in stgs) and len(nb) == (1 if meta['inline'] == 'full' else 0) and all(pred(body[i]) == (6, 0) and (W(body[i]) >> 40) & 0xffffff == 0 for i in nb)
+           and len(tr) == ntr and all(pred(body[i]) == (7, 0) and g + GL <= i < lb and ((W(body[i]) >> 40) & 0xffffff) == 4 * k for k, i in enumerate(tr))
+           and all(((W(body[i]) >> 40) & 0xffffff) % 4 == 0 and ((W(body[i]) >> 40) & 0xffffff) < 4 * 96 for i in stgs if i not in nb and i not in tr), (len(stgs), len(nb), len(tr)))
         ldgs = [i for i, b in enumerate(body[:ex]) if low12(b) == 0x981]
         ok('L5 loads: through the in pointer R92 or, in the inline test only, the record pointer R96 and the point pointer R100 (predicated @P4)',
            all(fb(body[i], 24) in (92, 96, 100) for i in ldgs) and all(pred(body[i]) == (4, 0) for i in ldgs if fb(body[i], 24) in (96, 100)), sorted(set(fb(body[i], 24) for i in ldgs)))
