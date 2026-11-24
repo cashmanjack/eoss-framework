@@ -78,7 +78,7 @@ def variants():
     for n, (l2, h2, what) in V.items():
         nb = struct.pack('<QQ', l2, h2); out = '%s/%s_s1' % (D, n)
         with open(out, 'wb') as f: f.write(B[:off] + nb + B[off + 16:])
-        shutil.copy(base + '.layout.json', out + '.layout.json')
+        shutil.copy(base + '.layout.json', out + '.layout.json'); os.chmod(out, 0o755)
         if os.path.exists(out + '.checked'): os.remove(out + '.checked')
         A = open(out, 'rb').read(); d = [i for i in range(len(B)) if A[i] != B[i]]
         d_ok = bool(d) and min(d) >= off and max(d) < off + 16 and len(A) == len(B)

@@ -23,13 +23,30 @@ bit = lambda b, n: (W(b) >> n) & 1
 pred = lambda b: ((W(b) >> 12) & 7, (W(b) >> 15) & 1)   # (Pg, not)
 
 
+# TTUCCTL variant builds (Jack, 2026-11-24: accept exactly these four by hash, nothing else): the checked cctl stage 1 build with one field of its one TTUCCTL changed.
+_h = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'notes', 'cctl_variant_sha.json')   # private (notes/ is not in git); without it no variant is accepted
+_hj = json.load(open(_h)) if os.path.exists(_h) else {'base': '', 'variants': {}}
+CCTL_BASE_SHA = _hj['base']
+CCTL_VARIANT_SHA = _hj['variants']
+
+
+def cctl_variant_bytes(name, base):
+    lo, hi = int.from_bytes(base[:8], 'little'), int.from_bytes(base[8:], 'little')
+    if name == 'V1_ivall0': hi &= ~(1 << (80 - 64))                  # ivall (bit 80) cleared
+    elif name == 'V2_predoff': lo |= 1 << 15                          # @!PT (Pg_not bit 15)
+    elif name == 'V3_srcrel0': hi &= ~(7 << (113 - 64))               # src_rel_sb (115:113) = 0
+    elif name == 'V4_dstwr0': hi &= ~(7 << (110 - 64))                # dst_wr_sb (112:110) = 0
+    return lo.to_bytes(8, 'little') + hi.to_bytes(8, 'little')
+
+
 def check(path):
     meta = json.load(open(path + '.layout.json'))
     data = open(path, 'rb').read()
     sha = hashlib.sha256(data).hexdigest()
     res = []
     ok = lambda name, cond, info='': res.append((name, bool(cond), info))
-    ok('sha256 matches build', sha == meta['sha256'], sha)
+    variant = CCTL_VARIANT_SHA.get(sha) if meta.get('cctl') and meta.get('stage') == 1 and meta['sha256'] == CCTL_BASE_SHA else None   # by hash only
+    ok('sha256 matches build', sha == meta['sha256'] or variant, sha)
     p = BinaryPatcher(path)
     # every .text section of every cubin: TTU opcodes only inside ttu_one's group
     hits = []
@@ -224,13 +241,13 @@ def check(path):
         cc = [i for i, b in enumerate(body) if low12(b) == 0x3d5]
         g0 = groups[0]; GLc = meta.get('group_len', 19)
         if meta['stage'] == 1:
-            ok('cctl: exactly one TTUCCTL, ivall bit 80 set, unpredicated', len(cc) == 1 and bit(body[cc[0]], 80) and pred(body[cc[0]]) == (7, 0), cc)
+            ok('cctl: exactly one TTUCCTL, ivall bit 80 set, unpredicated', len(cc) == 1 and (variant or (bit(body[cc[0]], 80) and pred(body[cc[0]]) == (7, 0))), cc)
             if meta.get('l1t'):   # --l1t: only ordinary loads (LDG 0x981) and NOPs between the first session's wait NOP and the TTUCCTL
                 ok('cctl (l1t): after the first session and its wait NOP, only LDG and NOP before it, before the second TTUOPEN', len(cc) == 1 and g0 + GLc + 1 <= cc[0] < groups[1] and all(low12(body[k]) in (0x981, 0x918) for k in range(g0 + GLc + 1, cc[0])), (cc, groups))
             else:
                 ok('cctl: right after the first session and its wait NOP, before the second TTUOPEN', cc == [g0 + GLc + 1] and cc[0] < groups[1], (cc, groups))
             from build_patch import ttuccttl_bytes
-            ok('cctl: bytes equal the EoSS encoder output for TTUCCTL.IVALL', bytes(body[cc[0]]) == ttuccttl_bytes())
+            ok('cctl: bytes equal the EoSS encoder output for TTUCCTL.IVALL' + (' (variant %s: with its one field changed)' % variant if variant else ''), bytes(body[cc[0]]) == (cctl_variant_bytes(variant, ttuccttl_bytes()) if variant else ttuccttl_bytes()))
             ok('cctl: followed by 4 NOPs with stall 15', all(low12(body[cc[0] + 1 + k]) == 0x918 and ((W(body[cc[0] + 1 + k][8:]) >> 41) & 0xf) == 15 for k in range(4)))
         else:
             ok('cctl: stage 0 has no TTUCCTL', not cc, cc)
