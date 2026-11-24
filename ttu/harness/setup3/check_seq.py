@@ -28,6 +28,53 @@ _h = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 
 _hj = json.load(open(_h)) if os.path.exists(_h) else {'base': '', 'variants': {}}
 CCTL_BASE_SHA = _hj['base']
 CCTL_VARIANT_SHA = _hj['variants']
+EDIT_VARIANT_SHA = _hj.get('edits', {})   # sha256 -> {name, base_file, base_sha}: Jack 2026-11-24, catalogue items 1 to 7, by hash only (private json; empty without it)
+_OPEX = {(0, 0): 0, (0, 17): 17, (0, 18): 18, (1, 17): 49, (5, 17): 177}   # (batch_t, usched_info) -> 8 bit opex, from the spec's TABLES_opex_0
+
+
+def _setf(b, hi_bit, lo_bit, v):
+    w = int.from_bytes(b, 'little'); m = ((1 << (hi_bit - lo_bit + 1)) - 1) << lo_bit
+    return ((w & ~m) | ((v << lo_bit) & m)).to_bytes(16, 'little')
+
+
+def variant_edits(name, body):
+    """The ONLY changes a hashed edit variant may have against its checked base build: {instruction index: new 16 bytes}."""
+    ix = lambda op: [i for i, b in enumerate(body) if low12(b) == op]
+    cc = ix(0x3d5); e = {}
+    if name == 'F0_fuse0': assert len(cc) == 1; e[cc[0]] = _setf(body[ix(0x9d4)[0]], 44, 40, 0)          # TTUMACROFUSE with count 0 in place of the TTUCCTL
+    elif name in ('P1', 'P2', 'P3'): assert len(cc) == 1; e[cc[0]] = _setf(body[cc[0]], 103, 102, int(name[1]))   # pm_pred
+    elif name in ('O1', 'O2', 'O3', 'O4'):
+        assert len(cc) == 1; v = _OPEX[{'O1': (0, 0), 'O2': (0, 18), 'O3': (1, 17), 'O4': (5, 17)}[name]]
+        e[cc[0]] = _setf(_setf(body[cc[0]], 109, 105, v & 31), 124, 122, v >> 5)                         # (batch_t, usched_info) pair from the spec table
+    elif name in ('W1', 'W2'): assert len(cc) == 1; e[cc[0]] = _setf(body[cc[0]], 121, 116, {'W1': 0b000010, 'W2': 0b111111}[name])   # req_bit_set
+    elif name in ('S1', 'S2'):
+        for i in ix(0x3d1): e[i] = _setf(body[i], 115, 113, {'S1': 2, 'S2': 1}[name])                    # every TTUST read scoreboard
+    elif name == 'X1':
+        for i in ix(0x3d1):
+            if (int.from_bytes(body[i], 'little') >> 40) & 0xffff == 0xc0: e[i] = _setf(body[i], 15, 12, 0b1111)   # @!PT on the TTUST at 0xC0
+    elif name == 'D1':
+        for i in ix(0x3d0): e[i] = _setf(body[i], 72, 72, 0)                                             # TTUOPEN without DUAL
+    else: raise KeyError(name)
+    return e
+
+
+def check_edit_variant(path, ent, sha):
+    base = ent['base_file']; bd = open(base, 'rb').read()
+    res = [('sha256 is on the list of approved edit variants', True, sha[:12]), ('base build sha256 is the recorded one', hashlib.sha256(bd).hexdigest() == ent['base_sha'], ent['base_sha'][:12])]
+    res.append(('the base build passes check_seq (ALL PASS)', check(base), base))
+    pv, pb = BinaryPatcher(path), BinaryPatcher(base); mv, mb = json.load(open(path + '.layout.json')), json.load(open(base + '.layout.json'))
+    sv = [s for s in pv.sections if s[2] == mv['section']][0]; sb = [s for s in pb.sections if s[2] == mb['section']][0]
+    iv = list(elf.iter_instructions(pv.data, sv)); ib = list(elf.iter_instructions(pb.data, sb))
+    bodyb = [b for _, b in ib]; exp = variant_edits(ent['name'], bodyb)
+    diff = {i for i in range(len(ib)) if iv[i][1] != ib[i][1]} if len(iv) == len(ib) else None
+    res.append(('same instruction count and layout as the base', len(iv) == len(ib) and mv['section'] == mb['section'] and sv[:2] == sb[:2], (len(iv), len(ib))))
+    res.append(('instructions that differ from the base are exactly the approved edit', diff is not None and bool(exp) and diff == set(exp) and all(bytes(iv[i][1]) == exp[i] for i in exp), (sorted(diff) if diff is not None else None, sorted(exp))))
+    res.append(('the rest of the file is byte for byte the base', len(pv.data) == len(pb.data) and all(pv.data[k] == pb.data[k] for k in range(len(pb.data)) if not any(iv[i][0] <= k < iv[i][0] + 16 for i in exp)), ''))
+    for n, good, info in res: print('%-55s %s %s' % (n, 'PASS' if good else 'FAIL', info))
+    allok = all(r[1] for r in res)
+    if allok: open(path + '.checked', 'w').write(sha)
+    print('ALL PASS' if allok else 'FAILED', sha)
+    return allok
 
 
 def cctl_variant_bytes(name, base):
@@ -45,6 +92,7 @@ def check(path):
     sha = hashlib.sha256(data).hexdigest()
     res = []
     ok = lambda name, cond, info='': res.append((name, bool(cond), info))
+    if sha in EDIT_VARIANT_SHA: return check_edit_variant(path, dict(EDIT_VARIANT_SHA[sha], name=EDIT_VARIANT_SHA[sha]['name']), sha)
     variant = CCTL_VARIANT_SHA.get(sha) if meta.get('cctl') and meta.get('stage') == 1 and meta['sha256'] == CCTL_BASE_SHA else None   # by hash only
     ok('sha256 matches build', sha == meta['sha256'] or variant, sha)
     p = BinaryPatcher(path)

@@ -15,7 +15,7 @@ def idle():
         a = subprocess.run(['nvidia-smi', '--query-compute-apps=pid,name', '--format=csv,noheader'], capture_output=True, text=True).stdout.strip()
         g = subprocess.run(['nvidia-smi'], capture_output=True, text=True).stdout
         procs = [l for l in g.splitlines() if l.startswith('|') and ' C ' in l or ' C+G ' in l]
-        others = subprocess.run("ps -eo user,cmd | grep -E 'setup3|ttu_one|cctl1/' | grep -v grep | grep -v variants_run | grep -v '^cashman3'", shell=True, capture_output=True, text=True).stdout.strip()
+        others = ''   # no process matching by name (CLAUDE.md, 2026-11-24): the compute process list of nvidia-smi above is the check
         if not a and not procs and not others: return True
         print('GPU busy, waiting:', a, procs, others, flush=True); time.sleep(10)
     sys.exit('STOP: GPUs not idle for 10 minutes')
@@ -35,9 +35,11 @@ def launch(binp, N, rep, stage_name):
     return 'illegal instruction or other fault', t[-900:], None
 def analyze_ok(rep):   # one launch json is deleted above; correctness of the registers is checked by analyze.py on a separate single launch
     return True
+def a_left():
+    return subprocess.run(['nvidia-smi', '--query-compute-apps=pid', '--format=csv,noheader'], capture_output=True, text=True).stdout.strip()
 def health():
     idle(); p, to = sh(['timeout', '-k', '2', '30', VENV, os.path.join(S3, 'run.py'), D + '/cctl_s0', 'hit', 'zero', D + '/out/h_%d.json' % os.getpid(), '--scene', 'par:1024:s', '--warps', '1', '--blocks', '1', '--sms', '0,0', '--repeat', '1'], 45, env=ENV)
-    left = subprocess.run("ps -eo pid,cmd | grep -E 'cctl1/|setup3' | grep -v grep | grep -v variants_run", shell=True, capture_output=True, text=True).stdout.strip()
+    left = a_left()
     ok = (not to) and 'exit 0' in (p.stdout + p.stderr) and not left
     return ok, left
 def main(outd, names):
