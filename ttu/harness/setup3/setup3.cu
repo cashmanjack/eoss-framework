@@ -572,6 +572,7 @@ int main(int argc, char **argv)
         {"inside", {{0.f, 0.f, 0.f}, 0.f, {0.f, 0.f, 1.f}, 1e-16f}},    // rehosting: RTNN style point query (origin inside box 0, tmax 1e-16)
         {"inside2", {{2.f, 0.f, 0.f}, 0.f, {0.f, 0.f, 1.f}, 1e-16f}},   // box2: origin inside box 1
         {"outside", {{3.f, 3.f, 0.f}, 0.f, {0.f, 0.f, 1.f}, 1e-16f}},   // point query inside no box
+        {"xrow",   {{-1.f, 0.f, 0.f}, 0.f, {1.f, 0.f, 0.f}, 1e16f}},          // crosses every box centred on the x axis (box2: both)
     };
     Ray8 ray{};
     const bool perlane = !strcmp(argv[3], "perlane"), jitter = !strcmp(argv[3], "jitter");
@@ -1168,7 +1169,19 @@ int main(int argc, char **argv)
         std::vector<unsigned> cur = in, prev = out;
         std::vector<int> nq(LANES, 1), done(LANES, 0), npend0(LANES, 0);
         std::vector<float> best_t(LANES, -1.f); std::vector<unsigned> best_p(LANES, 0); std::vector<unsigned long long> best_leaf(LANES, 0);
+        std::vector<std::vector<long long>> cand_rec(LANES), cand_prim(LANES);   // --aabb: per lane, per candidate answer: record index in the GAS record table and the primitive index stored there
+        std::vector<unsigned char> GB; unsigned rec_off = 0;
+        if (aabb) { GB.resize(bs.outputSizeInBytes); CK(cudaMemcpy(GB.data(), (void *)gas, GB.size(), cudaMemcpyDeviceToHost)); memcpy(&rec_off, &GB[0xa0], 4); }
         auto take = [&](unsigned i, const unsigned *R) {
+            if (aabb) {   // a custom primitive candidate: tag 0x50 in the top seven bits of R33, R3 = 1, R45:R44 times 8 = address of the 8 byte record (word 0: primitive index, word 1: SBT index) [F444 follow up, R1]
+                if (R[3] && (R[33] >> 25) == 0x50) {
+                    const long long off = (long long)((((unsigned long long)R[45] << 32) | R[44]) * 8) - (long long)gas - (long long)rec_off;
+                    const long long idx = off >> 3; unsigned pr = 0xffffffffu;
+                    if (off >= 0 && (off & 7) == 0 && rec_off + 8 * idx + 8 <= GB.size()) memcpy(&pr, &GB[rec_off + 8 * idx], 4);
+                    cand_rec[i].push_back(off); cand_prim[i].push_back(pr);
+                }
+                return;
+            }
             if (R[3]) { const float t = absf(R[45]); if (best_t[i] < 0 || t < best_t[i]) { best_t[i] = t; best_p[i] = R[44] & 0x1fffffffu; best_leaf[i] = ((unsigned long long)R[31] << 32) | R[30]; } }
         };
         auto npairs = [](const unsigned *R) { return (int)((R[56] | R[57]) != 0) + ((R[58] | R[59]) != 0) + ((R[60] | R[61]) != 0) + ((R[70] | R[71]) != 0); };
@@ -1223,6 +1236,13 @@ int main(int argc, char **argv)
         fprintf(jf, "],\n \"lane_leaf_off\": [");   // TTULD 0x310 high of the best hit: leaf block (low 48 bits) minus GAS base, slot bits dropped
         for (unsigned i = 0; i < LANES; ++i) fprintf(jf, "%s%lld", i ? "," : "", best_t[i] >= 0 ? (long long)((best_leaf[i] & 0xffffffffffffULL) - (unsigned long long)gas) : -1LL);
         fprintf(jf, "]");
+        if (aabb) {
+            fprintf(jf, ",\n \"rec_off\": %u, \"cand_prim\": [", rec_off);
+            for (unsigned i = 0; i < LANES; ++i) { fprintf(jf, "%s[", i ? "," : ""); for (size_t k = 0; k < cand_prim[i].size(); ++k) fprintf(jf, "%s%lld", k ? "," : "", cand_prim[i][k]); fprintf(jf, "]"); }
+            fprintf(jf, "],\n \"cand_rec_off\": [");
+            for (unsigned i = 0; i < LANES; ++i) { fprintf(jf, "%s[", i ? "," : ""); for (size_t k = 0; k < cand_rec[i].size(); ++k) fprintf(jf, "%s%lld", k ? "," : "", cand_rec[i][k]); fprintf(jf, "]"); }
+            fprintf(jf, "]");
+        }
         int maxq = 0; size_t ndone = 0; for (unsigned i = 0; i < LANES; ++i) { maxq = std::max(maxq, nq[i]); ndone += done[i]; }
         printf("resume: %s, %d round(s), %zu of %u lanes finished, max queries per lane %d\n", cudaGetErrorString(e), round, ndone, LANES, maxq);
     }
