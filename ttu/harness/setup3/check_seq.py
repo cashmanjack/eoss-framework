@@ -187,6 +187,25 @@ def check(path):
             ok(tag + 'A6 exactly one TTULD with bit 74, and it is last', close == [n - 1] and lds[-1] == n - 1, close)
             ok(tag + 'A7 CLOSE unpredicated', pred(grp[-1]) == (7, 0), pred(grp[-1]))
             ok(tag + 'A8 bit 72 only on TTUOPEN', not any(bit(b, 72) for b in grp))
+            if meta.get('emit'):   # rehosting (Jack 2026-11-24): a group emitted by the EoSS encoder. Rules E1 to E4 are written out here on purpose (a second copy of the table, not imported from the emitter) so an emitter bug cannot pass its own check.
+                from ttu.rehost import emit_group as EG
+                offs_e = lambda b: (W(b) >> 40) & 0xffff
+                ctl = lambda b: ((W(b) >> 105) & 0xf, (W(b) >> 109) & 1, (W(b) >> 110) & 7, (W(b) >> 113) & 7, (W(b) >> 116) & 0x3f)   # stall, yield, write sb, read sb, wait mask
+                bad_modes = [k for k in ('ias', 'dualgo', 'cesar8', 'remap', 'loop', 'outer', 'sibling', 'twice', 'cctl', 'aluwarps', 'slim', 'stream', 'delay', 'sibccctl', 'ownccctl', 'decoy') if meta.get(k)]
+                ok(tag + 'E1 emit build is a plain SM89 GAS group: no other group changing mode', SM == 89 and not bad_modes and n == 17, bad_modes)
+                ok(tag + 'E2 the 19 instructions equal ttu/rehost/emit_group.group() regenerated now from the encoder', body[gi:gi + 19] == EG.group())
+                st_o = [0xc0, 0xd0, 0x200, 0x100, 0x180, 0x190, 0, 0x40, 0x50, 0x80]
+                st_p = [(0, 0), (0, 0), (0, 1), (0, 0), (0, 0), (0, 0), (7, 0), (7, 0), (7, 0), (7, 0)]
+                st_r = [(52, 56), (30, 46), (54, 34), (54, 34), (32, 70), (2, 44), (62, 68), (12, 82), (16, 14), (58, 60)]   # (Rb, Rc)
+                ld_o = [0x300, 0x310, 0x320, 0x380, 0x3c0, 0x3d0]; ld_r = [(44, 32), (30, 68), (2, 255), (34, 62), (56, 58), (60, 70)]   # (Rd, Rd2)
+                fr = lambda b, lo: (W(b) >> lo) & 0xff
+                ok(tag + 'E3 stores: offsets, predicates, Rb and Rc exactly the checked set (9 execute with P0 true, 0x200 does not)',
+                   [offs_e(b) for b in grp[:10]] == st_o and [pred(b) for b in grp[:10]] == st_p and [(fr(b, 32), fr(b, 64)) for b in grp[:10]] == st_r, [hex(offs_e(b)) for b in grp[:10]])
+                ok(tag + 'E3 loads: offsets, Rd and Rd2 exactly the checked set, all unpredicated, TTUGO unpredicated, OPEN has the DUAL bit and is unpredicated',
+                   [offs_e(b) for b in grp[11:]] == ld_o and [(fr(b, 16), fr(b, 64)) for b in grp[11:]] == ld_r and all(pred(b) == (7, 0) for b in grp[10:]) and bit(body[gi], 72) == 1 and pred(body[gi]) == (7, 0), [hex(offs_e(b)) for b in grp[11:]])
+                ok(tag + 'E4 control: OPEN stall 6, FUSE stall 4 (all yield), stores read sb 0, loads write sb 1, close stall 2, no waits, no other scoreboards',
+                   ctl(body[gi]) == (6, 1, 7, 7, 0) and ctl(body[gi + 1]) == (4, 1, 7, 7, 0) and all(ctl(b) == (1, 1, 7, 0, 0) for b in grp[:10]) and ctl(grp[10]) == (1, 1, 7, 7, 0)
+                   and all(ctl(b) == (1, 1, 1, 7, 0) for b in grp[11:16]) and ctl(grp[16]) == (2, 1, 1, 7, 0), [ctl(b) for b in grp])
             if meta.get('cesar8'):   # the only new rules (Jack 2026-11-24): fuse 8 (form 1) or 10 (form 2), the exact store and load offsets, predicates, an OPEN WITHOUT DUAL, close last
                 c8 = meta['cesar8']; offs8 = lambda b: (W(b) >> 40) & 0xffff
                 ok(tag + 'C8 fuse count is %d' % (8 if c8 == 1 else 10), n == (8 if c8 == 1 else 10), n)
@@ -352,6 +371,10 @@ def check(path):
     ok('B12 ISETP P0 then a NOP with stall 15 before the group',
        low12(body[g - 2 - c]) == 0x80c and low12(body[g - 1 - c]) == 0x918 and stall(body[g - 1 - c]) == 15)
     ok('B13 NOP after the group waits on all scoreboards', low12(body[g + GL]) == 0x918 and wt(body[g + GL]) == 0x3f)
+    if meta.get('emit'):   # E5: the ISETP that makes P0 true is the encoder's (stage 0 builds carry it too)
+        from ttu.rehost import emit_group as EG
+        ok('E5 the ISETP before the group equals emit_group.isetp_p0_true(R90) from the encoder', bytes(body[g - 2 - c]) == EG.isetp_p0_true(ra=90))
+        ok('E5 layout records emit and no dump key', 'dump' not in meta, sorted(k for k in meta if 'dump' in k))
     if meta.get('l1t'):
         cl = [i for i, b in enumerate(body) if is_clk(b, cs) or is_clk(b, ce)]
         ok('l1t: exactly two CS2R SR_CLOCKLO (start, end), both between the sessions, no TTU instruction between them', len(cl) == 2 and groups[0] + GL < cl[0] < cl[1] < groups[1] and not [i for i in range(cl[0], cl[1]) if low12(body[i]) in TTU], cl)

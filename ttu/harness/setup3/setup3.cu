@@ -293,6 +293,16 @@ static std::vector<std::vector<Tri>> make_scene(const std::string &s)
     if (s == "tri1") return {{t0}};
     if (s == "tri2") return {{t0, t1}};
     if (s == "tri2g") return {{t0}, {t1}};
+    // box scenes (--aabb only): a Tri holds lo in a and hi in b; its AABB is the box of the three vertices
+    auto bx = [](float x0, float y0, float z0, float x1, float y1, float z1) { return Tri{{x0, y0, z0}, {x1, y1, z1}, {x0, y0, z0}}; };
+    if (s == "box1") return {{bx(-0.5f, -0.5f, -0.5f, 0.5f, 0.5f, 0.5f)}};
+    if (s == "box2") return {{bx(-0.5f, -0.5f, -0.5f, 0.5f, 0.5f, 0.5f), bx(1.5f, -0.5f, -0.5f, 2.5f, 0.5f, 0.5f)}};
+    if (s.rfind("boxov:", 0) == 0) {   // K nested boxes around the origin: box k = [-(0.5 + 0.05 k), 0.5 + 0.05 k]^3 (all contain the point (0,0,0))
+        const int K = atoi(s.c_str() + 6);
+        if (K < 1 || K > 4096) { fprintf(stderr, "boxov:K with 1 <= K <= 4096\n"); exit(2); }
+        std::vector<Tri> v; for (int k = 0; k < K; ++k) { const float r = 0.5f + 0.05f * k; v.push_back(bx(-r, -r, -r, r, r, r)); }
+        return {v};
+    }
     if (s.rfind("grid:", 0) == 0) {
         const int n = atoi(s.c_str() + 5);
         if (n < 1 || n > 1 << 23) { fprintf(stderr, "grid:N with 1 <= N <= 2^23\n"); exit(2); }
@@ -379,6 +389,7 @@ int main(int argc, char **argv)
     const bool random_fill = !strcmp(argv[4], "random");
     double energy_s = 0;
     int sib_sm = -1, sib_kb = 4096, sib_passes = 4; unsigned sib_poll = 0, sib_mode = 0;
+    bool aabb = false;   // rehosting R1: custom primitive GAS (one AABB per scene triangle: the box of its three vertices), OptiX reference with an intersection program that logs its calls
     bool gopaque = false; unsigned imask = 255; std::string imat = "id"; bool ias = false, sm120 = false; bool decoy = false, thrash_near = false, thrash_node = false; size_t tlbpages = 0; bool run_ttu = true, thrash = false, thrash_gas = false; unsigned thrash_lane = 128; int resume = 0; const char *dump_tris = nullptr; long long start_off = -1; unsigned start_flags = 0x2484000u; std::string start_path; bool use_path = false; const char *start_file = nullptr; int slim = 0; int loopk = 0; std::set<unsigned> smset; const char *dump_final = nullptr; int blockrays = 0; int outer = 1, quick = 0, lean = 0, coal = 0; const char *dump_ref = nullptr; int optix_repeat = 0; int oclk = 0, lclock = 0, onrep = 1, orot = 0; int smem = 0; int passes = 1; std::string sched; int active = 32; std::vector<int> wact; std::string compute_opt; int ccarve = -1, csmem = 0; std::string idle = "mask"; int repeat = 1, warps = 1, blocks = 1; unsigned sm_a = 0, sm_b = 0; double flush_mb = 0; std::string scene = "tri1"; const char *dump = nullptr;
     for (int a = 6; a < argc; ++a) {
         if (!strcmp(argv[a], "--no-ttu")) run_ttu = false;
@@ -386,6 +397,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--smtable") && a + 1 < argc) { std::ifstream tf(argv[++a]); std::string ln; while (std::getline(tf, ln)) { if (ln.empty() || ln[0] == '#') continue; std::istringstream ts(ln); unsigned v; while (ts >> v) SMTAB.push_back(v); } if (SMTAB.empty()) { fprintf(stderr, "empty --smtable\n"); return 2; } }
         else if (!strcmp(argv[a], "--sm120")) sm120 = true;   // pc14 (RTX 5090): register image of the SM120 GAS group (build_patch.py --sm 120); plain builds only. Role table: see the block below
         else if (!strcmp(argv[a], "--gopaque")) gopaque = true;
+        else if (!strcmp(argv[a], "--aabb")) aabb = true;
         else if (!strcmp(argv[a], "--imat") && a + 1 < argc) imat = argv[++a];   // --ias (Xform_1): instance object to world transform: id (default) | rz37 | rz90s2 | rx37 | snu
         else if (!strcmp(argv[a], "--imask") && a + 1 < argc) imask = (unsigned)strtoul(argv[++a], nullptr, 0);   // --ias: instance visibility mask (default 255; Mask_1)
         else if (!strcmp(argv[a], "--thrash")) thrash = true;
@@ -467,6 +479,14 @@ int main(int argc, char **argv)
         OptixBuildInput &bi = bis[g]; bi = {}; bi.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
         bi.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3; bi.triangleArray.numVertices = (unsigned)v.size() * 3;
         bi.triangleArray.vertexBuffers = &dverts[g]; bi.triangleArray.flags = &gflags; bi.triangleArray.numSbtRecords = 1;
+        if (aabb) {   // custom primitives: one box per Tri (min and max over its three vertices), 6 floats each
+            std::vector<float> bb; for (const Tri &t : v) { bb.push_back(fminf(t.a.x, fminf(t.b.x, t.c.x))); bb.push_back(fminf(t.a.y, fminf(t.b.y, t.c.y))); bb.push_back(fminf(t.a.z, fminf(t.b.z, t.c.z)));
+                                                            bb.push_back(fmaxf(t.a.x, fmaxf(t.b.x, t.c.x))); bb.push_back(fmaxf(t.a.y, fmaxf(t.b.y, t.c.y))); bb.push_back(fmaxf(t.a.z, fmaxf(t.b.z, t.c.z))); }
+            CUdeviceptr db; CK(cudaMalloc((void **)&db, bb.size() * 4)); CK(cudaMemcpy((void *)db, bb.data(), bb.size() * 4, cudaMemcpyHostToDevice)); dverts[g] = db;
+            bi = {}; bi.type = OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES;
+            bi.customPrimitiveArray.aabbBuffers = &dverts[g]; bi.customPrimitiveArray.numPrimitives = (unsigned)v.size(); bi.customPrimitiveArray.strideInBytes = 24;
+            bi.customPrimitiveArray.flags = &gflags; bi.customPrimitiveArray.numSbtRecords = 1;
+        }
     }
     if (dump_tris) { FILE *f = fopen(dump_tris, "wb"); fwrite(all.data(), sizeof(Tri), all.size(), f); fclose(f); }
     OptixAccelBuildOptions ao{}; ao.buildFlags = OPTIX_BUILD_FLAG_NONE; ao.operation = OPTIX_BUILD_OPERATION_BUILD;
@@ -517,13 +537,14 @@ int main(int argc, char **argv)
     po.traversableGraphFlags = ias ? OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING : OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
     po.numPayloadValues = 7; po.numAttributeValues = 2;
     po.pipelineLaunchParamsVariableName = "params";
-    po.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE;
+    po.usesPrimitiveTypeFlags = aabb ? OPTIX_PRIMITIVE_TYPE_FLAGS_CUSTOM : OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE;
     std::string ptx = read_file(argv[1]); char log[4096]; size_t ls = sizeof log; OptixModule m;
     OX(optixModuleCreate(ctx, &mo, &po, ptx.c_str(), ptx.size(), log, &ls, &m));
     OptixProgramGroupOptions go{}; OptixProgramGroupDesc d[3] = {};
     d[0].kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN; d[0].raygen.module = m; d[0].raygen.entryFunctionName = "__raygen__rg";
     d[1].kind = OPTIX_PROGRAM_GROUP_KIND_MISS; d[1].miss.module = m; d[1].miss.entryFunctionName = "__miss__ms";
     d[2].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP; d[2].hitgroup.moduleCH = m; d[2].hitgroup.entryFunctionNameCH = "__closesthit__ch";
+    if (aabb) { d[2].hitgroup.moduleIS = m; d[2].hitgroup.entryFunctionNameIS = "__intersection__is"; }
     OptixProgramGroup g[3]; ls = sizeof log; OX(optixProgramGroupCreate(ctx, d, 3, &go, log, &ls, g));
     OptixPipelineLinkOptions lo{}; lo.maxTraceDepth = 1; OptixPipeline pipe;
     ls = sizeof log; OX(optixPipelineCreate(ctx, &po, &lo, g, 3, log, &ls, &pipe));
@@ -548,6 +569,9 @@ int main(int argc, char **argv)
         {"moved",  {{0.2f, -0.3f, -1.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f}},
         {"moved2", {{-0.3f, -0.4f, -1.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f}},
         {"hitB",   {{2.f, 0.f, -1.f}, 0.f, {0.f, 0.f, 1.f}, 1e16f}},
+        {"inside", {{0.f, 0.f, 0.f}, 0.f, {0.f, 0.f, 1.f}, 1e-16f}},    // rehosting: RTNN style point query (origin inside box 0, tmax 1e-16)
+        {"inside2", {{2.f, 0.f, 0.f}, 0.f, {0.f, 0.f, 1.f}, 1e-16f}},   // box2: origin inside box 1
+        {"outside", {{3.f, 3.f, 0.f}, 0.f, {0.f, 0.f, 1.f}, 1e-16f}},   // point query inside no box
     };
     Ray8 ray{};
     const bool perlane = !strcmp(argv[3], "perlane"), jitter = !strcmp(argv[3], "jitter");
@@ -610,6 +634,7 @@ int main(int argc, char **argv)
     CK(cudaMalloc((void **)&prm.rays, NR * sizeof(Ray8)));
     CK(cudaMemcpy((void *)prm.rays, rays.data(), NR * sizeof(Ray8), cudaMemcpyHostToDevice));
     CK(cudaMalloc((void **)&prm.out, NR * sizeof(RefOut))); CK(cudaMalloc((void **)&prm.inst, 18 * 8));
+    if (aabb) { CK(cudaMalloc((void **)&prm.islog, (size_t)NR * 65 * 4)); CK(cudaMemset(prm.islog, 0, (size_t)NR * 65 * 4)); }
     CUdeviceptr dprm; CK(cudaMalloc((void **)&dprm, sizeof prm)); CK(cudaMemcpy((void *)dprm, &prm, sizeof prm, cudaMemcpyHostToDevice));
     unsigned long long inst2[18] = {0}; RefOut ref2{}; unsigned long long root2 = 0, A2 = 0;
     if (decoy) {   // the decoy handle through the same pipeline first: its own instance node address and root
@@ -740,6 +765,12 @@ int main(int argc, char **argv)
         fprintf(jf, "%s{\"hit\": %u, \"t\": \"0x%08x\", \"prim\": %u, \"u\": \"0x%08x\", \"v\": \"0x%08x\", \"front\": %u, \"gas_index\": %u}",
                 i ? ", " : "", ref[i].hit, fbits(ref[i].t), ref[i].prim, fbits(ref[i].u), fbits(ref[i].v), ref[i].front, ref[i].gas_index);
     fprintf(jf, "]");
+    if (aabb) {   // intersection program call log of the OptiX reference launch: per ray [count, primitive indices (first 64)]
+        std::vector<unsigned> lg((size_t)NR * 65); CK(cudaMemcpy(lg.data(), prm.islog, lg.size() * 4, cudaMemcpyDeviceToHost));
+        fprintf(jf, ",\n \"aabb\": 1, \"islog\": [");
+        for (unsigned i = 0; i < NJ; ++i) { const unsigned c = lg[(size_t)i * 65]; fprintf(jf, "%s[%u", i ? "," : "", c); for (unsigned k = 0; k < c && k < 64; ++k) fprintf(jf, ",%u", lg[(size_t)i * 65 + 1 + k]); fprintf(jf, "]"); }
+        fprintf(jf, "]");
+    }
     printf("scene %s (%zu tris, %u inputs) gas 0x%llx size %zu root 0x%llx inst 0x%llx inst_ok %d c3_34 0x%x handle_ok %d align_ok %d\n",
            scene.c_str(), all.size(), ng, (unsigned long long)gas, (size_t)bs.outputSizeInBytes, root, A, inst_ok, c3_34, handle_ok, align_ok);
     printf("optix ref lane 0: hit %u t %g prim %u front %u gas_index %u\n", ref[0].hit, ref[0].t, ref[0].prim, ref[0].front, ref[0].gas_index);

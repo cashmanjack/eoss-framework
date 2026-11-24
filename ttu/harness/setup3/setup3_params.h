@@ -19,4 +19,5 @@ struct Params {
     unsigned long long *clk;    // HG_1: hg1_dev.cu: [4 x launch index] = ta, tb, tc, td; hg1b_dev.cu: [8 x launch index] = ta, tb0, tc0, tb1, tc1, tb2, tc2, td
     unsigned nrep;              // HG_1b (hg1b_dev.cu): traces per raygen, 1 to 3
     unsigned rot;               // HG_1b: 1 = trace k uses the ray of launch index (i + k) mod n
+    unsigned *islog;            // rehosting (setup3_aabb_dev.cu): per ray 65 words: [0] number of intersection program calls, then the primitive indices of the first 64
 };
