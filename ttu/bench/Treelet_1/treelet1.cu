@@ -233,7 +233,7 @@ int main(int argc, char **argv)
     struct Res { std::vector<double> ms; std::vector<unsigned> clk; unsigned stats[4]; unsigned smmin, smmax; unsigned wmin, wmax; unsigned long bad, tbad; };
     std::vector<Res> res(arms.size());
     auto launch = [&](const Arm &a, Res &r, bool timed, bool verify) {
-        Params prm{}; prm.rays = (const Ray8 *)d_ry[a.layout]; prm.out = d_out; prm.handle = full.h; prm.tl_handle = (const OptixTraversableHandle *)d_h; prm.tl = (const unsigned *)d_tl[a.layout]; prm.n = n; prm.use_tl = a.use_tl;
+        Params prm{}; prm.rays = (const Ray8 *)d_ry[a.layout]; prm.out = d_out; prm.handle = full.h; prm.tl_handle = (const OptixTraversableHandle *)d_h; prm.tl = (const unsigned *)d_tl[a.layout]; prm.n = n; prm.use_tl = a.use_tl; prm.chunk = getenv("T1_CHUNK") ? (unsigned)atoi(getenv("T1_CHUNK")) : 8u;
         prm.head = (unsigned *)d_head; prm.qend = (const unsigned *)(a.pinned ? d_qend : d_qend1); prm.nq = a.pinned ? nq : 1; prm.pinned = a.pinned; prm.stats = (unsigned *)d_stats; prm.smhist = (unsigned *)d_smhist; prm.warp_sm = (unsigned *)d_warpsm;
         std::vector<unsigned> hb(nq, 0); if (a.pinned) hb = qbeg;
         CK(cudaMemcpy((void *)d_head, hb.data(), 4ull * nq, cudaMemcpyHostToDevice)); CK(cudaMemset((void *)d_stats, 0, 16)); CK(cudaMemset((void *)d_smhist, 0, 1024)); CK(cudaMemset((void *)d_warpsm, 0xff, 4ull * maxwarps));
@@ -252,7 +252,7 @@ int main(int argc, char **argv)
         if (verify) {
             std::vector<RefOut> o(n); CK(cudaMemcpy(o.data(), d_out, (size_t)n * sizeof(RefOut), cudaMemcpyDeviceToHost)); unsigned long bad = 0, tbad = 0;
             for (unsigned i = 0; i < n; ++i) { const RefOut &x = o[i], &y = ref[src[a.layout][i]]; const unsigned gp = (x.hit && a.use_tl) ? tri_sorted[toff[tlv[a.layout][i]] + x.prim] : x.prim;
-                if (x.hit != y.hit || gp != y.prim) ++bad; else if (x.t != y.t) ++tbad; }
+                if (x.hit != y.hit || gp != y.prim) { ++bad; if (getenv("T1_DEBUG") && bad <= 12) { unsigned q = 0; while (q + 1 < nq && qend[q] <= i) ++q; fprintf(stderr, "BAD %s i %u (lane %u) hit 0x%x queue %u off %u | pad prev %x next %x | lane0 pad %x\n", a.name.c_str(), i, i & 31, x.hit, q, i - qbeg[q], i ? o[i-1].pad : 0u, i + 1 < n ? o[i+1].pad : 0u, o[i & ~31u].pad); } } else if (x.t != y.t) ++tbad; }
             r.bad += bad; r.tbad += tbad;
         }
         return ms;
