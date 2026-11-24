@@ -166,7 +166,8 @@ __global__ void k_gather(const Ray8 *src, const unsigned *perm, Ray8 *dst, unsig
 __global__ void k_cuts(const unsigned *key, unsigned n, unsigned nq, unsigned *qend, unsigned *head)
 {
     const unsigned q = threadIdx.x; if (q >= nq) return;
-    auto cut = [&](unsigned k) { if (k == 0) return 0u; if (k >= nq) return n; unsigned i = (unsigned)((unsigned long long)k * n / nq); while (i < n && i > 0 && key[i] == key[i - 1]) ++i; return i; };
+    auto cut = [&](unsigned k) { if (k == 0) return 0u; if (k >= nq) return n; const unsigned i = (unsigned)((unsigned long long)k * n / nq); if (i == 0) return 0u;
+        const unsigned v = key[i - 1]; unsigned lo = i, hi = n; while (lo < hi) { const unsigned mid = (lo + hi) / 2; if (key[mid] > v) hi = mid; else lo = mid + 1; } return lo; };   // first index at or after i whose key differs from key[i - 1] (keys are sorted)
     head[q] = cut(q); qend[q] = cut(q + 1);
 }
 __global__ void k_vrays(const Ray8 *rs, const RefOut *o, Ray8 *vr, unsigned n) { const unsigned i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= n) return; Ray8 r = rs[i]; r.tmax = o[i].hit ? o[i].t : 1e16f; vr[i] = r; }
@@ -308,7 +309,7 @@ int main(int argc, char **argv)
     const unsigned grd = (n + 255) / 256, NT = (n + 31) / 32 * 32;
     cudaEvent_t ev[8]; for (int k = 0; k < 8; ++k) CK(cudaEventCreate(&ev[k]));
     nvmlDevice_t nd; char bus[32]; CK(cudaDeviceGetPCIBusId(bus, sizeof bus, 0)); bool nv_ok = nvmlInit_v2() == NVML_SUCCESS && nvmlDeviceGetHandleByPciBusId_v2(bus, &nd) == NVML_SUCCESS;
-    struct Res { std::vector<double> ms; std::vector<unsigned> clk; unsigned stats[4]; unsigned long bad = 0, tbad = 0; std::vector<std::vector<double>> st; double flagged = -1, keyacc = -1; unsigned smmin = 0, smmax = 0; };
+    struct Res { std::vector<double> ms; std::vector<unsigned> clk; unsigned stats[4]; unsigned long bad = 0, tbad = 0, ties = 0; std::vector<std::vector<double>> st; double flagged = -1, keyacc = -1; unsigned smmin = 0, smmax = 0; };
     std::vector<Res> res(arms.size());
     auto sortk = [&](CUdeviceptr kin, int bits) { size_t b = sort_bytes; cub::DeviceRadixSort::SortPairs((void *)d_stmp, b, (unsigned *)kin, (unsigned *)d_kout, (unsigned *)d_pin, (unsigned *)d_perm, n, 0, bits); };
     auto launch = [&](CUdeviceptr P, int sbt, unsigned threads) { OX(optixLaunch(pp.pipe, 0, P, sizeof(Params), &pp.sbt[sbt], threads, 1, 1)); };
@@ -341,7 +342,7 @@ int main(int argc, char **argv)
         } else { fprintf(stderr, "bad e arm\n"); exit(2); }
     };
     auto check_nat = [&](const RefOut *dev, Res &r) {
-        std::vector<RefOut> o(n); CK(cudaMemcpy(o.data(), dev, (size_t)n * sizeof(RefOut), cudaMemcpyDeviceToHost)); for (unsigned i = 0; i < n; ++i) { const RefOut &x = o[i], &y = ref[i]; if (x.hit != y.hit || x.prim != y.prim) ++r.bad; else if (x.t != y.t) ++r.tbad; } };
+        std::vector<RefOut> o(n); CK(cudaMemcpy(o.data(), dev, (size_t)n * sizeof(RefOut), cudaMemcpyDeviceToHost)); for (unsigned i = 0; i < n; ++i) { const RefOut &x = o[i], &y = ref[i]; if (x.hit != y.hit) ++r.bad; else if (x.prim != y.prim) { if (std::fabs(x.t - y.t) <= 1e-5f * std::fabs(y.t) + 1e-7f) ++r.ties; else ++r.bad; } else if (x.t != y.t) ++r.tbad; } };
     auto run_arm = [&](size_t j, bool timed, bool verify) {
         const Arm &a = arms[j]; Res &r = res[j]; float ms = 0;
         if (a.kind == A_E) {
@@ -362,7 +363,7 @@ int main(int argc, char **argv)
             CUdeviceptr dp2 = to_dev(p); CK(cudaDeviceSynchronize()); CK(cudaEventRecord(ev[0])); if (persistent) launch(dp2, 1, PW * 32); else launch(dp2, 0, NT); CK(cudaEventRecord(ev[1])); CK(cudaEventSynchronize(ev[1])); CK(cudaEventElapsedTime(&ms, ev[0], ev[1])); CK(cudaFree((void *)dp2));
             if (persistent) { CK(cudaMemcpy(r.stats, (void *)d_stats, 16, cudaMemcpyDeviceToHost)); }
             if (verify) { std::vector<RefOut> o(n); CK(cudaMemcpy(o.data(), d_out, (size_t)n * sizeof(RefOut), cudaMemcpyDeviceToHost));
-                for (unsigned i = 0; i < n; ++i) { const RefOut &x = o[i], &y = ref[src[layout][i]]; const unsigned gp = (x.hit && tl_start) ? tri_sorted[toff[tlv[layout][i]] + x.prim] : x.prim; if (x.hit != y.hit || gp != y.prim) ++r.bad; else if (x.t != y.t) ++r.tbad; } }
+                for (unsigned i = 0; i < n; ++i) { const RefOut &x = o[i], &y = ref[src[layout][i]]; const unsigned gp = (x.hit && tl_start) ? tri_sorted[toff[tlv[layout][i]] + x.prim] : x.prim; if (x.hit != y.hit) ++r.bad; else if (gp != y.prim) { if (std::fabs(x.t - y.t) <= 1e-5f * std::fabs(y.t) + 1e-7f) ++r.ties; else ++r.bad; } else if (x.t != y.t) ++r.tbad; } }
         }
         unsigned c = 0; if (nv_ok) nvmlDeviceGetClockInfo(nd, NVML_CLOCK_SM, &c); if (timed) { r.ms.push_back(ms); r.clk.push_back(c); }
     };
@@ -377,7 +378,7 @@ int main(int argc, char **argv)
         Res &r = res[j]; std::vector<double> m = r.ms; std::sort(m.begin(), m.end()); const bool pers = arms[j].kind == A_PRE_P || arms[j].name == "e_opT" || arms[j].name == "e_ipT";
         fprintf(jf, "  {\"arm\": \"%s\", \"ms\": [", arms[j].name.c_str()); for (size_t i = 0; i < r.ms.size(); ++i) fprintf(jf, "%s%.4f", i ? "," : "", r.ms[i]);
         fprintf(jf, "], \"clk_mhz\": ["); for (size_t i = 0; i < r.clk.size(); ++i) fprintf(jf, "%s%u", i ? "," : "", r.clk[i]);
-        fprintf(jf, "], \"median_ms\": %.4f, \"min_ms\": %.4f, \"bad\": %lu, \"tbad\": %lu", m.empty() ? 0.0 : m[m.size() / 2], m.empty() ? 0.0 : m[0], r.bad, r.tbad);
+        fprintf(jf, "], \"median_ms\": %.4f, \"min_ms\": %.4f, \"bad\": %lu, \"tbad\": %lu, \"ties\": %lu", m.empty() ? 0.0 : m[m.size() / 2], m.empty() ? 0.0 : m[0], r.bad, r.tbad, r.ties);
         if (pers) fprintf(jf, ", \"own_chunks\": %u, \"stolen_chunks\": %u, \"lane_mismatch\": %u, \"chunks\": %u", r.stats[0], r.stats[1], r.stats[2], r.stats[3]);
         if (!r.st.empty()) { fprintf(jf, ", \"stage_median_ms\": ["); for (size_t s = 0; s < r.st.size(); ++s) { std::vector<double> v = r.st[s]; std::sort(v.begin(), v.end()); fprintf(jf, "%s%.4f", s ? "," : "", v[v.size() / 2]); } fprintf(jf, "], \"flagged_frac\": %.4f, \"key_accuracy\": %.4f", r.flagged, r.keyacc); }
         fprintf(jf, "}%s\n", j + 1 < arms.size() ? "," : "");
