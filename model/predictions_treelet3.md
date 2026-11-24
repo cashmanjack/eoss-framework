@@ -29,3 +29,6 @@ P11 Verdict (my expectation): the design as built does not meet the 1.2 times ru
 
 ## Method notes
 Smoke runs (200,000 triangle soup, grid 6 and 8 treelets per TPC) were run before this file to debug the kernels (hangs: a persistent warp that lets its lanes drift apart deadlocks inside optixTrace, fixed by straight line per chunk code, dummy zero length rays for idle lanes, group based claims); only correctness fields were read from them, no times are used. Timing arms at 8 M and on Rungholt were NOT run before this file.
+
+## Addendum 1 (written before any timing at scale was read, after data generation)
+The soup ray sets generated now are NOT the Treelet_2 sets: f_rand has 7,574,432 hit rays and f_b3 has 6,940,544 (Treelet_2: 7,942,464 and 7,278,848; same seeds, different generation, cause not investigated). Rungholt rg_cam3x matches (5,730,048). So the natural and Morton times of Treelet_2 are only rough references; the baselines are re measured on these sets in the same process, and the rule is applied to those. The statement above that the sets are the same is wrong.
