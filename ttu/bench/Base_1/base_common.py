@@ -45,10 +45,27 @@ def env(cuda_visible=GPU, extra=None):
     e.update(extra or {})
     return e
 
-def run(cmd, cwd, environ, timeout=300):
-    """One timed run. Idle check first, SM clock sampled every 50 ms by our own nvidia-smi child (killed through its handle)."""
+WARM_BIN = '/dev/shm/base1_warm'   # built from warm.cu (nvcc -O2 -arch=sm_89 -o /dev/shm/base1_warm warm.cu)
+WARM_MS = 2000
+
+def clock_summary(sm, max_mhz):
+    """Clock record of one run: all 50 ms samples are kept; summary excludes the first 3 samples (process start)."""
+    body = sm[3:] if len(sm) > 6 else sm
+    return dict(samples_mhz=sm, n=len(sm), max_sm_mhz_gpu=max_mhz, min_after_start=min(body) if body else None, median=statistics.median(sm) if sm else None,
+                max=max(sm) if sm else None, frac_at_least_2400=round(sum(1 for x in sm if x >= 2400) / len(sm), 3) if sm else None,
+                full_clock=bool(body) and min(body) >= 2400)
+
+def run(cmd, cwd, environ, timeout=300, warm=True):
+    """One timed run. Idle check, then a warmup process (all SMs busy WARM_MS ms, run to completion) so the clock is at boost,
+    then the program; SM clock sampled every 50 ms by our own nvidia-smi child (killed through its handle). The warmup is not part of the timing."""
     idle_check()
-    clk = subprocess.Popen(['nvidia-smi', '-i', GPU, '--query-gpu=clocks.sm,power.draw,temperature.gpu', '--format=csv,noheader,nounits', '-lms', '50'],
+    wenv = dict(environ, CUDA_VISIBLE_DEVICES=GPU)
+    warm_out = None
+    if warm:
+        w = subprocess.run([WARM_BIN, str(WARM_MS)], env=wenv, capture_output=True, text=True, timeout=60)
+        warm_out = w.stdout.strip() if w.returncode == 0 else 'WARM FAILED rc %d %s' % (w.returncode, w.stderr[-200:])
+        if w.returncode != 0: raise SystemExit(warm_out)
+    clk = subprocess.Popen(['nvidia-smi', '-i', GPU, '--query-gpu=clocks.sm', '--format=csv,noheader,nounits', '-lms', '50'],
                            stdout=subprocess.PIPE, text=True)
     t0 = time.perf_counter()
     try:
@@ -58,12 +75,9 @@ def run(cmd, cwd, environ, timeout=300):
         clk.terminate()
         try: samples = clk.communicate(timeout=5)[0]
         except Exception: clk.kill(); samples = ''
-    rows = [l.split(', ') for l in samples.strip().splitlines() if l.count(',') == 2]
-    sm = [float(r[0]) for r in rows]
-    busy = [s for s in sm if s > 0]
-    return dict(rc=p.returncode, wall_s=round(wall, 4), stdout=p.stdout, stderr=p.stderr[-2000:],
-                sm_clock_mhz=dict(n=len(sm), max=max(sm) if sm else None, median=statistics.median(sm) if sm else None,
-                                  median_nonidle=statistics.median([s for s in sm if s > 300]) if any(s > 300 for s in sm) else None))
+    sm = [int(float(l)) for l in samples.split() if l.strip()]
+    return dict(rc=p.returncode, wall_s=round(wall, 4), stdout=p.stdout, stderr=p.stderr[-2000:], warmup=warm_out,
+                clock=clock_summary(sm, int(gpu_info()['max_sm_mhz'].split()[0])))
 
 def stats(xs):
     xs = [x for x in xs if x is not None]
@@ -84,5 +98,17 @@ def header(mapping, binary, inputs, notes):
                 code_changed=False, tool='plain program timers (+ the OptiX recorder fields the program prints); no ncu, no NVBit',
                 bittu='not applicable: OptiX kernels are invisible to NVBit (F12, F60); no TTU code runs here')
 
+def clocks_all(runs):
+    return dict(runs=len(runs), runs_at_full_clock=sum(1 for r in runs if r['clock']['full_clock']), lowest_after_start=min((r['clock']['min_after_start'] or 0) for r in runs))
+
 def summarize(runs, keys):
     return {k: stats([r['parsed'].get(k) for r in runs if r['rc'] == 0]) for k in keys}
+
+def check_run(cmd, cwd, environ, timeout=600):
+    """Untimed run for a correctness check (no warmup, clocks not recorded)."""
+    idle_check()
+    p = subprocess.run(['timeout', '-k', '2', str(timeout)] + cmd, cwd=cwd, env=environ, capture_output=True, text=True)
+    return dict(rc=p.returncode, stdout_tail=p.stdout[-600:], stderr_tail=p.stderr[-400:])
+
+def summ(runs, keys):
+    return summarize(runs, keys) | {'wall_s': stats([x['wall_s'] for x in runs if x['rc'] == 0]), 'clock': clocks_all(runs)}

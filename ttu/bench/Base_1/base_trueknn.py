@@ -1,8 +1,10 @@
-"""Baseline 4: TrueKNN (Nagarajan, Mandarapu, Kulkarni, ICS 2023), our port of Arkade's sample03 as built in ~/thirdparty/div1/tk/ark/b (device buffer build, clock recorder always on).
-usage: python base_trueknn.py [REPS]   -> notes/base1/trueknn_<ts>.json. Change no code. The recorder cannot be switched off in this build."""
-import re, sys, os, base_common as B
+"""Baseline 4 (v2): TrueKNN (Nagarajan, Mandarapu, Kulkarni, ICS 2023), our port of Arkade's sample03, ~/thirdparty/div1/tk/ark/b (device buffer build, clock recorder always on).
+usage: python base_trueknn.py [REPS]   -> notes/base1/trueknn_v2_<ts>.json. Change no code (timed runs use the build above).
+Correctness (untimed): an observer copy built from the same source in /dev/shm/tkobs (only a dump of the final neighbour buffer added, notes/base1/tk_observer_dump.diff)
+against an exact CPU kd tree K nearest. TrueKNN is known to return approximate lists (stop rule, F218/F227); the fraction exact is reported, not required to be 1."""
+import re, sys, os, base_common as B, base_checks as C
 REPS = int(sys.argv[1]) if len(sys.argv) > 1 else 5
-D = B.HOME + '/thirdparty/div1'; BIN = D + '/tk/ark/b/sample03-trueknn'
+D = B.HOME + '/thirdparty/div1'; BIN = D + '/tk/ark/b/sample03-trueknn'; OBS = '/dev/shm/tkobs/build/sample03-trueknn'
 def parse(t):
     p = {}
     for k, pat in (('build_s', r'Build time: ([0-9.]+) seconds'), ('true_knn_s', r'True KNN time: ([0-9.]+) seconds'), ('total_s', r'Total time: ([0-9.]+)')):
@@ -12,7 +14,7 @@ def parse(t):
     p['points_left'] = [int(x) for x in re.findall(r'RND \d+ points left (\d+)', t)]
     p['rounds_n'] = len(p['rounds']); p['gt_span_sum_ms'] = sum(r['gt_span_ms'] for r in p['recorder']) if p['recorder'] else None
     return p
-doc = B.header('TrueKNN (port)', BIN, [D + '/data/u100000.csv', D + '/data/u400000.csv'], 'Uniform random 3D points (u100000 and u400000), queries = points, dim 3, start radius 0.004, K 16 (args as the earlier 4090 runs). Timers: build, per round, "True KNN time" (sum of rounds), "Total time". The output file goes to /dev/shm/base1 and is deleted.')
+doc = B.header('TrueKNN (port)', BIN, [D + '/data/u100000.csv', D + '/data/u400000.csv'], 'Uniform random 3D points (default_rng seeds 1 and 3, the recorded recipe; seed 1 checked against the file), queries = points, dim 3, start radius 0.004, K 16. Timers: build, per round, "True KNN time" (sum of rounds), "Total time". Output (time) file in /dev/shm/base1, deleted. Warmup process before each run.')
 doc['configs'] = []; os.makedirs('/dev/shm/base1', exist_ok=True)
 for n in (100000, 400000):
     data = '%s/data/u%d.csv' % (D, n); runs = []
@@ -21,5 +23,11 @@ for n in (100000, 400000):
         x = B.run(cmd, D + '/tk/ark/b', B.env(), 300); x['parsed'] = parse(x['stdout']); runs.append(x)
         try: os.remove(out)
         except OSError: pass
-    doc['configs'].append(dict(name='n%d_k16_r0.004' % n, cmd=' '.join(cmd[:-1]).replace(B.HOME, '~') + ' OUT', runs=runs, summary=B.summarize(runs, ['build_s', 'true_knn_s', 'total_s', 'rounds_n', 'gt_span_sum_ms']) | {'wall_s': B.stats([x['wall_s'] for x in runs if x['rc'] == 0])}))
-print(B.write('trueknn', doc))
+    fb = '/dev/shm/base1/tkfb_%d_%d.bin' % (n, os.getpid()); tf = fb + '.t'
+    chk = B.check_run([OBS, data, str(n), '3', '0.004', '16', tf], '/dev/shm/tkobs/build', B.env(extra={'TK_FB': fb}), 600)
+    chk['correctness'] = C.trueknn(fb, C.load_csv(data), 16) | dict(reference='CPU kd tree exact 16 nearest (float32 points widened to float64, self removed by index), exact = every sorted distance within 1e-5 relative')
+    for f in (fb, tf):
+        try: os.remove(f)
+        except OSError: pass
+    doc['configs'].append(dict(name='n%d_k16_r0.004' % n, cmd=' '.join(cmd[:-1]).replace(B.HOME, '~') + ' OUT', runs=runs, summary=B.summ(runs, ['build_s', 'true_knn_s', 'total_s', 'rounds_n', 'gt_span_sum_ms']), correctness=chk))
+print(B.write('trueknn_v2', doc))
