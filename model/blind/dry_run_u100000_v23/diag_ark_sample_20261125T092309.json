@@ -1,0 +1,170 @@
+{
+ "label": "DIAGNOSTIC (dry run dataset)",
+ "data": "u100000.csv",
+ "N": 100000,
+ "radius": 0.017089264143801325,
+ "rows": {
+  "250": {
+   "runs": [
+    {
+     "kernel_ms": 0.7721,
+     "f0_cycles": 10036120.0,
+     "f0_calls": 2456.0,
+     "full_clock": true
+    },
+    {
+     "kernel_ms": 0.7834,
+     "f0_cycles": 10064644.0,
+     "f0_calls": 2456.0,
+     "full_clock": true
+    },
+    {
+     "kernel_ms": 0.7813,
+     "f0_cycles": 10108645.0,
+     "f0_calls": 2456.0,
+     "full_clock": true
+    }
+   ],
+   "kernel_ms": 0.7813,
+   "f0_cycles": 10064644.0,
+   "f0_calls": 2456.0,
+   "cycles_per_call": 4097.982084690554,
+   "cycles_per_query": 40258.576
+  },
+  "500": {
+   "runs": [
+    {
+     "kernel_ms": 0.8133,
+     "f0_cycles": 22014830.0,
+     "f0_calls": 5286.0,
+     "full_clock": true
+    },
+    {
+     "kernel_ms": 0.8242,
+     "f0_cycles": 21971792.0,
+     "f0_calls": 5286.0,
+     "full_clock": true
+    },
+    {
+     "kernel_ms": 0.8233,
+     "f0_cycles": 21867304.0,
+     "f0_calls": 5286.0,
+     "full_clock": true
+    }
+   ],
+   "kernel_ms": 0.8233,
+   "f0_cycles": 21971792.0,
+   "f0_calls": 5286.0,
+   "cycles_per_call": 4156.6008323874385,
+   "cycles_per_query": 43943.584
+  },
+  "1000": {
+   "runs": [
+    {
+     "kernel_ms": 0.8214,
+     "f0_cycles": 44985147.0,
+     "f0_calls": 10885.0,
+     "full_clock": true
+    },
+    {
+     "kernel_ms": 0.8219,
+     "f0_cycles": 44916130.0,
+     "f0_calls": 10885.0,
+     "full_clock": true
+    },
+    {
+     "kernel_ms": 0.8315,
+     "f0_cycles": 44964360.0,
+     "f0_calls": 10885.0,
+     "full_clock": true
+    }
+   ],
+   "kernel_ms": 0.8219,
+   "f0_cycles": 44964360.0,
+   "f0_calls": 10885.0,
+   "cycles_per_call": 4130.855305466238,
+   "cycles_per_query": 44964.36
+  },
+  "2500": {
+   "runs": [
+    {
+     "kernel_ms": 0.8317,
+     "f0_cycles": 112242704.0,
+     "f0_calls": 27431.0,
+     "full_clock": true
+    },
+    {
+     "kernel_ms": 0.8144,
+     "f0_cycles": 112247840.0,
+     "f0_calls": 27431.0,
+     "full_clock": true
+    },
+    {
+     "kernel_ms": 0.8314,
+     "f0_cycles": 112170653.0,
+     "f0_calls": 27431.0,
+     "full_clock": true
+    }
+   ],
+   "kernel_ms": 0.8314,
+   "f0_cycles": 112242704.0,
+   "f0_calls": 27431.0,
+   "cycles_per_call": 4091.8196201378005,
+   "cycles_per_query": 44897.0816
+  },
+  "5000": {
+   "runs": [
+    {
+     "kernel_ms": 0.8397,
+     "f0_cycles": 223785283.0,
+     "f0_calls": 54628.0,
+     "full_clock": true
+    },
+    {
+     "kernel_ms": 0.8315,
+     "f0_cycles": 223574426.0,
+     "f0_calls": 54628.0,
+     "full_clock": true
+    },
+    {
+     "kernel_ms": 0.8294,
+     "f0_cycles": 223608964.0,
+     "f0_calls": 54628.0,
+     "full_clock": true
+    }
+   ],
+   "kernel_ms": 0.8315,
+   "f0_cycles": 223608964.0,
+   "f0_calls": 54628.0,
+   "cycles_per_call": 4093.3031412462474,
+   "cycles_per_query": 44721.7928
+  },
+  "10000": {
+   "runs": [
+    {
+     "kernel_ms": 0.8407,
+     "f0_cycles": 446973748.0,
+     "f0_calls": 109360.0,
+     "full_clock": true
+    },
+    {
+     "kernel_ms": 0.837,
+     "f0_cycles": 447227336.0,
+     "f0_calls": 109360.0,
+     "full_clock": true
+    },
+    {
+     "kernel_ms": 0.8479,
+     "f0_cycles": 446909508.0,
+     "f0_calls": 109360.0,
+     "full_clock": true
+    }
+   ],
+   "kernel_ms": 0.8407,
+   "f0_cycles": 446973748.0,
+   "f0_calls": 109360.0,
+   "cycles_per_call": 4087.177651792246,
+   "cycles_per_query": 44697.3748
+  }
+ }
+}

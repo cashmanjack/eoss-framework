@@ -1,0 +1,62 @@
+{
+ "label": "DIAGNOSTIC (dry run dataset)",
+ "data": "u100000.csv",
+ "N": 100000,
+ "radius": 0.017089264143801325,
+ "rows": {
+  "32": {
+   "runs": [
+    {
+     "kernel_ms": 0.6822,
+     "f0_cycles": 1292604.0,
+     "f0_calls": 360.0,
+     "full_clock": true
+    },
+    {
+     "kernel_ms": 0.683,
+     "f0_cycles": 1290517.0,
+     "f0_calls": 360.0,
+     "full_clock": true
+    },
+    {
+     "kernel_ms": 0.6932,
+     "f0_cycles": 1290369.0,
+     "f0_calls": 360.0,
+     "full_clock": true
+    }
+   ],
+   "kernel_ms": 0.683,
+   "f0_cycles": 1290517.0,
+   "f0_calls": 360.0,
+   "cycles_per_call": 3584.7694444444446,
+   "cycles_per_query": 40328.65625
+  },
+  "128": {
+   "runs": [
+    {
+     "kernel_ms": 0.7752,
+     "f0_cycles": 5838175.0,
+     "f0_calls": 1400.0,
+     "full_clock": true
+    },
+    {
+     "kernel_ms": 0.7741,
+     "f0_cycles": 5855388.0,
+     "f0_calls": 1400.0,
+     "full_clock": true
+    },
+    {
+     "kernel_ms": 0.7741,
+     "f0_cycles": 5850420.0,
+     "f0_calls": 1400.0,
+     "full_clock": true
+    }
+   ],
+   "kernel_ms": 0.7741,
+   "f0_cycles": 5850420.0,
+   "f0_calls": 1400.0,
+   "cycles_per_call": 4178.871428571429,
+   "cycles_per_query": 45706.40625
+  }
+ }
+}
