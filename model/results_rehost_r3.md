@@ -1,0 +1,6 @@
+# Rehosting R3, first attempt (2026-11-24, triton, GPU 1): stopped at a mismatch
+Predictions: model/predictions_rehost_r3_r5.md (7bd8fed). Raw (private): notes/rehost/r3_*.
+Stage 0 (no TTU), fake candidates injected, 512 lanes, radii 0.1 to 0.8, five seeds: counts and neighbour ids equal the host's float32 expression, 0 mismatches.
+Stage 1 C1 (4,096 points, r 0.08, seed 7, one warp, 3 launches): status no error, 0 unfinished lanes. Ours against OptiX and CPU: 24 of 32 queries differ, OptiX against CPU 0. Neighbours 198 against 249 (ours subset in every lane). Sessions mean 14.375, max 23; OptiX candidates mean 17.69; sessions equal candidates in 4 lanes, otherwise fewer. Lane efficiency 0.625; loop 45,246 cycles mean (p50 42,771); session window 21,922 mean (about 48 percent of the loop). Launch 0.028 ms.
+Scored: 1 (exact) missed; 2 (sessions = candidates or +1) missed; 3 candidates mean 17.7 (predicted 10 to 17: just above), neighbours 7.8 (held); 4 lane efficiency held; 5 loop cycles just above the range, session share 48 percent (predicted at least 70): missed; 6 no fault or hang held.
+Open: why candidates are skipped. Not run: R3 C2 to C4, R4, R5, BITTU, the trace build (answer words per session).
