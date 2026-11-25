@@ -1,0 +1,93 @@
+{
+ "label": "DRY RUN",
+ "name": "u100000_v22",
+ "predictions": "primary_predictions_20261124T220112.json",
+ "measured": "primary_measured_20261124T220116.json",
+ "rows": [
+  {
+   "version": "PRIMARY",
+   "row": "RTNN K50",
+   "predicted": 0.266338,
+   "measured": 0.7864,
+   "ratio": 2.95264,
+   "ln_ratio": 1.0827,
+   "inside_2": false
+  },
+  {
+   "version": "SECONDARY (uncalibrated v1)",
+   "row": "RTNN K50",
+   "predicted": 0.191255,
+   "measured": 0.7864,
+   "ratio": 4.11179,
+   "ln_ratio": 1.41386,
+   "inside_2": false
+  },
+  {
+   "version": "PRIMARY",
+   "row": "TrueKNN k16",
+   "predicted": 1.53578,
+   "measured": 2.9604,
+   "ratio": 1.92762,
+   "ln_ratio": 0.656286,
+   "inside_2": true
+  },
+  {
+   "version": "PRIMARY",
+   "row": "Arkade",
+   "predicted": 0.291225,
+   "measured": 0.7721,
+   "ratio": 2.65121,
+   "ln_ratio": 0.975018,
+   "inside_2": false
+  },
+  {
+   "version": "RELATIVE",
+   "row": "R1 Arkade pinned over device",
+   "predicted": 5.53257,
+   "measured": 2.75327,
+   "ratio": 0.497648,
+   "ln_ratio": -0.697863,
+   "inside_2": false
+  },
+  {
+   "version": "RELATIVE",
+   "row": "R2 kNN register heap speedup",
+   "predicted": 4.02,
+   "measured": 3.6236,
+   "ratio": 0.901393,
+   "ln_ratio": -0.103814,
+   "inside_2": true
+  }
+ ],
+ "summary": {
+  "primary": {
+   "rows": 3,
+   "measured_rows": 3,
+   "missing": 0,
+   "inside_factor_2": 1,
+   "rms_ln_ratio": 0.922607,
+   "median_abs_ln_ratio": 0.975018,
+   "worst_ratio": 2.95264
+  },
+  "secondary": {
+   "rows": 1,
+   "measured_rows": 1,
+   "missing": 0,
+   "inside_factor_2": 0,
+   "rms_ln_ratio": 1.41386,
+   "median_abs_ln_ratio": 1.41386,
+   "worst_ratio": 4.11179
+  },
+  "relative": {
+   "rows": 2,
+   "measured_rows": 2,
+   "missing": 0,
+   "inside_factor_2": 1,
+   "rms_ln_ratio": 0.498894,
+   "median_abs_ln_ratio": 0.400838,
+   "worst_ratio": 2.00945
+  }
+ },
+ "pass_md_status": "UNSET: no verdict printed",
+ "all_runs_full_clock": true
+}
