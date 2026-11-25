@@ -16,7 +16,7 @@ def idle():
 
 def go(mode, work, scene, seed, part, rest, tmo=int(os.environ.get('T3_TMO', 900)), pre=()):
     idle(); t = time.time(); p = subprocess.run(list(pre) + ['timeout', '-k', '2', str(tmo), BIN, mode, PTXO, PTXN, work, scene, str(seed), part] + rest, env=ENV, capture_output=True, text=True)
-    print(mode, 'rc', p.returncode, '%.1fs' % (time.time() - t), '\n'.join(p.stdout.strip().splitlines()[-12:]), p.stderr[-600:], flush=True)
+    print(mode, 'rc', p.returncode, '%.1fs' % (time.time() - t), '\n'.join(p.stdout.strip().splitlines()[-12:]), p.stderr[-8000:], flush=True)
     if p.returncode: sys.exit('STOP')
 
 

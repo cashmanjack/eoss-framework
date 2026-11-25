@@ -1,6 +1,6 @@
 #pragma once
 #include <optix_types.h>
-#define KMAX 16
+#define KMAX 32
 struct Ray8 { float o[3], tmin, d[3], tmax; };
 struct RefOut { unsigned hit; float t; unsigned prim; float u, v; unsigned front, gas_index, pad; };
 struct Cur { float t; unsigned id; unsigned k; unsigned pad; };   // per ray cursor of the top level walk: entry parameter (pulled back origin) and id of the last treelet queued, visits so far
@@ -27,5 +27,6 @@ struct Params {
     unsigned long long *cyc;                     // 0 pop/probe, 1 load + treelet trace, 2 top level step, 3 requeue, 4 idle, 5 warps
     unsigned *cnt;                               // 0 chunks, 1 stolen chunks, 2 requeues (tail atomics), 3 lanes visited, 4 overflow, 5 spin timeouts, 6 max visits, 7 top level steps
     // replay (one level)
+    unsigned *qpub;                              // per treelet: entries published (stored); consumers claim only up to the published prefix
     const unsigned *lvl_idx; const Ray8 *lvl_ray; const unsigned *lvl_key; unsigned lvl_level; unsigned *lvl_head; const unsigned *lvl_end;
 };

@@ -12,12 +12,13 @@ extern "C" __constant__ Params params;
 #define HB(code) do { if (params.warp_sm && (lane == 0 || lane == 31)) { const unsigned o_ = wid * 8 + (lane ? 4u : 0u); *(volatile unsigned *)&params.warp_sm[o_] = iter; *(volatile unsigned *)&params.warp_sm[o_ + 1] = (code); } } while (0)
 struct Top { unsigned found; unsigned id; float tp; };
 // next treelet along the ray after the cursor (tprev, idprev) in order of entry, up to distance tbound. Origin pulled back by params.pull so that the entry face of a box that contains the origin is a front face hit.
-static __device__ __forceinline__ Top top_next(const Ray8 &r, float tprev, unsigned idprev, float tbound)
+static __device__ __forceinline__ Top top_next(const Ray8 &r, float tprev, unsigned i0, unsigned i1, unsigned i2, float tbound)
 {
-    const float s = params.pull;
-    unsigned p0 = 0, p1 = 0, p2 = 0, p3 = __float_as_uint(tprev), p4 = idprev;
+    // i0, i1, i2: the last three treelets visited (16 bit ids, 0xffff none). Boxes that enter the ray within a few ulps of the cursor are found again (tmin is lowered by delta) and the visited ones are dropped by id in the any hit program, so an exact or ulp level tie never loses a box.
+    const float s = params.pull, delta = 1e-6f * tprev;
+    unsigned p0 = 0, p1 = 0, p2 = 0, p3 = __float_as_uint(tprev), p4 = i0 & 0xffffu, p5 = i1 & 0xffffu, p6 = i2 & 0xffffu;
     optixTrace(params.ias_shell, make_float3(r.o[0] - s * r.d[0], r.o[1] - s * r.d[1], r.o[2] - s * r.d[2]), make_float3(r.d[0], r.d[1], r.d[2]),
-               tprev, s + tbound, 0.f, OptixVisibilityMask(255), OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 1, 1, 0, p0, p1, p2, p3, p4);
+               fmaxf(tprev - delta, 0.f), s + tbound, 0.f, OptixVisibilityMask(255), OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 1, 1, 0, p0, p1, p2, p3, p4, p5, p6);
     Top o; o.found = p0; o.tp = __uint_as_float(p1); o.id = p2; return o;
 }
 
@@ -32,8 +33,8 @@ extern "C" __global__ void __raygen__first()
     const unsigned i = optixGetLaunchIndex().x;
     if (i >= *params.n_dev) return;
     const Ray8 r = params.rays[i];
-    const Top tr = top_next(r, 0.f, NONE, r.tmax);
-    Cur c; c.t = tr.tp; c.id = tr.found ? tr.id : params.C; c.k = 0; c.pad = 0; params.cur[i] = c;
+    const Top tr = top_next(r, 0.f, 0xffffu, 0xffffu, 0xffffu, r.tmax);
+    Cur c; c.t = tr.tp; c.id = tr.found ? tr.id : params.C; c.k = 0; c.pad = 0xffffffffu; params.cur[i] = c;
     RefOut o; o.hit = 0; o.t = r.tmax; o.prim = 0; o.u = 0.f; o.v = 0.f; o.front = 0; o.gas_index = 0; o.pad = 0; params.out[i] = o;
     atomicAdd(&params.hist[c.id], 1u);
 }
@@ -56,6 +57,14 @@ extern "C" __global__ void __raygen__iasnat()
     params.out[i] = o;
 }
 
+// number of entries of queue t that are safe to claim: all reserved slots when every reserved slot is published (quiescent), else only the first level entries (written before the kernel)
+static __device__ __forceinline__ unsigned qlimit(unsigned t)
+{
+    const unsigned t1 = *(volatile unsigned *)&params.qtail[t], dn = *(volatile unsigned *)&params.qpub[t], t2 = *(volatile unsigned *)&params.qtail[t];
+    const unsigned lim = (dn == t1 && t1 == t2) ? t1 : min(params.hist[t], t1);
+    return min(lim, params.qcap[t]);
+}
+
 // first treelet in the TPC's range at or after its pointer that has unclaimed entries (uniform inside the convergence group am), NONE if the range is empty
 static __device__ __forceinline__ unsigned probe(unsigned q, unsigned am, unsigned rank, unsigned gsize)
 {
@@ -66,7 +75,7 @@ static __device__ __forceinline__ unsigned probe(unsigned q, unsigned am, unsign
     for (unsigned off = 0; off < len; off += gsize) {
         const unsigned k = off + rank; const bool inr = k < len;
         unsigned kk = sh + (inr ? k : 0u); if (kk >= len) kk -= len; const unsigned t = lo + kk;
-        const unsigned h = *(volatile unsigned *)&params.qhead[t]; const unsigned tl = min(*(volatile unsigned *)&params.qtail[t], params.qcap[t]); const bool ne = inr && h < tl;
+        const unsigned h = *(volatile unsigned *)&params.qhead[t]; const unsigned tl = qlimit(t); const bool ne = inr && h < tl;
         const unsigned m = __ballot_sync(am, ne);
         if (m) { const unsigned src = __ffs(m) - 1; return __shfl_sync(am, t, src); }
     }
@@ -95,7 +104,7 @@ extern "C" __global__ void __raygen__fused()
         unsigned s0 = 0, n = 0; HB(2);
         if (tsel != NONE) {   // branch free claim: lane 0's view and lane 0's single CAS, broadcast (all control flow warp uniform)
             for (int tr = 0; tr < 8; ++tr) {
-                const unsigned h = *(volatile unsigned *)&params.qhead[tsel], tl = min(*(volatile unsigned *)&params.qtail[tsel], params.qcap[tsel]);
+                const unsigned h = *(volatile unsigned *)&params.qhead[tsel], tl = qlimit(tsel);
                 const unsigned hh = __shfl_sync(am, h, leader), tt = __shfl_sync(am, tl, leader);
                 if (hh >= tt) break;
                 const unsigned m = min(gsize, tt - hh);
@@ -105,55 +114,60 @@ extern "C" __global__ void __raygen__fused()
             }
             if (lane == leader && n != 0) *(volatile unsigned *)&params.tcur[qsel] = tsel;
         }
-        if (n == 0) {   // nothing claimed: finished, or idle
+        if (n == 0) {   // nothing claimed: finished, or idle. Idle warps still run the straight line body below with dummy rays so that all lanes of a warp keep arriving at the same trace call sites.
             unsigned o = *(volatile unsigned *)params.outstanding; o = __shfl_sync(am, o, leader);
             if (o == 0) break;
-            HB(7); steal += params.steal_tries; __nanosleep(256);
-            c4 += clock64() - t0; continue;
+            steal += params.steal_tries; __nanosleep(256);
+            c4 += clock64() - t0;
         }
-        if (qsel != q0 && lane == leader) ++nsteal;
-        if (lane == leader) ++nchunk;
+        if (n && qsel != q0 && lane == leader) ++nsteal;
+        if (n && lane == leader) ++nchunk;
         // Everything below is straight line code for all 32 lanes: inactive lanes trace a dummy zero length ray, the spin is a warp uniform loop. (A warp whose lanes drift apart deadlocks inside optixTrace: seen with lane 31 idling while lane 0 sat in a trace.)
+        const unsigned tsel0 = tsel == NONE ? 0u : tsel;   // idle: a valid treelet index for the dummy trace
         const bool valid = rank < n; unsigned x = 0;
-        volatile unsigned *pe = params.qbuf + (size_t)params.qbase[tsel] + s0 + (valid ? rank : 0u);
+        volatile unsigned *pe = params.qbuf + (size_t)params.qbase[tsel0] + s0 + (valid ? rank : 0u);
         for (unsigned sp = 0;; ++sp) {
             x = valid ? *pe : 0u; const bool wait = valid && x == NONE;
             if (!__any_sync(__activemask(), wait)) break;
             if (sp > 4096) { if (wait) atomicAdd(&params.cnt[5], 1u); break; }
             __nanosleep(32);
         }
-        const bool ok = valid && x != NONE; bool fin = valid && x == NONE;   // a timed out slot ends that ray (counted, the run is then invalid)
-        const unsigned idx = ok ? x : 0u; HB(3);
+        const bool ok0 = valid && x != NONE; bool fin = valid && x == NONE;   // a timed out slot ends that ray (counted, the run is then invalid)
+        const unsigned idx0 = ok0 ? (x & 0x7fffffu) : 0u; const unsigned ekk = x >> 23; HB(3);
         const unsigned long long t1 = clock64(); c0 += t1 - t0;
+        const unsigned idx = idx0;
         const Ray8 r = params.rays[idx];
         const uint4 cv = __ldcg((const uint4 *)&params.cur[idx]); Cur c; c.t = __uint_as_float(cv.x); c.id = cv.y; c.k = cv.z; c.pad = cv.w;
+        const bool ok = ok0 && (c.k & 63u) == ekk;   // an entry whose visit number does not match the ray's record is stale (counted)
+        if (ok0 && !ok) atomicAdd(&params.cyc[7], 1ull);
+        if (ok && params.tl) atomicAdd((unsigned *)&params.tl[idx], 1u);   // debug: times this ray was processed
         const unsigned hit0 = __ldcg(&params.out[idx].hit); const float tt0 = __ldcg(&params.out[idx].t);
         float tbest = hit0 ? tt0 : r.tmax; nvis += ok ? 1u : 0u;
         unsigned h = 0, tb = 0, pr = 0, uu = 0, vv = 0, fr = 0; HB(4);
-        trace_tl(tsel, r, ok ? tbest : 0.f, h, tb, pr, uu, vv, fr);
+        trace_tl(tsel0, r, ok ? tbest : 0.f, h, tb, pr, uu, vv, fr);
         if (ok && h) {
             atomicAdd(&params.cyc[6], 1ull);
             tbest = __uint_as_float(tb);
-            const unsigned gp = params.tri_sorted[params.toff[tsel] + pr];
+            const unsigned gp = params.tri_sorted[params.toff[tsel0] + pr];
             __stcg((uint4 *)&params.out[idx], make_uint4(1u, tb, gp, uu));
-            __stcg(((uint4 *)&params.out[idx]) + 1, make_uint4(vv, fr, tsel, 0u));
+            __stcg(((uint4 *)&params.out[idx]) + 1, make_uint4(vv, fr, tsel0, 0u));
         }
-        if (ok && !h && r.tmax == 0.f) atomicAdd(&params.cyc[7], 1ull);
+        
         const unsigned long long t2 = clock64(); c1 += t2 - t1;
-        if (ok && params.record && c.k < KMAX) params.vis[(size_t)idx * KMAX + c.k] = (unsigned short)tsel;
+        if (ok && params.record && c.k < KMAX) params.vis[(size_t)idx * KMAX + c.k] = (unsigned short)tsel0;
         nstep += ok ? 1u : 0u; HB(5);
-        const Top nx = top_next(r, c.t, tsel, ok ? tbest : 0.f);
+        const Top nx = top_next(r, c.t, tsel0, c.pad & 0xffffu, c.pad >> 16, ok ? tbest : 0.f);
         const unsigned long long t3 = clock64(); c2 += t3 - t2;
         HB(6);
         if (ok) {
             c.k++; if (c.k > kmax) kmax = c.k;
             bool go = nx.found != 0; if (go && c.k >= 64) { go = false; ++nover; }   // safety: a ray never visits more than 64 treelets
-            if (go) { c.t = nx.tp; c.id = nx.id; }
+            if (go) { c.pad = (tsel0 & 0xffffu) | ((c.pad & 0xffffu) << 16); c.t = nx.tp; c.id = nx.id; }
             __stcg((uint4 *)&params.cur[idx], make_uint4(__float_as_uint(c.t), c.id, c.k, c.pad));
             if (go) {
                 __threadfence();
                 const unsigned slot = atomicAdd(&params.qtail[nx.id], 1u); ++nreq;
-                if (slot < params.qcap[nx.id]) *(volatile unsigned *)&params.qbuf[(size_t)params.qbase[nx.id] + slot] = idx;
+                if (slot < params.qcap[nx.id]) { *(volatile unsigned *)&params.qbuf[(size_t)params.qbase[nx.id] + slot] = idx | ((c.k & 63u) << 23); __threadfence(); atomicAdd(&params.qpub[nx.id], 1u); }
                 else { ++nover; fin = true; }
             } else fin = true;
         }
@@ -211,8 +225,7 @@ extern "C" __global__ void __anyhit__shell()
 {
     const float t = optixGetRayTmax();
     const unsigned id = optixGetInstanceId();
-    const float tp = __uint_as_float(optixGetPayload_3()); const unsigned ip = optixGetPayload_4();
-    if (t == tp && (int)id <= (int)ip) { optixIgnoreIntersection(); return; }
+    if (id == optixGetPayload_4() || id == optixGetPayload_5() || id == optixGetPayload_6()) { optixIgnoreIntersection(); return; }   // already visited
     const float s = params.pull;
     if (t < s) {   // entry face behind the real origin: counts only if the box contains the origin
         const float3 o = optixGetWorldRayOrigin(), d = optixGetWorldRayDirection();
@@ -230,7 +243,8 @@ extern "C" __global__ void __raygen__shelltest()   // one thread: out[0].hit/t/p
 {
     if (optixGetLaunchIndex().x != 0) return;
     const Ray8 r = params.rays[0];
-    const Top t = top_next(r, 0.f, NONE, r.tmax);
+    const RefOut in0 = params.out[0]; const bool cont = in0.gas_index == 1;
+    const Top t = top_next(r, cont ? in0.t : 0.f, cont ? in0.prim : 0xffffu, cont ? in0.front : 0xffffu, cont ? in0.gas_index >> 1 : 0xffffu, r.tmax);
     RefOut o; o.hit = t.found; o.t = t.tp; o.prim = t.id; o.u = 0; o.v = 0; o.front = 0; o.gas_index = 0; o.pad = 0; params.out[0] = o;
 }
 
