@@ -1,0 +1,32 @@
+{
+ "label": "DRY RUN",
+ "name": "u100000",
+ "ts": "20261124T210600",
+ "data": "u100000.csv",
+ "data_sha256_12": "847eacd4769b",
+ "N": 100000,
+ "ks": [
+  50
+ ],
+ "sm": 128,
+ "clk": 2500000000.0,
+ "model": "model v1 (model/FROZEN.md), RTNN search launch, cb - cbref = 0",
+ "rule": "model/blind/RULE.md",
+ "rule_sha12": "a07f5625405f",
+ "frozen_files_checked": 8,
+ "repo_head": "33e2876",
+ "tool_sha12": "46b2e53fd0c1",
+ "measured": "none: no GPU run of any program on this dataset before this file is committed",
+ "pred": {
+  "50": {
+   "radius": 0.0640416,
+   "thr_ms": 0.191255,
+   "chain_ms": 0.0328457,
+   "ms": 0.191255,
+   "mean_q": 102.452,
+   "max_q": 142.807,
+   "mean_C": 191.91,
+   "mean_S": 103.415
+  }
+ }
+}
