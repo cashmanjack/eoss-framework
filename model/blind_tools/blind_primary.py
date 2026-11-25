@@ -18,6 +18,10 @@ HOME = os.path.expanduser('~'); TP = HOME + '/thirdparty'
 CBREF = 1.0110154; CLK = bc.CLK                  # FROZEN.md
 SEEDS = dict(rtnn_sample=11, tk_sample=21, ark_queries=7, radius=5)   # RULE.md
 LTK, LAR, FLOAT_FACTOR, PIN_MS_PER_MB, REG_SPEEDUP = 5800., 21000., 0.09, 0.33, 4.02   # FROZEN.md
+# R3 (RTNN unsorted over sorted launch time), FROZEN.md: F123 reuse feature share model parameters (notes/q11/reuse_feature.json share_k1), reference scale KK
+# (82 / (total of notes/q5/reuse/reuse_1e5_random.txt / (142 x 2 x 39 x 32))), refit [c0, cq, m] of F127 (nodes variant, fit on the 100,000 point configurations, notes/q12/rtnn_refit.txt)
+REUSE_PAR = [0.9217759653897342, 1.2142384778735833, 474.7808440960617, 2.096519299286437, 1.0]; REUSE_KK = 7.4551018979027885; REORD_FIT = [114.09, 5.52, 1.43]
+RP = TP + '/blind/rp'; DUMPS = TP + '/blind/dumps'
 
 def args():
     ap = argparse.ArgumentParser(); ap.add_argument('step', choices=['calibrate', 'predict', 'measure', 'score']); ap.add_argument('name')
@@ -59,6 +63,7 @@ def tk_rounds(pts, r0, k, maxr=60):
         r *= 2
     return out
 def six(x): return float('%.6g' % x) if isinstance(x, float) else x
+def nine(x): return float('%.9g' % x)            # radii are used at 9 significant digits everywhere (calibration, dump, prediction, measurement)
 def write(path, text):
     with open(path, 'x') as f: f.write(text)
 def wjson(path, doc):
@@ -103,14 +108,69 @@ def ark_parse(txt):
     return dict(kernel_ms=float(m.group(1)) if m else None, f0_cycles=float(c.group(1)) if c else None, f0_calls=float(c.group(2)) if c else None)
 def knn_parse(txt): m = re.search(r'Total Search Time: (\d+)ms', txt); return dict(total_search_ms=float(m.group(1)) if m else None)
 
+
+# ---------------------------------------------------------------- R3 reordering rows: BVH dump (no timing), CPU replay, frozen reuse model
+SORT_FLAGS = {'sorted': [], 'unsorted': ['-qs', '0', '-ps', '0']}
+def dump_dir(K, cfg): return '%s/%s%s_K%d_%s' % (DUMPS, 'dry_run_' if A.dry_run else '', A.name, K, cfg)
+def dump_run(K, r, cfg, N):
+    """Build the BVH with RTNN and dump it (RTNN_DUMP: gas, points, radius, the queries in launch order). The process is killed through its own handle as soon as the query file is complete;
+    stdout and stderr are discarded (no timing of any kind is taken or kept). Dump files are private (never in git)."""
+    exe = RT[K]; d = dump_dir(K, cfg)
+    if os.path.exists(d): raise SystemExit('dump directory exists: ' + d)
+    os.makedirs(d); B.idle_check()
+    p = subprocess.Popen([exe, '-f', A.data, '-r', repr(r), '-k', str(K), '-p', '0', '-s', '0', '-m', '0', '-d', '0'] + SORT_FLAGS[cfg], cwd=os.path.dirname(exe),
+                         env=B.env(extra={'RTNN_DUMP': d, 'RTNN_DRAM_GB': '11.5958'}), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    f = d + '/rays0.bin'; t0 = time.time(); ok = False
+    while time.time() - t0 < 600:
+        if os.path.exists(f) and os.path.getsize(f) >= N * 32: ok = True; break
+        if p.poll() is not None: ok = os.path.exists(f) and os.path.getsize(f) >= N * 32; break
+        time.sleep(0.02)
+    p.kill(); p.wait()
+    files = {n: dict(bytes=os.path.getsize(os.path.join(d, n)), sha256_12=bc.sha12(os.path.join(d, n))) for n in sorted(os.listdir(d))}
+    return dict(dir=d.replace(HOME, '~'), flags=SORT_FLAGS[cfg], ok=ok, files=files, timing_kept=False)
+def dump_all(pts, N, cal):
+    out = {}
+    for K in KS:
+        c = cal.get(str(K), {})
+        if K not in RT or 'radius' not in c: out[str(K)] = dict(missing='no build or radius for K %d' % K); continue
+        out[str(K)] = {cfg: dump_run(K, c['radius'], cfg, N) for cfg in ('sorted', 'unsorted')}
+        print('dump K %d: %s' % (K, {cfg: v['ok'] for cfg, v in out[str(K)].items()}), flush=True)
+    return out
+def share(h, C, g):
+    tot, cold, over, hh, _ = h; d = np.arange(len(hh)) + 0.5
+    return float((hh / (1 + (d / C) ** g)).sum() / tot)
+def rhist(path, variant):
+    raw = None
+    for l in open(path):
+        q = l.split()
+        if q[0] == 'sm' and q[1] == variant and q[2] == 'raw': raw = int(q[3])
+        if q[0] == 'sm' and q[1] == variant and q[2] == 'dedupe': return int(q[3]), int(q[4]), int(q[5]), np.array(q[6:], np.float64), raw
+def reorder_features(K, cfg, nsm):
+    d = dump_dir(K, cfg).replace('~', HOME); P = np.fromfile(d + '/points.bin', np.float32).reshape(-1, 3); r = float(open(d + '/aabb_radius0.txt').read().split()[0])
+    np.stack([P - np.float32(r), P + np.float32(r), P - np.float32(r)], 1).astype(np.float32).tofile(d + '/prep.tris')
+    subprocess.run([sys.executable, os.path.join(bc.REPO, 'model', 'replay', 'make_table.py'), d + '/gas0.bin', d + '/prep.tris', d + '/prep.table'], env=dict(os.environ, ASSIGN=RP + '/assign'), check=True, capture_output=True)
+    nr = os.path.getsize(d + '/rays0.bin') // 32
+    subprocess.run([RP + '/replay_aabb', d + '/prep.table', d + '/rays0.bin', str(nr), '0', d + '/rep.bin'], check=True, capture_output=True)
+    np.arange(nr, dtype=np.int32).tofile(d + '/order.bin'); nw = nr // 32; J, WARM = 52, 13; onewin = nw < 2 * nsm * J
+    env = dict(os.environ, NSM=str(nsm)); 
+    if onewin: env['ONEWIN'] = '1'
+    subprocess.run([RP + '/reuse_aabb', d + '/prep.table', d + '/rays0.bin', str(nr), d + '/order.bin', d + '/reuse.txt'], check=True, env=env, capture_output=True)
+    rep = np.fromfile(d + '/rep.bin', np.int32).reshape(-1, 8); h = rhist(d + '/reuse.txt', 'nodes')
+    Ps = [0] if onewin else [nw // 3, 2 * nw // 3]; rays = 32 * sum(1 for P_ in Ps for s_ in range(nsm) for j in range(WARM, J) if (P_ + s_ + nsm * j + 1) * 32 <= nr)
+    S1 = REUSE_KK * h[0] / rays; miss = REUSE_PAR[1] * S1 * (1 - share(h, REUSE_PAR[2], REUSE_PAR[3])) * (h[4] / h[0]) ** (-REUSE_PAR[4]); q = float(rep[:, 2].mean() + 1)
+    cyc = REORD_FIT[0] + REORD_FIT[1] * q + REORD_FIT[2] * miss
+    return dict(q=six(q), miss_cycles=six(float(miss)), cycles_per_query=six(float(cyc)), S1=six(float(S1)), measured_rays=rays, one_window=onewin, nodes=six(float(rep[:, 0].mean())), leaf_slots=six(float(rep[:, 1].mean())),
+                exact_candidates=six(float(rep[:, 7].mean())), reuse_total=h[0], reuse_cold=h[1])
+
 # ---------------------------------------------------------------- calibrate
 def cal_rtnn(pts, N, doc):
     out = {}; tree = cKDTree(pts)
     for K in KS:
         if K not in RT or K not in RTS: out[str(K)] = dict(missing='no real or stub build for K %d' % K); continue
-        r = radius99(tree, pts, K); nq = min(N, max(int(round(0.02 * N)), 50000)); idx = np.sort(np.random.default_rng(SEEDS['rtnn_sample']).choice(N, nq, replace=False))   # RULE.md 2.2
+        r = nine(radius99(tree, pts, K)); nq = min(N, max(int(round(0.02 * N)), 50000)); idx = np.sort(np.random.default_rng(SEEDS['rtnn_sample']).choice(N, nq, replace=False))   # RULE.md 2.2
         lines = [l for l in open(A.data).read().splitlines() if l.strip()]; qf = '%s_rtnn_q%d.csv' % (SCR, K); write(qf, '\n'.join(lines[i] for i in idx) + '\n')
-        cube = cube_len(tree, pts[idx], r); Cm = float(cube.mean()); res = {}
+        cube = cube_len(tree, pts[idx], r); Cm = float(cube.mean()); sph = tree.query_ball_point(pts[idx], r, return_length=True, workers=-1).astype(float)
+        Ce = np.where(sph > K, K * (cube + 1) / (sph + 1), cube); Cem = float(Ce.mean()); res = {}      # called candidates (F116 rule), FROZEN.md revision 1 of variant S
         for kind, exe in (('real', RT[K]), ('stub', RTS[K])):
             runs = []
             for i in range(3):
@@ -120,8 +180,8 @@ def cal_rtnn(pts, N, doc):
             res[kind] = dict(runs=runs, median_ms=med([x['search_ms'] for x in runs if x['rc'] == 0]), full_clock=full_clock(runs))
         os.remove(qf); Tr, Ts = res['real']['median_ms'], res['stub']['median_ms']
         if Tr is None or Ts is None: out[str(K)] = dict(failed=True, radius=r, runs=res); continue
-        sm = doc['sm']; raw = (Tr - Ts) * 1e-3 * sm * CLK / (nq * 1.10 * Cm); cbS = max(0.0, raw)
-        out[str(K)] = dict(radius=six(r), nq=nq, mean_cube_sub=six(Cm), T_real_ms=Tr, T_stub_ms=Ts, cb_S_raw=six(raw), cb_S=six(cbS), floor_binds=bool(raw < 0), d_S=six(max(cbS - CBREF, -4.9)), runs=res)
+        sm = doc['sm']; raw = (Tr - Ts) * 1e-3 * sm * CLK / (nq * 1.10 * Cem); cbS = max(0.0, raw)
+        out[str(K)] = dict(radius=r, nq=nq, mean_cube_sub=six(Cm), mean_called_sub=six(Cem), denominator='1.10 x mean called candidates (revision 1)', T_real_ms=Tr, T_stub_ms=Ts, cb_S_raw=six(raw), cb_S=six(cbS), floor_binds=bool(raw < 0), d_S=six(max(cbS - CBREF, -4.9)), runs=res)
         print('RTNN K %d: sample %d queries real %.4f stub %.4f ms -> cbS %.3f d_S %.3f' % (K, nq, Tr, Ts, cbS, out[str(K)]['d_S']), flush=True)
     return out
 def cal_tk(pts, N, doc):
@@ -162,7 +222,7 @@ def do_calibrate():
     need_data(); bc.verify_frozen(); os.makedirs(OUT, exist_ok=True)
     if any(f.startswith('calibration_') for f in os.listdir(OUT)): raise SystemExit('%s already has a calibration: the sample procedures run once per dataset (RULE.md)' % OUT)
     warm_ready(); pts = load(A.data); N = len(pts); doc = common_doc('calibrate'); doc.update(N=N, ks=KS, tk_k=A.tk_k, mappings=MAPS)
-    if 'rtnn' in MAPS: doc['rtnn'] = cal_rtnn(pts[:, :3], N, doc)
+    if 'rtnn' in MAPS: doc['rtnn'] = cal_rtnn(pts[:, :3], N, doc); doc['rtnn_dumps'] = dump_all(pts[:, :3], N, doc['rtnn'])
     if 'trueknn' in MAPS: doc['trueknn'] = cal_tk(pts[:, :3], N, doc)
     if 'arkade' in MAPS: doc['arkade'] = cal_ark(pts, N, doc)
     cj = os.path.join(OUT, 'calibration_%s.json' % TS); wjson(cj, doc); print('COMMIT (calibration):', commit([cj], 'sample calibration for %s (RULE.md procedures, no full run)' % A.name), flush=True)
@@ -173,9 +233,14 @@ def pred_rtnn(pts, N, cal, sm):
     for K in KS:
         c = cal['rtnn'].get(str(K), {})
         if c.get('failed') or 'd_S' not in c: out[str(K)] = dict(missing='no calibration for K %d' % K); continue
-        r = radius99(tree, pts, K); C, S = m1.replay_counts(pts, r, tree)
+        r = nine(radius99(tree, pts, K)); C, S = m1.replay_counts(pts, r, tree)
         p = m1.predict(N, K, C, S, c['d_S']); u = m1.predict(N, K, C, S, 0.0)
-        out[str(K)] = dict(radius=six(r), d_S=c['d_S'], primary_ms=six(p['ms']), thr_ms=six(p['thr_ms']), chain_ms=six(p['chain_ms']), mean_q=six(p['mean_q']), secondary_uncalibrated_ms=six(u['ms']))
+        out[str(K)] = dict(radius=r, d_S=c['d_S'], primary_ms=six(p['ms']), thr_ms=six(p['thr_ms']), chain_ms=six(p['chain_ms']), mean_q=six(p['mean_q']), secondary_uncalibrated_ms=six(u['ms']))
+        dm = cal.get('rtnn_dumps', {}).get(str(K), {})
+        if dm.get('sorted', {}).get('ok') and dm.get('unsorted', {}).get('ok'):
+            fs, fu = reorder_features(K, 'sorted', sm), reorder_features(K, 'unsorted', sm)
+            out[str(K)]['R3_unsorted_over_sorted'] = six(fu['cycles_per_query'] / fs['cycles_per_query']); out[str(K)]['R3_features'] = dict(sorted=fs, unsorted=fu)
+        else: out[str(K)]['R3_missing'] = 'no complete dumps'
     return out
 def pred_tk(pts, N, cal, sm):
     c = cal['trueknn']
@@ -202,7 +267,7 @@ def do_predict():
     if 'rtnn' in MAPS: doc['rtnn'] = pred_rtnn(pts[:, :3], N, cal, sm)
     if 'trueknn' in MAPS: doc['trueknn'] = pred_tk(pts[:, :3], N, cal, sm)
     if 'arkade' in MAPS: doc['arkade'] = pred_ark(pts, N, cal, sm)
-    doc['relative'] = dict(R2_kNN_register_heap_speedup=REG_SPEEDUP, R1_pinned_over_device=doc.get('arkade', {}).get('R1_pinned_over_device'))
+    doc['relative'] = dict(R2_kNN_register_heap_speedup=REG_SPEEDUP, R1_pinned_over_device=doc.get('arkade', {}).get('R1_pinned_over_device'), R3_rtnn_unsorted_over_sorted={K: v.get('R3_unsorted_over_sorted') for K, v in doc.get('rtnn', {}).items()})
     pj = os.path.join(OUT, 'primary_predictions_%s.json' % TS); pm = os.path.join(OUT, 'primary_predictions_%s.md' % TS); wjson(pj, doc)
     L = ['# %s: PRIMARY (calibrated v1-S) predictions for %s, %s, before any full run\n' % (LABEL, A.name, TS)]
     if A.dry_run: L.append('**DRY RUN: the dataset was measured before. Tests the tools and procedures, not the model. Not a blind result.**\n')
@@ -210,7 +275,7 @@ def do_predict():
     for K, v in doc.get('rtnn', {}).items(): L.append('- RTNN K %s: primary %s ms (d_S %s, radius %s); secondary uncalibrated %s ms' % (K, v.get('primary_ms'), v.get('d_S'), v.get('radius'), v.get('secondary_uncalibrated_ms')) if 'primary_ms' in v else '- RTNN K %s: missing (%s)' % (K, v.get('missing')))
     if 'trueknn' in doc: L.append('- TrueKNN k %s: primary %s ms over %d rounds' % (doc['trueknn'].get('k'), doc['trueknn'].get('primary_ms'), len(doc['trueknn'].get('rounds', []))))
     if 'arkade' in doc: L.append('- Arkade: primary %s ms (A %s, B %s), radius %s' % (doc['arkade'].get('primary_ms'), doc['arkade'].get('A_ms'), doc['arkade'].get('B_ms'), doc['arkade'].get('radius')))
-    L.append('- Relative R1 (Arkade pinned over device kernel time): %s; R2 (kNN register heap over original): %s' % (doc['relative']['R1_pinned_over_device'], REG_SPEEDUP))
+    L.append('- Relative R1 (Arkade pinned over device kernel time): %s; R2 (kNN register heap over original): %s; R3 (RTNN unsorted over sorted kernel time) by K: %s' % (doc['relative']['R1_pinned_over_device'], REG_SPEEDUP, doc['relative']['R3_rtnn_unsorted_over_sorted']))
     write(pm, '\n'.join(L) + '\n'); print('\n'.join(L)); print('COMMIT (predictions):', commit([pj, pm], 'primary predictions for %s (calibrated v1-S, before any full run)' % A.name), flush=True)
 
 # ---------------------------------------------------------------- measure (full runs)
@@ -222,9 +287,15 @@ def meas_rtnn(pred):
         runs = []
         for i in range(3):
             x = run([RT[K], '-f', A.data, '-r', repr(p['radius']), '-k', str(K), '-p', '0', '-s', '0', '-m', '0', '-d', '0'], os.path.dirname(RT[K]), {'RTNN_DRAM_GB': '11.5958'}, 900)
-            txt = strip(x); x['search_ms'] = t_rtnn(txt, 'search compute'); runs.append(x)
+            txt = strip(x); x['search_ms'] = t_rtnn(txt, 'search compute'); m_ = re.search(r'KERNEL queries \d+ ms ([0-9.]+)', txt); x['kernel_ms'] = float(m_.group(1)) if m_ else None; runs.append(x)
             if x['rc'] != 0 or x['search_ms'] is None: break
-        out[str(K)] = dict(runs=runs, median_ms=med([x['search_ms'] for x in runs if x['rc'] == 0]), full_clock=full_clock(runs))
+        uns = []
+        for i in range(3):
+            x = run([RT[K], '-f', A.data, '-r', repr(p['radius']), '-k', str(K), '-p', '0', '-s', '0', '-m', '0', '-d', '0', '-qs', '0', '-ps', '0'], os.path.dirname(RT[K]), {'RTNN_DRAM_GB': '11.5958'}, 900)
+            txt = strip(x); x['search_ms'] = t_rtnn(txt, 'search compute'); m_ = re.search(r'KERNEL queries \d+ ms ([0-9.]+)', txt); x['kernel_ms'] = float(m_.group(1)) if m_ else None; uns.append(x)
+            if x['rc'] != 0 or x['kernel_ms'] is None: break
+        out[str(K)] = dict(runs=runs, median_ms=med([x['search_ms'] for x in runs if x['rc'] == 0]), full_clock=full_clock(runs + uns), kernel_sorted_ms=med([x['kernel_ms'] for x in runs if x['rc'] == 0]),
+                           unsorted_runs=uns, kernel_unsorted_ms=med([x['kernel_ms'] for x in uns if x['rc'] == 0]))
     return out
 def meas_tk(pred, N):
     k = pred['trueknn']['k']; r0 = json.load(open(latest('calibration_')))['trueknn']['r0']; runs = []
@@ -293,6 +364,10 @@ def do_score():
     rel = []
     if 'arkade' in P and P['arkade'].get('R1_pinned_over_device') and M.get('arkade'):
         d, p = M['arkade']['device']['median_ms'], M['arkade']['pinned']['median_ms']; rel.append(row('RELATIVE', 'R1 Arkade pinned over device', P['arkade']['R1_pinned_over_device'], p / d if d and p else None))
+    for K, v in P.get('rtnn', {}).items():
+        if v.get('R3_unsorted_over_sorted'):
+            m_ = M.get('rtnn', {}).get(K, {}); us, so = m_.get('kernel_unsorted_ms'), m_.get('kernel_sorted_ms')
+            rel.append(row('RELATIVE', 'R3 RTNN K%s unsorted over sorted kernel time' % K, v['R3_unsorted_over_sorted'], us / so if us and so else None))
     o, g = M['knn']['original']['median_ms'], M['knn']['register_heap']['median_ms']; rel.append(row('RELATIVE', 'R2 kNN register heap speedup', REG_SPEEDUP, o / g if o and g else None))
     prim = [r for r in rows if r['version'] == 'PRIMARY']; sec = [r for r in rows if r['version'].startswith('SECONDARY')]
     ps = open(os.path.join(bc.REPO, 'model', 'blind', 'PASS.md')).read(); passset = 'STATUS: SET' in ps

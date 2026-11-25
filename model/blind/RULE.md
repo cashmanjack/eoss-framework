@@ -14,11 +14,13 @@ Allowed before the predictions are committed:
 1. Anything computed on the CPU from the dataset file (counts, radii, replay).
 2. The sample runs of the three procedures, exactly as written, and the Arkade reference launch (a known input, not new data).
 3. The GPU's SM count from its specification (table in `model/FROZEN.md`).
+4. Building the BVH of RTNN on the dataset and dumping it (RTNN_DUMP: the GAS, the points, the radius and the queries in launch order) in the sorted and in the unsorted configuration, **with no timing** (revision 2.3): the process is
+   killed through its own handle as soon as the query file is complete, its output is discarded and never parsed or stored, and the dump files stay private (never in git). The dump is the input of the CPU replay of row R3.
 
 Not allowed, in any form, before the predictions are committed:
 - a full run (all queries or all points) of RTNN, TrueKNN, Arkade, kNN or any other program on the dataset, in any configuration, including the relative rows;
 - any other sample (size, seed, fraction, subset, other radius or K), a second sample run chosen after seeing the first, or a change of a procedure after its first use;
-- any ncu, counter, probe reading or timing taken on the dataset other than the output of the procedures;
+- any ncu, counter, probe reading or timing taken on the dataset other than the output of the procedures (the dump of item 4 keeps no timing);
 - a constant adjusted after seeing a measurement.
 A procedure run that fails (crash, timeout) is reported and repeated identically (same seed and command); if it fails again that mapping is a missing row for that dataset.
 After the full measurement a fitted or recalibrated variant may be computed, labelled POST HOC, and is never scored as a blind prediction.
@@ -34,11 +36,11 @@ Per dataset and per K (the dataset list and the K list are fixed in `PASS.md` be
 | Arkade kernel, device output, float | PRIMARY v1-S | CP-ARK + reference launch + replay | `KERNEL queries` event ms, DEVOUT=1, recorder off, median of 3 |
 | RTNN search launch | SECONDARY v1 uncalibrated | replay only (`blind_predict.py`) | same as the RTNN primary row |
 | Arkade pinned over device kernel time | RELATIVE R1 | primary Arkade prediction + 0.33 ms per MB | pinned kernel ms / device kernel ms, same build, medians of 3 |
+| RTNN unsorted over sorted queries and points | RELATIVE R3 | BVH dump + CPU replay + frozen reuse model (FROZEN.md) | RTNN `KERNEL queries` event ms, `-qs 0 -ps 0` over defaults, radius mode, medians of 3 |
 | kNN register heap over original, launch time | RELATIVE R2 | 4.02 (F138) | sum of the GPU time of all `optixLaunch` kernels (ncu `gpu__time_duration`, clocks not locked), original / register heap, medians of 3 |
 
-Excluded and why (so no row can be added after the fact): RTNN sorted over unsorted queries and the other reordering speedups of F113 to F127 need the hardware structure replay,
-which needs a GPU dump of the BVH built on the full dataset (a full OptiX run of the program on new data). TrueKNN and Arkade have no frozen reordering predictor.
-The kNN register heap predictor is the F138 constant, which does not depend on the dataset; it is scored because F255 scored it.
+Excluded and why (so no row can be added after the fact): the ray ordering speedups of F113 to F123 are for triangle scenes with camera and bounce rays, not for point datasets; TrueKNN, Arkade and kNN have no frozen reordering predictor.
+The kNN register heap predictor is the F138 constant, which does not depend on the dataset; it is scored because F255 scored it. The RTNN reordering row R3 (excluded in versions 2.0 to 2.2) is restored by revision 2.3.
 
 ## The procedures (all use the 4090 or whichever GPU the test names; one GPU, idle by nvidia-smi PIDs and utilization, never by process name; a 2 s warmup process before every run; `timeout -k 2`; SM clock recorded per run)
 
@@ -70,7 +72,7 @@ under `ncu --clock-control none --kernel-name regex:optixLaunch --metrics gpu__t
 
 ## Order of events (each step is a commit and a push before the next step)
 
-1. `blind_primary.py calibrate`: runs the sample procedures, writes `model/blind/NAME/calibration_<mapping>_<ts>.json` (raw sample runs, clocks, hashes). Commit and push.
+1. `blind_primary.py calibrate`: runs the sample procedures and the BVH dumps (item 4 of the allowed list), writes `model/blind/NAME/calibration_<mapping>_<ts>.json` (raw sample runs, clocks, hashes). Commit and push.
 2. `blind_predict.py` (secondary, uncalibrated) and `blind_primary.py predict`: write `predictions_*` and `primary_predictions_*` (including the relative predictions), data hash, rule hash, tool hash. Commit and push.
 3. `blind_primary.py measure` and `blind_measure.py`: refuse unless the calibration and prediction files are committed and pushed and the data hash matches. Full runs. Commit and push.
 4. `blind_primary.py score`: CPU only. Commit and push.
@@ -96,4 +98,11 @@ The dry run (`model/blind/dry_run_u100000`, files `diag_sample_size_knn_*` and `
    smaller): the smallest size in that set where the difference is several times the spread. The seed (11) is unchanged. This is chosen from launch sizes, not from any prediction score.
 Known limit, not changed (it is the frozen definition of variant S): cb is divided by 1.10 x the mean cube count, not by the candidates that are actually called, so when the sphere holds more than K points the cost per candidate is
 under estimated by about C / Ce (here 192 / 93, a factor 2). The dry run's cb is 2.6 to 3.5 cycles per candidate against F424's 9.4 at r 0.05, for that reason and because the radius differs.
+
+## Revision 2.3 (2026-11-25, before any new dataset): variant S denominator, BVH dump allowed, reordering row R3 restored
+
+1. Variant S now divides the callback cost by the called candidates (FROZEN.md, "Revision 1 of variant S"). The dry run had shown a factor 2 under estimate of the cost per candidate from dividing by the cube count.
+2. Building and dumping the BVH on the new dataset is allowed before the predictions, without timing (allowed list, item 4). RTNN cannot dump without launching, so the process is killed as soon as the query file is complete and everything it prints is discarded.
+3. Row R3 (RTNN unsorted over sorted) is restored, predicted from the two dumps. The measured quantity is the program's `KERNEL queries` event time, `-qs 0 -ps 0` over the defaults, both with `-p 0 -s 0 -m 0 -d 0` in radius mode, medians of 3.
+Constants of R3 are frozen in FROZEN.md (F123 and F127 on the 4070 Ti); R3 is therefore also a test of whether that fit transfers to the 4090.
 

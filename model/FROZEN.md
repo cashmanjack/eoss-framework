@@ -11,7 +11,7 @@ announced as a different model version.
   This is the version the paper's claim is about (F422: 15 of 15 rows and 7 of 7 headline rows inside a factor 2 on the 5090 with the callback calibrated on
   the same input; F424: 1.27 and 1.09 of the 4090 kernel; both calibrated on the same input, so not blind). The first blind use of it is this test.
 - **SECONDARY: model v1 uncalibrated** (cb - cbref = 0), RTNN only, kept as a row so the known failure stays on record (see "Known behaviour").
-- **RELATIVE rows** (configuration speedups with frozen predictors): Arkade pinned over device output buffer, kNN register heap over original heap.
+- **RELATIVE rows** (configuration and reordering speedups with frozen predictors): Arkade pinned over device output buffer, kNN register heap over original heap, RTNN unsorted over sorted queries (R3, from a BVH dump).
 
 ## What is frozen
 
@@ -31,7 +31,9 @@ announced as a different model version.
 - RTNN primary: the same form with cb - cbref = d_S, where d_S = max(cbS - cbref, -4.9) and cbS = max(0, (T_real - T_stub) x SM x CLK x 1e-3 / (nq x 1.10 x mean cube count of the
   sampled queries)): T_real and T_stub are RTNN's "time search compute" (ms, median of 3) on the sample with the real build and the stub build (intersection program
   without distance check and without result write, the F216 definition, `notes/rebuild/patches/rtnn_stub_radius_tethys.diff`). This is variant S of Phase 13
-  (`blind_pipeline.calibrate`, frozen hash below) and the definition of F422 and F424; the only change is that it is run on a sample, as Phase 13 did.
+  (`blind_pipeline.calibrate`, frozen hash below) and the definition of F422 and F424; the changes are that it is run on a sample, as Phase 13 did, and revision 1 below.
+
+- **Revision 1 of variant S (2026-11-25, before any new data): the cost is divided by the called candidates, not by the cube count.** cbS = max(0, (T_real - T_stub) x SM x CLK x 1e-3 / (nq x 1.10 x mean Ce)), with Ce = K (C + 1) / (S + 1) if S > K else C for each sampled query (the F116 rule the prediction itself uses in q = 1.10 Ce + 1). Reason: the original divided by 1.10 x the mean cube count C; when the sphere holds more than K points the ray ends after K sphere hits and only Ce candidates are called, so cb (a cost per called candidate, added to 4.9 per candidate in the form) was under estimated by C / Ce (about 2 at the dry run radius: C 192, Ce 93). On the inputs of F422 and F424 (r 0.05, C 93.8, S 50.5, K 50) Ce is 92.0, within 2 percent of C, so those findings are unchanged. The original definition stays recorded (`blind_pipeline.py`, Phase 13).
 - TrueKNN primary (F216 (b), `score_model_v1.py`): per round B = f0_cycles x 1.485 / (SM x 12.8) / CLK x 1e3 ms (f0_cycles = callback cycles of the round from the recorder
   of the port), chain = (largest box count of an active query in the round) x 5,800 / CLK x 1e3 ms, launch time = sum over rounds of max(B, chain). Rounds, active sets and
   box counts come from the CPU replay (F158 stop rule: a query stops when its box count - 1 >= k, radius doubles from r0). For a new dataset f0_cycles of a round is
@@ -41,6 +43,11 @@ announced as a different model version.
   100,000 points and 100,000 queries uniform 2D, radius 0.005, device output, float distance, measured on the same GPU in the same session; F_d: callback cycles of the
   new dataset, measured on the sample queries and scaled by the query count), B = (largest per lane count of a warp, 1.10 x exact cube count) x 21,000 / CLK x 1e3 x 0.09
   (float distance). Output buffer: device (the fixed build with DEVOUT).
+- Relative row R3 (reordering): RTNN launch time unsorted over sorted queries and points (unsorted = `-qs 0 -ps 0`, sorted = RTNN defaults, both `-p 0 -s 0`, radius mode). Inputs: a BVH dump of each configuration (RTNN_DUMP: the GAS the process built, the points, the radius, the queries in launch order; taken
+  before any prediction, no timing) and the CPU replay of that BVH (`model/replay`: `make_table.py`, `replay_aabb`, `reuse_aabb` built from the repository sources; NSM = the GPU's SM count, one window when fewer than two waves of warps). Form (F123 reuse feature with the F127 refit, nodes variant, "fixed + m"):
+  cycles per query = c0 + cq q + m miss, q = mean primitives in entered leaf slots + 1, miss = PAR1 S1 (1 - share(h, PAR2, PAR3)) (raw / dedupe)^(-PAR4), S1 = KK x (node fetches of the measured warps) / (their rays), share = sum over the reuse histogram h of hist / (1 + (d / PAR2)^PAR3) over the total;
+  the speedup is the unsorted over the sorted cycles. Constants: PAR = [0.92177597, 1.21423848, 474.780844, 2.09651930, 1.0] (`notes/q11/reuse_feature.json`, share_k1, fitted on triangle launches only), KK = 7.4551019, [c0, cq, m] = [114.09, 5.52, 1.43]
+  (F127, fitted on the three radii of the 100,000 point configurations on the 4070 Ti; its held out |log ratio error| was 0.06 on the 1,000,000 point configurations). Checked on the stored 4070 Ti histograms: predicted 1.39 and 1.49 against measured 1.37 and 1.60.
 - Not predicted by v1: hubs (CLOVER) and the winner call. The hardware BVH replay with real GAS bytes (`model/replay`) needs a GPU dump of the structure and is not part
   of the frozen form: "replay" means the kd tree replay counts that v1 uses.
 
@@ -61,10 +68,17 @@ announced as a different model version.
 | Arkade float over double | 0.09 | F151 (0.18 ms against 1.97 ms, device output) |
 | Arkade pinned output cost | 0.33 ms per MB of result buffer | F145, F151 (triton) |
 | kNN register heap speedup | 4.02 | F138 (rounds 1 to 4 total; 4.45 and 4.34 to 4.48 on the 4090, F255, F424, F425) |
+| R3 reuse share parameters PAR, KK, refit [c0, cq, m] | see R3 above | F123 (`notes/q11/reuse_feature.json`), F127 (`notes/q12/rtnn_refit.txt`) |
 | callback cost of the uniform reference, cbref | 1.0110154 cycles per candidate | `uni3_ref.csv` (uniform 3D, radius 0.0232, K 50) full minus stub runs, `notes/q34/raw/rtnn_uni3_ref_ref_*_20261117T161003_*`; cancels in a blind prediction |
 
 Calibration data files behind these constants live in `notes/` (not in git); their hashes are in the private list below so a later change is visible.
 The input `uni3_ref.csv` itself was on triton's /dev/shm and is not available on this machine; its hash was not recorded in the repository.
+
+## Expectation, written before any new data (2026-11-25)
+
+The calibrated absolute prediction (primary RTNN, TrueKNN, Arkade) is expected to hold on uniform data (where the callback calibration was shown to work, F422, F424) and to MISS on clustered and surface data
+(Porto 1M, Gowalla, Glove 3D, Manuscript, 3DRoad), by factors that grow with the clustering, as the sample calibration did in Phase 13 (1 of 24 F245 cells inside a factor 2, ratios 1.9 to 3,360; uncalibrated
+1 of 24, 1.8 to 3,130). The relative rows are expected to be closer than the absolute rows where the missing term cancels in the ratio. None of these expectations is a pass mark (`model/blind/PASS.md` is Jack's).
 
 ## Known behaviour before the test (uncalibrated secondary version; the calibrated primary is known only on the same input)
 
