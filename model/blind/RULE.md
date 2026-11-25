@@ -29,7 +29,7 @@ Per dataset and per K (the dataset list and the K list are fixed in `PASS.md` be
 
 | row | version | predicted by | measured quantity (full run) |
 |---|---|---|---|
-| RTNN search launch | PRIMARY v1-S | CP-RTNN + replay | RTNN "time search compute", median of 3, `-sm knn -r R -k K -p 0 -s 0 -m 0 -d 0` |
+| RTNN search launch | PRIMARY v1-S | CP-RTNN + replay | RTNN "time search compute", median of 3, radius mode `-r R -k K -p 0 -s 0 -m 0 -d 0` (no `-sm`; revision 2.2) |
 | TrueKNN launch spans | PRIMARY v1-S | CP-TK + replay | sum over rounds of the recorder's per round GT span (ms), median of 3 |
 | Arkade kernel, device output, float | PRIMARY v1-S | CP-ARK + reference launch + replay | `KERNEL queries` event ms, DEVOUT=1, recorder off, median of 3 |
 | RTNN search launch | SECONDARY v1 uncalibrated | replay only (`blind_predict.py`) | same as the RTNN primary row |
@@ -46,8 +46,8 @@ Common: the dataset is a text file with one point per line (3 columns, comma or 
 K and the datasets are those announced in `PASS.md`. Radius rule R(K) (F245): the smallest radius at which 99 percent of 3,000 queries drawn with `default_rng(5)` have K other points
 inside (kd tree, L2, the K+1 th distance quantile 0.99). r0 (TrueKNN, Arkade) = the smallest nonzero distance among the 4 nearest neighbours of 100 points drawn with `default_rng(5)`.
 
-**CP-RTNN** (variant S of Phase 13, F422/F424 definition). nq = max(32, round(0.02 N)); sample = the queries `idx = sort(default_rng(11).choice(N, nq, replace=False))`, written to a file,
-points = the whole file. Run the real build and the stub build of RTNN (build for this K) 3 times each: `-f DATA -q SAMPLE -sm knn -r R(K) -k K -p 0 -s 0 -m 0 -d 0`, `RTNN_DRAM_GB=11.5958`.
+**CP-RTNN** (variant S of Phase 13, F422/F424 definition). nq = min(N, max(round(0.02 N), 50,000)) (revision 2.2, see below); sample = the queries `idx = sort(default_rng(11).choice(N, nq, replace=False))`, written to a file,
+points = the whole file. Run the real build and the stub build of RTNN (build for this K) 3 times each in radius mode: `-f DATA -q SAMPLE -r R(K) -k K -p 0 -s 0 -m 0 -d 0`, `RTNN_DRAM_GB=11.5958`.
 T_real, T_stub = medians of "time search compute". cbS = max(0, (T_real - T_stub) x 1e-3 x SM x 2.5e9 / (nq x 1.10 x mean cube count of the sampled queries)), d_S = max(cbS - 1.0110154, -4.9).
 Prediction = `model_v1_rtnn.predict(N, K, C, S, d_S)` with C, S the replay counts of all N queries. Stub build: the F216 stub (no distance check, no result write, traversal and calls unchanged).
 
@@ -85,3 +85,15 @@ before the first calibration file exists.
 
 A run of the whole chain on a dataset that was measured before (everything we have today) is a DRY RUN: files go to `model/blind/dry_run_NAME/`, every file says DRY RUN, never reported as a blind result.
 A dry run tests the tools and the procedures, not the model.
+
+## Revision 2.2 (2026-11-24, after the dry run, before any new dataset): RTNN mode and sample size
+
+The dry run (`model/blind/dry_run_u100000`, files `diag_sample_size_knn_*` and `diag_sample_size_radius_*`) showed two errors in version 2.0 of this rule, both on the known dry run dataset only:
+1. The stub build only stubs the radius mode result write (`notes/rebuild/patches/rtnn_stub_radius_tethys.diff`): with `-sm knn` the real and the stub build differ by less than 1.5 percent at every sample size
+   including all 100,000 queries, so the callback cost came out as zero. F422 and F424 used radius mode. The RTNN rows (calibration and full measurement, primary and secondary) are therefore radius mode.
+2. A 2 percent query sample (2,000 queries) is a launch of about 0.31 ms against a fixed floor of the same size: the real minus stub difference was 1.5 percent of the launch (run to run spread 1.2 percent).
+   Difference over real, radius mode, K 50, r 0.064, medians of 5: 2,000 queries 1.5 percent, 10,000 1.7, 25,000 4.0, 50,000 20.7 (spread 2.9), 100,000 21.7 (spread 3.8). The sample is now at least 50,000 queries (all queries if N is
+   smaller): the smallest size in that set where the difference is several times the spread. The seed (11) is unchanged. This is chosen from launch sizes, not from any prediction score.
+Known limit, not changed (it is the frozen definition of variant S): cb is divided by 1.10 x the mean cube count, not by the candidates that are actually called, so when the sphere holds more than K points the cost per candidate is
+under estimated by about C / Ce (here 192 / 93, a factor 2). The dry run's cb is 2.6 to 3.5 cycles per candidate against F424's 9.4 at r 0.05, for that reason and because the radius differs.
+

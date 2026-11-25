@@ -108,13 +108,13 @@ def cal_rtnn(pts, N, doc):
     out = {}; tree = cKDTree(pts)
     for K in KS:
         if K not in RT or K not in RTS: out[str(K)] = dict(missing='no real or stub build for K %d' % K); continue
-        r = radius99(tree, pts, K); nq = max(32, int(round(0.02 * N))); idx = np.sort(np.random.default_rng(SEEDS['rtnn_sample']).choice(N, nq, replace=False))
+        r = radius99(tree, pts, K); nq = min(N, max(int(round(0.02 * N)), 50000)); idx = np.sort(np.random.default_rng(SEEDS['rtnn_sample']).choice(N, nq, replace=False))   # RULE.md 2.2
         lines = [l for l in open(A.data).read().splitlines() if l.strip()]; qf = '%s_rtnn_q%d.csv' % (SCR, K); write(qf, '\n'.join(lines[i] for i in idx) + '\n')
         cube = cube_len(tree, pts[idx], r); Cm = float(cube.mean()); res = {}
         for kind, exe in (('real', RT[K]), ('stub', RTS[K])):
             runs = []
             for i in range(3):
-                x = run([exe, '-f', A.data, '-q', qf, '-sm', 'knn', '-r', repr(r), '-k', str(K), '-p', '0', '-s', '0', '-m', '0', '-d', '0'], os.path.dirname(exe), {'RTNN_DRAM_GB': '11.5958'}, 300)
+                x = run([exe, '-f', A.data, '-q', qf, '-r', repr(r), '-k', str(K), '-p', '0', '-s', '0', '-m', '0', '-d', '0'], os.path.dirname(exe), {'RTNN_DRAM_GB': '11.5958'}, 300)
                 txt = strip(x); x['search_ms'] = t_rtnn(txt, 'search compute'); runs.append(x)
                 if x['rc'] != 0 or x['search_ms'] is None: break
             res[kind] = dict(runs=runs, median_ms=med([x['search_ms'] for x in runs if x['rc'] == 0]), full_clock=full_clock(runs))
@@ -221,7 +221,7 @@ def meas_rtnn(pred):
         if 'primary_ms' not in p or K not in RT: out[str(K)] = dict(missing='no prediction or build'); continue
         runs = []
         for i in range(3):
-            x = run([RT[K], '-f', A.data, '-sm', 'knn', '-r', repr(p['radius']), '-k', str(K), '-p', '0', '-s', '0', '-m', '0', '-d', '0'], os.path.dirname(RT[K]), {'RTNN_DRAM_GB': '11.5958'}, 900)
+            x = run([RT[K], '-f', A.data, '-r', repr(p['radius']), '-k', str(K), '-p', '0', '-s', '0', '-m', '0', '-d', '0'], os.path.dirname(RT[K]), {'RTNN_DRAM_GB': '11.5958'}, 900)
             txt = strip(x); x['search_ms'] = t_rtnn(txt, 'search compute'); runs.append(x)
             if x['rc'] != 0 or x['search_ms'] is None: break
         out[str(K)] = dict(runs=runs, median_ms=med([x['search_ms'] for x in runs if x['rc'] == 0]), full_clock=full_clock(runs))
