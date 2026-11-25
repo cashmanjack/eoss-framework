@@ -39,7 +39,7 @@ def pred_bits(b, p, neg=0):
 TRACE_REGS = [2, 3, 30, 31, 32, 33, 34, 35, 44, 45, 56, 57, 58, 59, 60, 61, 62, 63, 68, 69, 70, 71]   # answer registers stored per session by --trace (R18:R19 = this lane's absolute trace address, 128 bytes per session)
 
 
-def build(stage, binpath, out, rounds, inline='full', debug=False, trace=False, lane0=False):
+def build(stage, binpath, out, rounds, inline='full', debug=False, trace=False, lane0=False, timing=False):
     p = BinaryPatcher(binpath)
     sec = [s for s in p.sections if s[2].endswith('.ttu_one')]
     assert len(sec) == 1
@@ -65,9 +65,10 @@ def build(stage, binpath, out, rounds, inline='full', debug=False, trace=False, 
     body.append(A.iadd3_imm(R_T0S, A.RZ, 0)); body.append(A.iadd3_imm(R_T1S, A.RZ, 0))
     body.append(A.iadd3_imm(R_LEFT, A.RZ, rounds))
     body.append(A.iadd3_imm(R_CUR, OUT_PTR, 4 * 16)); body.append(A.mov(R_CUR + 1, OUT_PTR + 1))     # neighbour cursor = out + 64 (the host checks that no 4 GB boundary is crossed)
-    body.append(BP.cs2r_clock(R_T0))
-    body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=15))                  # the clock pair is written
-    body.append(A.mov(R_C0, R_T0, stall=6))
+    if not timing:
+        body.append(BP.cs2r_clock(R_T0))
+        body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=15))                  # the clock pair is written
+        body.append(A.mov(R_C0, R_T0, stall=6))
     body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))      # loads done
     body.append(EG.isetp_p0_true(ra=90))
     top = len(body)
@@ -75,8 +76,10 @@ def build(stage, binpath, out, rounds, inline='full', debug=False, trace=False, 
     g = len(body)
     body += EG.group() if stage == 1 else [ctrl.NOP_BYTES] * 19
     body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))      # session closed, results here
-    body.append(ctrl.write_control(BP.cs2r_clock(R_T1), stall=8))             # the clock pair needs a few cycles before it is read
-    body += [A.iadd3(R_T0S, R_T0S, R_T0, stall=2), A.iadd3(R_T1S, R_T1S, R_T1, stall=2), A.iadd3_imm(R_SES, R_SES, 1, stall=2)]
+    if not timing:
+        body.append(ctrl.write_control(BP.cs2r_clock(R_T1), stall=8))             # the clock pair needs a few cycles before it is read
+        body += [A.iadd3(R_T0S, R_T0S, R_T0, stall=2), A.iadd3(R_T1S, R_T1S, R_T1, stall=2)]
+    body += [A.iadd3_imm(R_SES, R_SES, 1, stall=2)]
     if trace:   # the answer registers of this session, before anything modifies them; then a wait until the stores have read them and R18
         for k, reg in enumerate(TRACE_REGS):
             body.append(field(field(field(stg[3], 24, 18), 32, reg), 40, 4 * k, 24))
@@ -123,12 +126,13 @@ def build(stage, binpath, out, rounds, inline='full', debug=False, trace=False, 
     for r in RELOAD:
         body.append(A.ldg(r, IN_PTR, 4 * r, pg=(4, 0), sb=2, stall=4 if r == RELOAD[-1] else 1))
     body.append(ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2))
-    body.append(ctrl.write_control(BP.cs2r_clock(R_T0), stall=8))
+    if not timing: body.append(ctrl.write_control(BP.cs2r_clock(R_T0), stall=8))
     loop_bra = len(body)
     body.append(BP.bra_back(4, 7, (top - (loop_bra + 1)) * 16))                  # @P4 BRA top
-    body.append(ctrl.write_control(BP.cs2r_clock(R_T1), stall=8))
+    if not timing: body.append(ctrl.write_control(BP.cs2r_clock(R_T1), stall=8))
     body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=6))
     outs = [(80 + k, r) for k, r in enumerate(LAST_ANS)] + [(6, R_CNT), (7, R_SES), (8, R_T0S), (9, R_T1S), (10, R_C0), (11, R_T1), (13, R_LEFT)]
+    if timing: outs = [(6, R_CNT), (7, R_SES), (13, R_LEFT)]   # timing build: no clocks, no last answer words
     for slot, reg in outs:
         body.append(field(stg[slot], 32, reg))
     if debug:   # DEBUG ONLY (fails check_seq L4, never run on a TTU build): the inline temporaries to slots 20 ..
@@ -144,7 +148,7 @@ def build(stage, binpath, out, rounds, inline='full', debug=False, trace=False, 
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
     meta = {'stage': stage, 'remap': False, 'regmap': {}, 'top_reg': R_CNT2, 'clk': [R_T0, R_T1], 'gt': [22, 24], 'twice': False, 'sibling': False, 'sm': 89, 'inputs': inputs,
             'outputs': sorted(set(s for s, _ in outs)), 'in_ptr': IN_PTR, 'section': sec[0][2], 'group_index': g, 'group_len': 19, 'groups': [g], 'sha256': sha, 'regs': 128,
-            'emit': True, 'rtnn': 1, 'rounds': rounds, 'inline': inline, 'trace': bool(trace), 'lane0': bool(lane0), 'inner': list(inner) if inner else None, 'loop_top': top, 'loop_bra': loop_bra}
+            'emit': True, 'rtnn': 1, 'rounds': rounds, 'inline': inline, 'trace': bool(trace), 'lane0': bool(lane0), 'timing': bool(timing), 'inner': list(inner) if inner else None, 'loop_top': top, 'loop_bra': loop_bra}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
     print('built %s stage %d: %d instructions of %d slots, group at %d, loop top %d, bra %d, sha256 %s' % (out, stage, loop_bra + 1 + len(outs) + 5, len(orig), g, top, loop_bra, sha))
     return out
@@ -153,6 +157,6 @@ def build(stage, binpath, out, rounds, inline='full', debug=False, trace=False, 
 if __name__ == '__main__':
     a = argparse.ArgumentParser()
     a.add_argument('--stage', type=int, choices=[0, 1], required=True); a.add_argument('--bin', required=True); a.add_argument('--out', required=True)
-    a.add_argument('--rounds', type=int, default=100); a.add_argument('--debug', action='store_true'); a.add_argument('--trace', action='store_true'); a.add_argument('--lane0', action='store_true'); a.add_argument('--inline', choices=['full', 'none', 'rec', 'pts', 'math'], default='full')
+    a.add_argument('--rounds', type=int, default=100); a.add_argument('--debug', action='store_true'); a.add_argument('--trace', action='store_true'); a.add_argument('--lane0', action='store_true'); a.add_argument('--timing', action='store_true'); a.add_argument('--inline', choices=['full', 'none', 'rec', 'pts', 'math'], default='full')
     x = a.parse_args()
-    build(x.stage, x.bin, x.out, x.rounds, x.inline, x.debug, x.trace, x.lane0)
+    build(x.stage, x.bin, x.out, x.rounds, x.inline, x.debug, x.trace, x.lane0, x.timing)

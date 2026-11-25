@@ -59,7 +59,7 @@ template <class T> static T *dalloc_lo32(size_t n)   // device buffer that does 
 int main(int argc, char **argv)
 {
     if (argc < 4) { fprintf(stderr, "usage: rtnn_host PTX WORDS OUT.json [options]\n"); return 2; }
-    std::string mode = "real"; int npts = 4096, warps = 1, blocks = 1, repeat = 1, orep = 0; unsigned seed = 7; float r = 0.08f; bool optix_only = false, stats_only = false, no_ttu = false, trace = false, serial = false; const char *gas_file = nullptr; int inject_rounds = 1;
+    std::string mode = "real"; int npts = 4096, warps = 1, blocks = 1, repeat = 1, orep = 0; unsigned seed = 7; float r = 0.08f; bool optix_only = false, stats_only = false, no_ttu = false, trace = false, serial = false; const char *gas_file = nullptr; int inject_rounds = 1; bool qpts = false; const char *pts_file = nullptr;
     for (int a = 4; a < argc; ++a) {
         if (!strcmp(argv[a], "--mode") && a + 1 < argc) mode = argv[++a];
         else if (!strcmp(argv[a], "--pts") && a + 1 < argc) npts = atoi(argv[++a]);
@@ -73,6 +73,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--stats-only")) stats_only = true;
         else if (!strcmp(argv[a], "--dump-gas") && a + 1 < argc) gas_file = argv[++a];   // the whole GAS of this scene (private raw file)
         else if (!strcmp(argv[a], "--inject-rounds") && a + 1 < argc) inject_rounds = atoi(argv[++a]);   // inject mode: the stage 0 build runs this many rounds; round 1 sees answer 1, rounds 2.. see answer 2 again
+        else if (!strcmp(argv[a], "--qpts")) qpts = true;   // the queries are the points themselves (query i = point i), as RTNN searches
+        else if (!strcmp(argv[a], "--dump-pts") && a + 1 < argc) pts_file = argv[++a];   // write the points as text (x y z per line) for RTNN
         else if (!strcmp(argv[a], "--serial")) serial = true;   // for a build_rtnn.py --lane0 kernel: one launch of one warp per query, lane 0 of each warp is the only lane that runs
         else if (!strcmp(argv[a], "--trace")) trace = true;   // for a build_rtnn.py --trace kernel: per session answer words in a per lane trace area (64 sessions of 128 bytes) behind the out records
         else { fprintf(stderr, "unknown option %s\n", argv[a]); return 2; }
@@ -86,6 +88,9 @@ int main(int argc, char **argv)
     std::vector<float4> P(npts), Q(TOTAL);
     for (auto &p : P) p = make_float4(U(rng), U(rng), U(rng), 0.f);
     for (auto &q : Q) q = make_float4(U(rng), U(rng), U(rng), 0.f);
+    if (qpts) { if ((size_t)TOTAL > P.size()) { fprintf(stderr, "--qpts: more queries than points\n"); return 2; } for (unsigned i = 0; i < TOTAL; ++i) Q[i] = P[i]; }
+    if (pts_file) { FILE *pf = fopen(pts_file, "w"); for (auto &p : P) fprintf(pf, "%.9g,%.9g,%.9g\n", p.x, p.y, p.z); fclose(pf); }
+    const bool have_cl = TOTAL <= 16384;   // the OptiX candidate log is kept for small launches only
     const float r2 = r * r;
     float4 *dP = dalloc_lo32<float4>(npts), *dQ; CK(cudaMalloc((void **)&dQ, (size_t)TOTAL * sizeof(float4)));
     CK(cudaMemcpy(dP, P.data(), npts * sizeof(float4), cudaMemcpyHostToDevice)); CK(cudaMemcpy(dQ, Q.data(), (size_t)TOTAL * sizeof(float4), cudaMemcpyHostToDevice));
@@ -119,12 +124,12 @@ int main(int argc, char **argv)
     OptixShaderBindingTable sbt{}; sbt.raygenRecord = drec; sbt.missRecordBase = drec + sizeof(Rec); sbt.missRecordStrideInBytes = sizeof(Rec); sbt.missRecordCount = 1;
     sbt.hitgroupRecordBase = drec + 2 * sizeof(Rec); sbt.hitgroupRecordStrideInBytes = sizeof(Rec); sbt.hitgroupRecordCount = 1;
     RParams prm{}; prm.q = dQ; prm.pts = dP; prm.r2 = r2; prm.n = TOTAL; prm.handle = h;
-    CK(cudaMalloc((void **)&prm.candlog, (size_t)TOTAL * 256 * 4)); CK(cudaMemset(prm.candlog, 0, (size_t)TOTAL * 256 * 4)); CK(cudaMalloc((void **)&prm.nbr, (size_t)TOTAL * 65 * 4)); CK(cudaMalloc((void **)&prm.ncand, (size_t)TOTAL * 4)); CK(cudaMalloc((void **)&prm.inst, 18 * 8));
+    prm.candlog = nullptr; if (have_cl) { CK(cudaMalloc((void **)&prm.candlog, (size_t)TOTAL * 256 * 4)); CK(cudaMemset(prm.candlog, 0, (size_t)TOTAL * 256 * 4)); } CK(cudaMalloc((void **)&prm.nbr, (size_t)TOTAL * 65 * 4)); CK(cudaMalloc((void **)&prm.ncand, (size_t)TOTAL * 4)); CK(cudaMalloc((void **)&prm.inst, 18 * 8));
     CK(cudaMemset(prm.nbr, 0, (size_t)TOTAL * 65 * 4)); CK(cudaMemset(prm.ncand, 0, (size_t)TOTAL * 4)); CK(cudaMemset(prm.inst, 0, 18 * 8));
     CUdeviceptr dprm; CK(cudaMalloc((void **)&dprm, sizeof prm)); CK(cudaMemcpy((void *)dprm, &prm, sizeof prm, cudaMemcpyHostToDevice));
     OX(optixLaunch(pipe, 0, dprm, sizeof prm, &sbt, TOTAL, 1, 1)); CK(cudaDeviceSynchronize());
     std::vector<unsigned> onbr((size_t)TOTAL * 65), oncand(TOTAL); unsigned long long inst[18];
-    std::vector<unsigned> ocl((size_t)TOTAL * 256); CK(cudaMemcpy(ocl.data(), prm.candlog, ocl.size() * 4, cudaMemcpyDeviceToHost)); CK(cudaMemcpy(onbr.data(), prm.nbr, onbr.size() * 4, cudaMemcpyDeviceToHost)); CK(cudaMemcpy(oncand.data(), prm.ncand, TOTAL * 4, cudaMemcpyDeviceToHost)); CK(cudaMemcpy(inst, prm.inst, sizeof inst, cudaMemcpyDeviceToHost));
+    std::vector<unsigned> ocl(have_cl ? (size_t)TOTAL * 256 : 1); if (have_cl) CK(cudaMemcpy(ocl.data(), prm.candlog, ocl.size() * 4, cudaMemcpyDeviceToHost)); CK(cudaMemcpy(onbr.data(), prm.nbr, onbr.size() * 4, cudaMemcpyDeviceToHost)); CK(cudaMemcpy(oncand.data(), prm.ncand, TOTAL * 4, cudaMemcpyDeviceToHost)); CK(cudaMemcpy(inst, prm.inst, sizeof inst, cudaMemcpyDeviceToHost));
     std::vector<float> optix_ms;
     if (orep > 0) {
         cudaEvent_t a0, a1; CK(cudaEventCreate(&a0)); CK(cudaEventCreate(&a1));
@@ -265,7 +270,7 @@ int main(int argc, char **argv)
     }
     { std::vector<unsigned> rt((size_t)npts * 2); CK(cudaMemcpy(rt.data(), (void *)(gas + rec_off), rt.size() * 4, cudaMemcpyDeviceToHost));   // the GAS record table (word 0 = primitive index) and OptiX's full candidate sequence per query
       fprintf(jf, ",\n \"rec_prim\": ["); for (int k = 0; k < npts; ++k) fprintf(jf, "%s%u", k ? "," : "", rt[(size_t)k * 2]);
-      fprintf(jf, "],\n \"optix_cands\": ["); for (unsigned i = 0; i < std::min<unsigned>(TOTAL, 64); ++i) { fprintf(jf, "%s[", i ? "," : ""); for (unsigned k = 0; k < std::min<unsigned>(oncand[i], 256); ++k) fprintf(jf, "%s%u", k ? "," : "", ocl[(size_t)i * 256 + k]); fprintf(jf, "]"); }
+      fprintf(jf, "],\n \"optix_cands\": ["); for (unsigned i = 0; have_cl && i < std::min<unsigned>(TOTAL, 64); ++i) { fprintf(jf, "%s[", i ? "," : ""); for (unsigned k = 0; k < std::min<unsigned>(oncand[i], 256); ++k) fprintf(jf, "%s%u", k ? "," : "", ocl[(size_t)i * 256 + k]); fprintf(jf, "]"); }
       fprintf(jf, "]"); }
     if (trace && e == cudaSuccess) {   // the answer registers of every session of the first 64 lanes: [R2,R3,R30,R31,R32,R33,R34,R35,R44,R45,R56..R63,R68,R69,R70,R71]
         fprintf(jf, ",\n \"trace\": [");

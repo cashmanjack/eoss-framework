@@ -25,7 +25,7 @@ extern "C" __global__ void __miss__ms() {}
 extern "C" __global__ void __intersection__is()
 {
     const unsigned i = optixGetLaunchIndex().x, prim = optixGetPrimitiveIndex();
-    { const unsigned n = params.ncand[i]; if (n < 256) params.candlog[(size_t)i * 256 + n] = prim; params.ncand[i] = n + 1; }
+    { const unsigned n = params.ncand[i]; if (params.candlog && n < 256) params.candlog[(size_t)i * 256 + n] = prim; params.ncand[i] = n + 1; }
     const float4 p = params.pts[prim], q = params.q[i];
     const float dx = p.x - q.x, dy = p.y - q.y, dz = p.z - q.z;
     const float d2 = fmaf(dz, dz, fmaf(dy, dy, dx * dx));        // the same operations in the same order as the rehosted kernel's inline test

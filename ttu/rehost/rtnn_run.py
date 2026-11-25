@@ -35,6 +35,8 @@ def main():
     d = os.path.dirname(os.path.abspath(build))
     gasf = os.path.join(outdir, 'gas_%s_%s.bin' % (label, time.strftime('%Y%m%dT%H%M%S') + '_%06d' % (int(time.time() * 1e6) % 1000000)))
     open(gasf, 'x').close(); extra = extra + ['--dump-gas', gasf]   # the GAS of every scene we run is saved (private)
+    if '--inject' in extra:   # an NVBit tool (BITTU), as in setup3/run.py; BITTU_* settings come from the caller's environment
+        i = extra.index('--inject'); env['CUDA_INJECTION64_PATH'] = os.path.abspath(extra[i + 1]); del extra[i:i + 2]
     cmd = ['timeout', '-k', '2', '30', build, os.path.join(d, 'rtnn_dev.ptx'), os.path.join(d, 'words.txt'), out] + extra
     print('sha256', sha, '| stage', meta['stage'], '| rounds', meta['rounds'], '| inline', meta['inline'], '|', ' '.join(extra))
     r = subprocess.run(cmd, env=env)

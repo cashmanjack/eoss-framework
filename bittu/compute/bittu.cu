@@ -177,7 +177,7 @@ void nvbit_at_cuda_event(CUcontext ctx, int is_exit, nvbit_api_cuda_t cbid, cons
             const BittuRec &r = h_rec[t * BITTU_INST + k];
             fprintf(out, "  thread %d inst %d t0a %llu t0b %llu t1 %llu ray", t, k, (unsigned long long)r.t0a, (unsigned long long)r.t0b, (unsigned long long)r.t1);
             for (int i = 0; i < 8; ++i) fprintf(out, " %08x", r.ray[i]); fprintf(out, " res");
-            for (int i = 0; i < BITTU_MAXR; ++i) fprintf(out, " %08x", r.res[i]); fprintf(out, "\n");
+            for (int i = 0; i < BITTU_MAXR; ++i) fprintf(out, " %08x", r.res[i]); fprintf(out, " masks %08x %08x\n", r.mask_pre, r.mask_post);
         }
         fflush(out);
     }
