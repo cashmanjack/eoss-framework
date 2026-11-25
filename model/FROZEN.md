@@ -80,6 +80,8 @@ The calibrated absolute prediction (primary RTNN, TrueKNN, Arkade) is expected t
 (Porto 1M, Gowalla, Glove 3D, Manuscript, 3DRoad), by factors that grow with the clustering, as the sample calibration did in Phase 13 (1 of 24 F245 cells inside a factor 2, ratios 1.9 to 3,360; uncalibrated
 1 of 24, 1.8 to 3,130). The relative rows are expected to be closer than the absolute rows where the missing term cancels in the ratio. None of these expectations is a pass mark (`model/blind/PASS.md` is Jack's).
 
+**Arkade absolute row, fixed launch cost (2026-11-25, before any new data; F602).** The Arkade primary form has no fixed launch term: A scales the whole reference time by the callback ratio, so the fixed part of a launch shrinks with it. On the dry run dataset the fixed part is about 0.7 ms (0.68 ms at 32 queries, 0.84 ms at 10,000), and the prediction came out 2.63 times low. The Arkade absolute row is therefore expected to UNDER predict on launches where fixed cost dominates (the 10,000 query launches of this protocol, where the callback part is a fraction of a millisecond). This is an expectation, not a model change and not a pass mark: no constant or form is altered, and the row is scored as frozen.
+
 ## Known behaviour before the test (uncalibrated secondary version; the calibrated primary is known only on the same input)
 
 Calibrated on the same input, not blind: F422 15 of 15 rows inside a factor 2 (5090), F424 within 1.09 to 1.27 of the 4090 kernel (both on uniform inputs, callback from the
