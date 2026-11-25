@@ -1,0 +1,9 @@
+# Predictions: offline checks of OptiX's resume loop and of the lost candidates (2026-11-24, before looking), no GPU
+Jack's order: (1) OptiX's loop in our private notes: any TTUCCTL or other instruction between sessions that we do not emit, and every value written before a new session that differs from ours; (2) with the saved GAS record table (the BVH of this scene was not saved, so leaf membership can only be inferred from record adjacency; stated limit), is each lost candidate in the same leaf as the candidate returned just before it, and are the failing queries those touching leaves with more than one primitive. If both are empty: approved to run the flush test once.
+Predictions:
+1. No TTUCCTL, no fence, no barrier and no other TTU instruction anywhere in OptiX's traversal function except the one group (the 80 KB window): 0.92.
+2. Values OptiX writes before a new session that differ from ours: after a call to the intersection program the code writes into registers our loop leaves alone (the call's return values R44:R45 are copied into R46:R47 and a status code is checked); I expect at least one write whose value is NOT a copy of the first query's input: 0.55 (a candidate cause); expect none: 0.45.
+3. Lost candidates: in the same record run (consecutive record indices in OptiX's candidate order) as the candidate returned just before: 0.75; the lost candidate has record index = previous record + 1: 0.5.
+4. Failing queries are exactly those with at least one run of two or more consecutive records in OptiX's candidate order (multi primitive leaves): 0.6; the one exact query has no such run: 0.6.
+5. Leaves with a single candidate never lose the following candidate: 0.5.
+Decision rule: if 1 shows a missing instruction or 2 a specific missing value, propose that fix with a prediction and stop for approval; if both give nothing, run the flush test once as proposed.
