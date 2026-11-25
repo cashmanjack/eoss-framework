@@ -28,7 +28,7 @@ IN_PTR, OUT_PTR = 92, 4
 EXTRA_IN = [6, 7, 8]
 RELOAD = [30, 31, 34, 35, 56, 57, 58, 59, 60, 61, 62, 63, 68, 69]
 LAST_ANS = [3, 32, 33, 44, 45, 56, 57, 58, 59, 60, 61, 70, 71]
-R_CNT, R_SES, R_T0S, R_T1S, R_T0, R_T1, R_CUR, R_LEFT, R_C0, R_TMP = 9, 10, 110, 111, 112, 114, 116, 118, 119, 120
+R_CNT, R_SES, R_T0S, R_T1S, R_T0, R_T1, R_CUR, R_LEFT, R_C0, R_TMP, R_CNT2 = 9, 10, 110, 111, 112, 114, 116, 118, 119, 120, 121   # R121: records left in the answer's run
 CAP = 64
 
 
@@ -83,19 +83,36 @@ def build(stage, binpath, out, rounds, inline='full', debug=False, trace=False, 
         body += [ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2), A.iadd3_imm(18, 18, 128, stall=6)]
     LEVELS = ['none', 'rec', 'pts', 'math', 'full']; lv = LEVELS.index(inline)
     P4, P5, P6 = (4, 0), (5, 0), (6, 0)
-    if lv >= 1:   # decode the candidate, fetch its primitive index from the record
+    inner = None
+    if lv == 4:
+        # candidate answer: tag 0x50 and hit flag 1; the answer stands for COUNT consecutive 8 byte records (R33 bits 5:0) starting at the pointer (R45:R44 x 8) (F451)
+        body += [A.shr_u32(98, 33, 25, stall=6), A.isetp_imm(4, 'EQ', 98, 0x50, stall=13), A.isetp_reg(4, 'NE', 3, A.RZ, pp=4, stall=13),
+                 A.imad_imm(96, 44, 8, stall=4), A.shl64_hi(97, 44, 3, 45, stall=6), BP.lop3_abs_imm(4, R_CNT2, 33, 0x3f, 6)]
+        bssy_at = len(body); body.append(ctrl.NOP_BYTES)            # BSSY B0, after the loop (patched below): the warp reconverges before the next session
+        inner_top = len(body)
+        body += [A.ldg(98, 96, 0, pg=P4, sb=2, stall=4), ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2),
+                 A.imad_imm(100, 98, 16, rc=6, pg=P4, stall=6), A.mov(101, 7, pg=P4, stall=6),
+                 A.ldg(102, 100, 0, pg=P4, sb=2), A.ldg(103, 100, 4, pg=P4, sb=2), A.ldg(104, 100, 8, pg=P4, sb=2, stall=4), ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2),
+                 A.fadd_neg(105, 102, 82, pg=P4, stall=2), A.fadd_neg(106, 103, 83, pg=P4, stall=2), A.fadd_neg(107, 104, 12, pg=P4, stall=6),
+                 A.fmul(108, 105, 105, pg=P4, stall=6), A.ffma(108, 106, 106, 108, pg=P4, stall=6), A.ffma(108, 107, 107, 108, pg=P4, stall=6),
+                 A.fsetp_le(5, 108, 8, pp=4, stall=13), A.isetp_imm(6, 'LT', R_CNT, CAP, pp=5, stall=13)]
+        st = field(field(field(stg[3], 24, R_CUR), 32, 98), 40, 0, 24)
+        body += [pred_bits(st, 6), ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2), A.iadd3_imm(R_CUR, R_CUR, 4, pg=P6, stall=4), A.iadd3_imm(R_CNT, R_CNT, 1, pg=P5, stall=4),
+                 A.iadd3_imm(96, 96, 8, pg=P4, stall=4), A.iadd3_imm(R_CNT2, R_CNT2, 0xffffffff, pg=P4, stall=6), A.isetp_reg(3, 'NE', R_CNT2, A.RZ, pp=4, stall=13)]
+        inner_bra = len(body); body.append(BP.bra_back(3, 7, (inner_top - (inner_bra + 1)) * 16))
+        bsync_at = len(body); body.append(BP.bsync(0))
+        body[bssy_at] = BP.bssy(0, (bsync_at + 1 - (bssy_at + 1)) * 16)
+        inner = (inner_top, inner_bra, bssy_at, bsync_at)
+    if lv in (1, 2, 3):   # debug levels (not run on a TTU build)
         body += [A.shr_u32(98, 33, 25, stall=6), A.isetp_imm(4, 'EQ', 98, 0x50, stall=13), A.isetp_reg(4, 'NE', 3, A.RZ, pp=4, stall=13),
                  A.imad_imm(96, 44, 8, stall=4), A.shl64_hi(97, 44, 3, 45, stall=6), A.ldg(98, 96, 0, pg=P4, sb=2, stall=4), ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2)]
-    if lv >= 2:   # the point
+    if lv in (2, 3):
         body += [A.imad_imm(100, 98, 16, rc=6, pg=P4, stall=6), A.mov(101, 7, pg=P4, stall=6),
                  A.ldg(102, 100, 0, pg=P4, sb=2), A.ldg(103, 100, 4, pg=P4, sb=2), A.ldg(104, 100, 8, pg=P4, sb=2, stall=4), ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2)]
-    if lv >= 3:   # the distance test
+    if lv == 3:
         body += [A.fadd_neg(105, 102, 82, pg=P4, stall=2), A.fadd_neg(106, 103, 83, pg=P4, stall=2), A.fadd_neg(107, 104, 12, pg=P4, stall=6),
                  A.fmul(108, 105, 105, pg=P4, stall=6), A.ffma(108, 106, 106, 108, pg=P4, stall=6), A.ffma(108, 107, 107, 108, pg=P4, stall=6),
                  A.fsetp_le(5, 108, 8, pp=4, stall=13), A.isetp_imm(6, 'LT', R_CNT, CAP, pp=5, stall=13)]
-    if lv >= 4:   # count and record the neighbour
-        st = field(field(field(stg[3], 24, R_CUR), 32, 98), 40, 0, 24)
-        body += [pred_bits(st, 6), ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2), A.iadd3_imm(R_CUR, R_CUR, 4, pg=P6, stall=4), A.iadd3_imm(R_CNT, R_CNT, 1, pg=P5, stall=4)]   # the NOP waits until the store has read R116 (stand alone waits: consumer embedded waits did not hold in the R3 stage 0 runs)
     # pending entries and rounds
     body += [BP.lop3(R_TMP, 56, 57, 58, 0xfe, 6), BP.lop3(R_TMP, R_TMP, 59, 60, 0xfe, 6), BP.lop3(R_TMP, R_TMP, 61, 70, 0xfe, 6), BP.lop3(0, R_TMP, 71, 255, 0xfc, 6, pu=2),
              A.iadd3_imm(R_LEFT, R_LEFT, 0xffffffff, stall=6), A.isetp_reg(4, 'NE', R_LEFT, A.RZ, pp=2, stall=13)]     # P2 = pending, P4 = pending and rounds left
@@ -125,9 +142,9 @@ def build(stage, binpath, out, rounds, inline='full', debug=False, trace=False, 
     old = BP.set_regcount(p.data, sec[0][2], 128); assert old
     p.save(out)
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
-    meta = {'stage': stage, 'remap': False, 'regmap': {}, 'top_reg': R_TMP, 'clk': [R_T0, R_T1], 'gt': [22, 24], 'twice': False, 'sibling': False, 'sm': 89, 'inputs': inputs,
+    meta = {'stage': stage, 'remap': False, 'regmap': {}, 'top_reg': R_CNT2, 'clk': [R_T0, R_T1], 'gt': [22, 24], 'twice': False, 'sibling': False, 'sm': 89, 'inputs': inputs,
             'outputs': sorted(set(s for s, _ in outs)), 'in_ptr': IN_PTR, 'section': sec[0][2], 'group_index': g, 'group_len': 19, 'groups': [g], 'sha256': sha, 'regs': 128,
-            'emit': True, 'rtnn': 1, 'rounds': rounds, 'inline': inline, 'trace': bool(trace), 'lane0': bool(lane0), 'loop_top': top, 'loop_bra': loop_bra}
+            'emit': True, 'rtnn': 1, 'rounds': rounds, 'inline': inline, 'trace': bool(trace), 'lane0': bool(lane0), 'inner': list(inner) if inner else None, 'loop_top': top, 'loop_bra': loop_bra}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
     print('built %s stage %d: %d instructions of %d slots, group at %d, loop top %d, bra %d, sha256 %s' % (out, stage, loop_bra + 1 + len(outs) + 5, len(orig), g, top, loop_bra, sha))
     return out

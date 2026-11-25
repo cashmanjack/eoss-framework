@@ -30,9 +30,11 @@ def main():
     cfg = gpucfg.load(); cfg.check_idle()
     env = cfg.env(dict(os.environ))
     os.makedirs(outdir, exist_ok=True)
-    out = os.path.join(outdir, '%s_%s.json' % (label, time.strftime('%Y%m%dT%H%M%S')))
+    out = os.path.join(outdir, '%s_%s.json' % (label, time.strftime('%Y%m%dT%H%M%S') + '_%06d' % (int(time.time() * 1e6) % 1000000)))
     open(out, 'x').close()
     d = os.path.dirname(os.path.abspath(build))
+    gasf = os.path.join(outdir, 'gas_%s_%s.bin' % (label, time.strftime('%Y%m%dT%H%M%S') + '_%06d' % (int(time.time() * 1e6) % 1000000)))
+    open(gasf, 'x').close(); extra = extra + ['--dump-gas', gasf]   # the GAS of every scene we run is saved (private)
     cmd = ['timeout', '-k', '2', '30', build, os.path.join(d, 'rtnn_dev.ptx'), os.path.join(d, 'words.txt'), out] + extra
     print('sha256', sha, '| stage', meta['stage'], '| rounds', meta['rounds'], '| inline', meta['inline'], '|', ' '.join(extra))
     r = subprocess.run(cmd, env=env)

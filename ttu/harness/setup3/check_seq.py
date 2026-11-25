@@ -417,10 +417,14 @@ def check(path):
         fb = lambda b, lo: (W(b) >> lo) & 0xff
         brs_l = [i for i, b in enumerate(body[:ex]) if low12(b) in (0x947, 0x949, 0x943)]
         top, lb = meta['loop_top'], meta['loop_bra']
-        ok('L1 exactly one branch before EXIT: a backward @P4 BRA after the group to the NOP with stall 15 right before TTUOPEN, which is also B12 s NOP',
-           brs_l == [lb] and low12(body[lb]) == 0x947 and pred(body[lb]) == (4, 0) and lb > g + GL and lb + 1 + sbo(body[lb]) // 16 == top == g - 1 and low12(body[top]) == 0x918 and stall(body[top]) == 15, (brs_l, lb, top, g))
+        inr = meta.get('inner')   # (inner_top, inner_bra, bssy, bsync): the count loop of the inline test (F451)
+        ok('L1 exactly one branch before EXIT: a backward @P4 BRA after the group to the NOP with stall 15 right before TTUOPEN, which is also B12 s NOP; with an inner count loop exactly one more backward @P3 BRA to the loop top, inside the post session code',
+           brs_l == ([inr[1], lb] if inr else [lb]) and (not inr or (low12(body[inr[1]]) == 0x947 and pred(body[inr[1]]) == (3, 0) and g + GL <= inr[0] < inr[1] < lb and inr[1] + 1 + sbo(body[inr[1]]) // 16 == inr[0])) and low12(body[lb]) == 0x947 and pred(body[lb]) == (4, 0) and lb > g + GL and lb + 1 + sbo(body[lb]) // 16 == top == g - 1 and low12(body[top]) == 0x918 and stall(body[top]) == 15, (brs_l, lb, top, g))
         pex = [i for i, b in enumerate(body[:ex]) if low12(b) == 0x94d]
-        ok('L2 no BSSY, BSYNC, barrier, atomic or call before the final EXIT; no other EXIT unless the lane mask build has its one', not any(low12(b) in (0x945, 0x941, 0xb1d, 0x98e, 0x9a8, 0x943) for b in body[:ex]) and (len(pex) == (1 if meta.get('lane0') else 0)), pex)
+        ok('L2 no BSSY, BSYNC, barrier, atomic or call before the final EXIT; no other EXIT unless the lane mask build has its one', not any(low12(b) in (0xb1d, 0x98e, 0x9a8, 0x943) for b in body[:ex]) and (len(pex) == (1 if meta.get('lane0') else 0)), pex)
+        bs = [i for i, b in enumerate(body[:ex]) if low12(b) == 0x945]; by = [i for i, b in enumerate(body[:ex]) if low12(b) == 0x941]
+        ok('L2b convergence barrier: none, or (with the inner count loop) exactly one BSSY before the loop top and one BSYNC right after the inner branch, the BSSY target being the instruction after the BSYNC, all after the CLOSE and before the outer branch',
+           (not inr and not bs and not by) or (inr is not None and len(bs) == 1 and len(by) == 1 and bs[0] == inr[2] and by[0] == inr[3] and g + GL <= bs[0] < inr[0] and by[0] == inr[1] + 1 and bs[0] + 1 + sbo(body[bs[0]]) // 16 == by[0] + 1 and by[0] < lb), (bs, by))
         if meta.get('lane0'):   # M1 (Jack 2026-11-24): only lane 0 of the warp runs: S2R SR_TID.X, then ISETP.NE P1 = (tid != 0), then @P1 EXIT, all before any load and any TTU instruction
             pi = pex[0] if pex else -1; first_ttu = min([i for i, b in enumerate(body) if low12(b) in TTU] or [ex]); first_ld = min([i for i, b in enumerate(body) if low12(b) == 0x981] or [ex])
             s2r_i = pi - 3   # the four instructions right before the exit: S2R SR_TID.X, NOP (wait all), ISETP.NE P1, Rtid, RZ, @P1 EXIT (the nvcc prologue has its own S2R SR_TID.X earlier)
