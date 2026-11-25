@@ -1,0 +1,143 @@
+{
+ "label": "DRY RUN",
+ "name": "u100000",
+ "ts": "20261124T210612",
+ "predictions_file": "model/blind/dry_run_u100000/predictions_20261124T210600.json",
+ "predictions_commit": "6119a96",
+ "data_sha256_12": "847eacd4769b",
+ "gpu": {
+  "index": 1,
+  "name": "NVIDIA GeForce RTX 4090",
+  "driver": "580.178.04",
+  "max_sm_mhz": "3105 MHz",
+  "mem": "24564 MiB",
+  "bus": "00000000:34:00.0",
+  "host": "tethys.ecn.purdue.edu"
+ },
+ "quantity": "RTNN time search compute (ms), median of reps",
+ "tool_sha12": "ba195f6a27b3",
+ "repo_head": "6119a96",
+ "rows": {
+  "50": {
+   "cmd": "~/thirdparty/div1/rtnn/src/build/bin/optixNSearch -f ~/thirdparty/div1/data/u100000.csv -sm knn -r 0.0640416 -k 50 -p 0 -s 0 -m 0 -d 0",
+   "runs": [
+    {
+     "rc": 0,
+     "wall_s": 0.771,
+     "stderr": "\tTotal GPUs visible: 1\n\tUsing [0]: NVIDIA GeForce RTX 4090\n\tMemory: 11.5958 GB\n",
+     "warmup": "warm 2000 ms on 128 SMs: no error",
+     "clock": {
+      "samples_mhz": [
+       2730,
+       2730,
+       2730,
+       2730,
+       2730,
+       2730,
+       2730,
+       2730,
+       2730,
+       2730,
+       2730,
+       2730,
+       2730,
+       2730,
+       2730
+      ],
+      "n": 15,
+      "max_sm_mhz_gpu": 3105,
+      "min_after_start": 2730,
+      "median": 2730,
+      "max": 2730,
+      "frac_at_least_2400": 1.0,
+      "full_clock": true
+     },
+     "search_ms": 1.32881,
+     "sort_ms": 33.4993,
+     "geom_ms": 1.03068,
+     "total_ms": 42.2716,
+     "kernel_ms": 1.2268
+    },
+    {
+     "rc": 0,
+     "wall_s": 0.7582,
+     "stderr": "\tTotal GPUs visible: 1\n\tUsing [0]: NVIDIA GeForce RTX 4090\n\tMemory: 11.5958 GB\n",
+     "warmup": "warm 2000 ms on 128 SMs: no error",
+     "clock": {
+      "samples_mhz": [
+       2715,
+       2715,
+       2715,
+       2715,
+       2715,
+       2715,
+       2715,
+       2715,
+       2715,
+       2715,
+       2715,
+       2715,
+       2730,
+       2730
+      ],
+      "n": 14,
+      "max_sm_mhz_gpu": 3105,
+      "min_after_start": 2715,
+      "median": 2715.0,
+      "max": 2730,
+      "frac_at_least_2400": 1.0,
+      "full_clock": true
+     },
+     "search_ms": 1.34242,
+     "sort_ms": 33.7403,
+     "geom_ms": 1.05478,
+     "total_ms": 42.4812,
+     "kernel_ms": 1.2431
+    },
+    {
+     "rc": 0,
+     "wall_s": 0.7631,
+     "stderr": "\tTotal GPUs visible: 1\n\tUsing [0]: NVIDIA GeForce RTX 4090\n\tMemory: 11.5958 GB\n",
+     "warmup": "warm 2000 ms on 128 SMs: no error",
+     "clock": {
+      "samples_mhz": [
+       2715,
+       2715,
+       2715,
+       2715,
+       2715,
+       2715,
+       2715,
+       2715,
+       2715,
+       2715,
+       2715,
+       2715,
+       2730,
+       2730,
+       2730
+      ],
+      "n": 15,
+      "max_sm_mhz_gpu": 3105,
+      "min_after_start": 2715,
+      "median": 2715,
+      "max": 2730,
+      "frac_at_least_2400": 1.0,
+      "full_clock": true
+     },
+     "search_ms": 1.33446,
+     "sort_ms": 33.5502,
+     "geom_ms": 1.03054,
+     "total_ms": 42.2245,
+     "kernel_ms": 1.2339
+    }
+   ],
+   "ok_runs": 3,
+   "search_ms_median": 1.33446,
+   "search_ms_min": 1.32881,
+   "search_ms_max": 1.34242,
+   "all_runs_full_clock": true,
+   "lowest_clock_after_start": 2715
+  }
+ }
+}
