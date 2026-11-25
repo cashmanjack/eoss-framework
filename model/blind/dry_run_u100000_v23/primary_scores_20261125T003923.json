@@ -1,0 +1,102 @@
+{
+ "label": "DRY RUN",
+ "name": "u100000_v23",
+ "predictions": "primary_predictions_20261125T003523.json",
+ "measured": "primary_measured_20261125T003803.json",
+ "rows": [
+  {
+   "version": "PRIMARY",
+   "row": "RTNN K50",
+   "predicted": 0.389587,
+   "measured": 0.793277,
+   "ratio": 2.0362,
+   "ln_ratio": 0.711085,
+   "inside_2": false
+  },
+  {
+   "version": "SECONDARY (uncalibrated v1)",
+   "row": "RTNN K50",
+   "predicted": 0.191255,
+   "measured": 0.793277,
+   "ratio": 4.14775,
+   "ln_ratio": 1.42256,
+   "inside_2": false
+  },
+  {
+   "version": "PRIMARY",
+   "row": "TrueKNN k16",
+   "predicted": 1.5356,
+   "measured": 2.9531,
+   "ratio": 1.92309,
+   "ln_ratio": 0.653934,
+   "inside_2": true
+  },
+  {
+   "version": "PRIMARY",
+   "row": "Arkade",
+   "predicted": 0.291187,
+   "measured": 0.766,
+   "ratio": 2.63061,
+   "ln_ratio": 0.967216,
+   "inside_2": false
+  },
+  {
+   "version": "RELATIVE",
+   "row": "R1 Arkade pinned over device",
+   "predicted": 5.53317,
+   "measured": 2.7842,
+   "ratio": 0.503184,
+   "ln_ratio": -0.686799,
+   "inside_2": true
+  },
+  {
+   "version": "RELATIVE",
+   "row": "R3 RTNN K50 unsorted over sorted kernel time",
+   "predicted": 1.29406,
+   "measured": 1.40335,
+   "ratio": 1.08445,
+   "ln_ratio": 0.0810754,
+   "inside_2": true
+  },
+  {
+   "version": "RELATIVE",
+   "row": "R2 kNN register heap speedup",
+   "predicted": 4.02,
+   "measured": 3.61114,
+   "ratio": 0.898294,
+   "ln_ratio": -0.107258,
+   "inside_2": true
+  }
+ ],
+ "summary": {
+  "primary": {
+   "rows": 3,
+   "measured_rows": 3,
+   "missing": 0,
+   "inside_factor_2": 1,
+   "rms_ln_ratio": 0.789257,
+   "median_abs_ln_ratio": 0.711085,
+   "worst_ratio": 2.63061
+  },
+  "secondary": {
+   "rows": 1,
+   "measured_rows": 1,
+   "missing": 0,
+   "inside_factor_2": 0,
+   "rms_ln_ratio": 1.42256,
+   "median_abs_ln_ratio": 1.42256,
+   "worst_ratio": 4.14775
+  },
+  "relative": {
+   "rows": 3,
+   "measured_rows": 3,
+   "missing": 0,
+   "inside_factor_2": 3,
+   "rms_ln_ratio": 0.40405,
+   "median_abs_ln_ratio": 0.107258,
+   "worst_ratio": 1.98734
+  }
+ },
+ "pass_md_status": "UNSET: no verdict printed",
+ "all_runs_full_clock": true
+}
