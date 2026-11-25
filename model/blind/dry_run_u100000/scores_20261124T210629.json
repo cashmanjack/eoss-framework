@@ -1,0 +1,27 @@
+{
+ "label": "DRY RUN",
+ "name": "u100000",
+ "predictions": "predictions_20261124T210600.json",
+ "measured": "measured_20261124T210612.json",
+ "rows": [
+  {
+   "K": 50,
+   "predicted_ms": 0.191255,
+   "measured_ms": 1.33446,
+   "ratio": 6.977386212125173,
+   "ln_ratio": 1.9426743784666556,
+   "inside_factor_2": false,
+   "full_clock": true
+  }
+ ],
+ "summary": {
+  "rows": 1,
+  "rows_measured": 1,
+  "rows_missing": 0,
+  "inside_factor_2": 0,
+  "rms_ln_ratio": 1.94267,
+  "rms_factor": 6.97739,
+  "median_abs_ln_ratio": 1.94267,
+  "worst_ratio": 6.97739
+ }
+}
