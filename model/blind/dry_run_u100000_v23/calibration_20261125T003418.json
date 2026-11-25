@@ -1,0 +1,584 @@
+{
+ "label": "DRY RUN",
+ "name": "u100000_v23",
+ "step": "calibrate",
+ "ts": "20261125T003418",
+ "data": "u100000.csv",
+ "data_sha256_12": "847eacd4769b",
+ "gpu": {
+  "index": 1,
+  "name": "NVIDIA GeForce RTX 4090",
+  "driver": "580.178.04",
+  "max_sm_mhz": "3105 MHz",
+  "mem": "24564 MiB",
+  "bus": "00000000:34:00.0",
+  "host": "tethys.ecn.purdue.edu"
+ },
+ "sm": 128,
+ "clk": 2500000000.0,
+ "repo_head": "d58c2a5",
+ "rule_sha12": "fa2adf1713d6",
+ "frozen_files_checked": 8,
+ "tool_sha12": "0aa3dc36df56",
+ "seeds": {
+  "rtnn_sample": 11,
+  "tk_sample": 21,
+  "ark_queries": 7,
+  "radius": 5
+ },
+ "N": 100000,
+ "ks": [
+  50
+ ],
+ "tk_k": 16,
+ "mappings": [
+  "rtnn",
+  "trueknn",
+  "arkade"
+ ],
+ "rtnn": {
+  "50": {
+   "radius": 0.0640415525,
+   "nq": 50000,
+   "mean_cube_sub": 191.847,
+   "mean_called_sub": 92.2077,
+   "denominator": "1.10 x mean called candidates (revision 1)",
+   "T_real_ms": 0.516133,
+   "T_stub_ms": 0.401936,
+   "cb_S_raw": 7.20568,
+   "cb_S": 7.20568,
+   "floor_binds": false,
+   "d_S": 6.19467,
+   "runs": {
+    "real": {
+     "runs": [
+      {
+       "rc": 0,
+       "wall_s": 0.8182,
+       "stderr": "\tTotal GPUs visible: 1\n\tUsing [0]: NVIDIA GeForce RTX 4090\n\tMemory: 11.5958 GB\n",
+       "warmup": "warm 2000 ms on 128 SMs: no error",
+       "clock": {
+        "n": 15,
+        "max_sm_mhz_gpu": 3105,
+        "min_after_start": 2715,
+        "median": 2715,
+        "max": 2715,
+        "frac_at_least_2400": 1.0,
+        "full_clock": true
+       },
+       "search_ms": 0.519256
+      },
+      {
+       "rc": 0,
+       "wall_s": 0.8272,
+       "stderr": "\tTotal GPUs visible: 1\n\tUsing [0]: NVIDIA GeForce RTX 4090\n\tMemory: 11.5958 GB\n",
+       "warmup": "warm 2000 ms on 128 SMs: no error",
+       "clock": {
+        "n": 16,
+        "max_sm_mhz_gpu": 3105,
+        "min_after_start": 2715,
+        "median": 2715.0,
+        "max": 2715,
+        "frac_at_least_2400": 1.0,
+        "full_clock": true
+       },
+       "search_ms": 0.516133
+      },
+      {
+       "rc": 0,
+       "wall_s": 0.8022,
+       "stderr": "\tTotal GPUs visible: 1\n\tUsing [0]: NVIDIA GeForce RTX 4090\n\tMemory: 11.5958 GB\n",
+       "warmup": "warm 2000 ms on 128 SMs: no error",
+       "clock": {
+        "n": 16,
+        "max_sm_mhz_gpu": 3105,
+        "min_after_start": 2700,
+        "median": 2700.0,
+        "max": 2715,
+        "frac_at_least_2400": 1.0,
+        "full_clock": true
+       },
+       "search_ms": 0.508881
+      }
+     ],
+     "median_ms": 0.516133,
+     "full_clock": true
+    },
+    "stub": {
+     "runs": [
+      {
+       "rc": 0,
+       "wall_s": 0.7883,
+       "stderr": "\tTotal GPUs visible: 1\n\tUsing [0]: NVIDIA GeForce RTX 4090\n\tMemory: 11.5958 GB\n",
+       "warmup": "warm 2000 ms on 128 SMs: no error",
+       "clock": {
+        "n": 15,
+        "max_sm_mhz_gpu": 3105,
+        "min_after_start": 2715,
+        "median": 2715,
+        "max": 2715,
+        "frac_at_least_2400": 1.0,
+        "full_clock": true
+       },
+       "search_ms": 0.401936
+      },
+      {
+       "rc": 0,
+       "wall_s": 0.7926,
+       "stderr": "\tTotal GPUs visible: 1\n\tUsing [0]: NVIDIA GeForce RTX 4090\n\tMemory: 11.5958 GB\n",
+       "warmup": "warm 2000 ms on 128 SMs: no error",
+       "clock": {
+        "n": 16,
+        "max_sm_mhz_gpu": 3105,
+        "min_after_start": 2715,
+        "median": 2715.0,
+        "max": 2730,
+        "frac_at_least_2400": 1.0,
+        "full_clock": true
+       },
+       "search_ms": 0.394535
+      },
+      {
+       "rc": 0,
+       "wall_s": 0.804,
+       "stderr": "\tTotal GPUs visible: 1\n\tUsing [0]: NVIDIA GeForce RTX 4090\n\tMemory: 11.5958 GB\n",
+       "warmup": "warm 2000 ms on 128 SMs: no error",
+       "clock": {
+        "n": 16,
+        "max_sm_mhz_gpu": 3105,
+        "min_after_start": 2715,
+        "median": 2715.0,
+        "max": 2715,
+        "frac_at_least_2400": 1.0,
+        "full_clock": true
+       },
+       "search_ms": 0.403703
+      }
+     ],
+     "median_ms": 0.401936,
+     "full_clock": true
+    }
+   }
+  }
+ },
+ "rtnn_dumps": {
+  "50": {
+   "sorted": {
+    "dir": "~/thirdparty/blind/dumps/dry_run_u100000_v23_K50_sorted",
+    "flags": [],
+    "ok": true,
+    "files": {
+     "aabb_radius0.txt": {
+      "bytes": 20,
+      "sha256_12": "9969d7567c37"
+     },
+     "gas0.bin": {
+      "bytes": 1779968,
+      "sha256_12": "ff1aa0a6e005"
+     },
+     "points.bin": {
+      "bytes": 1200000,
+      "sha256_12": "d819a3b42a88"
+     },
+     "rays0.bin": {
+      "bytes": 3200000,
+      "sha256_12": "24c82e9375b5"
+     }
+    },
+    "timing_kept": false
+   },
+   "unsorted": {
+    "dir": "~/thirdparty/blind/dumps/dry_run_u100000_v23_K50_unsorted",
+    "flags": [
+     "-qs",
+     "0",
+     "-ps",
+     "0"
+    ],
+    "ok": true,
+    "files": {
+     "aabb_radius0.txt": {
+      "bytes": 20,
+      "sha256_12": "9969d7567c37"
+     },
+     "gas0.bin": {
+      "bytes": 1779968,
+      "sha256_12": "4dff3df4d49b"
+     },
+     "points.bin": {
+      "bytes": 1200000,
+      "sha256_12": "222caa9acd74"
+     },
+     "rays0.bin": {
+      "bytes": 3200000,
+      "sha256_12": "a315d5c6bb7b"
+     }
+    },
+    "timing_kept": false
+   }
+  }
+ },
+ "trueknn": {
+  "r0": 0.00437633,
+  "k": 16,
+  "sample_points": 5000,
+  "replay_rounds_sample": [
+   {
+    "radius": 0.00437633,
+    "hits": 5012.0,
+    "maxc": 2.0,
+    "active": 5000
+   },
+   {
+    "radius": 0.00875266,
+    "hits": 5138.0,
+    "maxc": 3.0,
+    "active": 5000
+   },
+   {
+    "radius": 0.0175053,
+    "hits": 6050.0,
+    "maxc": 5.0,
+    "active": 5000
+   },
+   {
+    "radius": 0.0350106,
+    "hits": 13388.0,
+    "maxc": 9.0,
+    "active": 5000
+   },
+   {
+    "radius": 0.0700213,
+    "hits": 67216.0,
+    "maxc": 28.0,
+    "active": 5000
+   },
+   {
+    "radius": 0.140043,
+    "hits": 323759.0,
+    "maxc": 140.0,
+    "active": 3793
+   }
+  ],
+  "cycles_per_replay_hit_runs": [
+   553.6294015403162,
+   553.7872114284899,
+   553.4061888468553
+  ],
+  "cpc": 553.629,
+  "runs": [
+   {
+    "rc": 0,
+    "wall_s": 0.3954,
+    "stderr": "",
+    "warmup": "warm 2000 ms on 128 SMs: no error",
+    "clock": {
+     "n": 8,
+     "max_sm_mhz_gpu": 3105,
+     "min_after_start": 2715,
+     "median": 2715.0,
+     "max": 2715,
+     "frac_at_least_2400": 1.0,
+     "full_clock": true
+    },
+    "rounds": [
+     {
+      "round": 1,
+      "radius": 0.00437633,
+      "gt_span_ms": 0.0461,
+      "f0_cycles": 7309712.0,
+      "f0_calls": 1504.0
+     },
+     {
+      "round": 2,
+      "radius": 0.00875266,
+      "gt_span_ms": 0.0348,
+      "f0_cycles": 4221525.0,
+      "f0_calls": 1586.0
+     },
+     {
+      "round": 3,
+      "radius": 0.0175053,
+      "gt_span_ms": 0.0451,
+      "f0_cycles": 6283096.0,
+      "f0_calls": 2053.0
+     },
+     {
+      "round": 4,
+      "radius": 0.0350106,
+      "gt_span_ms": 0.087,
+      "f0_cycles": 16095507.0,
+      "f0_calls": 4303.0
+     },
+     {
+      "round": 5,
+      "radius": 0.0700213,
+      "gt_span_ms": 0.2437,
+      "f0_cycles": 62970471.0,
+      "f0_calls": 14878.0
+     },
+     {
+      "round": 6,
+      "radius": 0.140043,
+      "gt_span_ms": 0.6717,
+      "f0_cycles": 135955731.0,
+      "f0_calls": 45791.0
+     }
+    ],
+    "gt_span_sum_ms": 1.1284,
+    "f0_cycles_sum": 232836042.0,
+    "rounds_n": 6
+   },
+   {
+    "rc": 0,
+    "wall_s": 0.3927,
+    "stderr": "",
+    "warmup": "warm 2000 ms on 128 SMs: no error",
+    "clock": {
+     "n": 8,
+     "max_sm_mhz_gpu": 3105,
+     "min_after_start": 2715,
+     "median": 2715.0,
+     "max": 2715,
+     "frac_at_least_2400": 1.0,
+     "full_clock": true
+    },
+    "rounds": [
+     {
+      "round": 1,
+      "radius": 0.00437633,
+      "gt_span_ms": 0.0461,
+      "f0_cycles": 7312772.0,
+      "f0_calls": 1504.0
+     },
+     {
+      "round": 2,
+      "radius": 0.00875266,
+      "gt_span_ms": 0.0348,
+      "f0_cycles": 4227725.0,
+      "f0_calls": 1586.0
+     },
+     {
+      "round": 3,
+      "radius": 0.0175053,
+      "gt_span_ms": 0.0451,
+      "f0_cycles": 6286413.0,
+      "f0_calls": 2053.0
+     },
+     {
+      "round": 4,
+      "radius": 0.0350106,
+      "gt_span_ms": 0.087,
+      "f0_cycles": 16219292.0,
+      "f0_calls": 4303.0
+     },
+     {
+      "round": 5,
+      "radius": 0.0700213,
+      "gt_span_ms": 0.2427,
+      "f0_cycles": 62880780.0,
+      "f0_calls": 14878.0
+     },
+     {
+      "round": 6,
+      "radius": 0.140043,
+      "gt_span_ms": 0.6707,
+      "f0_cycles": 135975429.0,
+      "f0_calls": 45791.0
+     }
+    ],
+    "gt_span_sum_ms": 1.1263999999999998,
+    "f0_cycles_sum": 232902411.0,
+    "rounds_n": 6
+   },
+   {
+    "rc": 0,
+    "wall_s": 0.3819,
+    "stderr": "",
+    "warmup": "warm 2000 ms on 128 SMs: no error",
+    "clock": {
+     "n": 7,
+     "max_sm_mhz_gpu": 3105,
+     "min_after_start": 2715,
+     "median": 2715,
+     "max": 2715,
+     "frac_at_least_2400": 1.0,
+     "full_clock": true
+    },
+    "rounds": [
+     {
+      "round": 1,
+      "radius": 0.00437633,
+      "gt_span_ms": 0.0461,
+      "f0_cycles": 7329715.0,
+      "f0_calls": 1504.0
+     },
+     {
+      "round": 2,
+      "radius": 0.00875266,
+      "gt_span_ms": 0.0348,
+      "f0_cycles": 4225475.0,
+      "f0_calls": 1586.0
+     },
+     {
+      "round": 3,
+      "radius": 0.0175053,
+      "gt_span_ms": 0.0451,
+      "f0_cycles": 6290801.0,
+      "f0_calls": 2053.0
+     },
+     {
+      "round": 4,
+      "radius": 0.0350106,
+      "gt_span_ms": 0.0881,
+      "f0_cycles": 16078089.0,
+      "f0_calls": 4303.0
+     },
+     {
+      "round": 5,
+      "radius": 0.0700213,
+      "gt_span_ms": 0.2417,
+      "f0_cycles": 62941744.0,
+      "f0_calls": 14878.0
+     },
+     {
+      "round": 6,
+      "radius": 0.140043,
+      "gt_span_ms": 0.6676,
+      "f0_cycles": 135876343.0,
+      "f0_calls": 45791.0
+     }
+    ],
+    "gt_span_sum_ms": 1.1234,
+    "f0_cycles_sum": 232742167.0,
+    "rounds_n": 6
+   }
+  ],
+  "full_clock": true,
+  "failed": false
+ },
+ "arkade": {
+  "r0": 0.00026702,
+  "radius": 0.0170893,
+  "queries": 10000,
+  "sample_queries": 1000,
+  "T_ref_ms": 1.0535,
+  "F_ref": 1625392614.0,
+  "F_sample": 44925795.0,
+  "F_d": 449257950.0,
+  "reference_runs": [
+   {
+    "rc": 0,
+    "wall_s": 0.5361,
+    "stderr": "",
+    "warmup": "warm 2000 ms on 128 SMs: no error",
+    "clock": {
+     "n": 11,
+     "max_sm_mhz_gpu": 3105,
+     "min_after_start": 2715,
+     "median": 2715,
+     "max": 2715,
+     "frac_at_least_2400": 1.0,
+     "full_clock": true
+    },
+    "kernel_ms": 1.0535,
+    "f0_cycles": 1625392614.0,
+    "f0_calls": 105837.0
+   },
+   {
+    "rc": 0,
+    "wall_s": 0.5554,
+    "stderr": "",
+    "warmup": "warm 2000 ms on 128 SMs: no error",
+    "clock": {
+     "n": 11,
+     "max_sm_mhz_gpu": 3105,
+     "min_after_start": 2715,
+     "median": 2715,
+     "max": 2715,
+     "frac_at_least_2400": 1.0,
+     "full_clock": true
+    },
+    "kernel_ms": 1.0534,
+    "f0_cycles": 1626589412.0,
+    "f0_calls": 105837.0
+   },
+   {
+    "rc": 0,
+    "wall_s": 0.5609,
+    "stderr": "",
+    "warmup": "warm 2000 ms on 128 SMs: no error",
+    "clock": {
+     "n": 11,
+     "max_sm_mhz_gpu": 3105,
+     "min_after_start": 2700,
+     "median": 2700,
+     "max": 2700,
+     "frac_at_least_2400": 1.0,
+     "full_clock": true
+    },
+    "kernel_ms": 1.0535,
+    "f0_cycles": 1622682582.0,
+    "f0_calls": 105837.0
+   }
+  ],
+  "sample_runs": [
+   {
+    "rc": 0,
+    "wall_s": 0.4113,
+    "stderr": "",
+    "warmup": "warm 2000 ms on 128 SMs: no error",
+    "clock": {
+     "n": 7,
+     "max_sm_mhz_gpu": 3105,
+     "min_after_start": 2715,
+     "median": 2715,
+     "max": 2715,
+     "frac_at_least_2400": 1.0,
+     "full_clock": true
+    },
+    "kernel_ms": 0.8322,
+    "f0_cycles": 44947282.0,
+    "f0_calls": 10885.0
+   },
+   {
+    "rc": 0,
+    "wall_s": 0.4108,
+    "stderr": "",
+    "warmup": "warm 2000 ms on 128 SMs: no error",
+    "clock": {
+     "n": 7,
+     "max_sm_mhz_gpu": 3105,
+     "min_after_start": 2715,
+     "median": 2715,
+     "max": 2715,
+     "frac_at_least_2400": 1.0,
+     "full_clock": true
+    },
+    "kernel_ms": 0.8314,
+    "f0_cycles": 44925795.0,
+    "f0_calls": 10885.0
+   },
+   {
+    "rc": 0,
+    "wall_s": 0.4224,
+    "stderr": "",
+    "warmup": "warm 2000 ms on 128 SMs: no error",
+    "clock": {
+     "n": 7,
+     "max_sm_mhz_gpu": 3105,
+     "min_after_start": 2715,
+     "median": 2715,
+     "max": 2715,
+     "frac_at_least_2400": 1.0,
+     "full_clock": true
+    },
+    "kernel_ms": 0.8221,
+    "f0_cycles": 44895678.0,
+    "f0_calls": 10885.0
+   }
+  ],
+  "full_clock": true,
+  "failed": false
+ }
+}
