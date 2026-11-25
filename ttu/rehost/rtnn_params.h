@@ -11,4 +11,5 @@ struct RParams {
     OptixTraversableHandle handle;
     float r2;
     unsigned n;
+    unsigned *candlog;            // per query 256 words: the primitive index of every intersection program call, in call order (first 256)
 };

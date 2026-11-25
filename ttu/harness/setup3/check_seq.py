@@ -401,7 +401,7 @@ def check(path):
            low12(body[pexits[0] - 3]) == 0x919 and ((W(body[pexits[0] - 3]) >> 72) & 0xff) == 0x43
            and low12(body[pexits[0] - 2]) == 0x20c and low12(body[pexits[0] - 1]) == 0x20c)
     else:
-        ok('no early EXIT', not pexits, pexits)
+        ok('no early EXIT' + (' (the lane mask build has exactly one, rule M1)' if meta.get('lane0') else ''), (len(pexits) == 1) if meta.get('lane0') else not pexits, pexits)
     if meta.get('gtime'):
         gt = lambda b, rd: low12(b) == 0x805 and (W(b) >> 16) & 0xff == rd and (W(b) >> 72) & 0xff == 0x52
         k = 1 if meta.get('clock') else 0
@@ -419,7 +419,15 @@ def check(path):
         top, lb = meta['loop_top'], meta['loop_bra']
         ok('L1 exactly one branch before EXIT: a backward @P4 BRA after the group to the NOP with stall 15 right before TTUOPEN, which is also B12 s NOP',
            brs_l == [lb] and low12(body[lb]) == 0x947 and pred(body[lb]) == (4, 0) and lb > g + GL and lb + 1 + sbo(body[lb]) // 16 == top == g - 1 and low12(body[top]) == 0x918 and stall(body[top]) == 15, (brs_l, lb, top, g))
-        ok('L2 no BSSY, BSYNC, barrier, atomic, EXIT or call before the final EXIT', not any(low12(b) in (0x945, 0x941, 0xb1d, 0x98e, 0x9a8, 0x94d, 0x943) for b in body[:ex]))
+        pex = [i for i, b in enumerate(body[:ex]) if low12(b) == 0x94d]
+        ok('L2 no BSSY, BSYNC, barrier, atomic or call before the final EXIT; no other EXIT unless the lane mask build has its one', not any(low12(b) in (0x945, 0x941, 0xb1d, 0x98e, 0x9a8, 0x943) for b in body[:ex]) and (len(pex) == (1 if meta.get('lane0') else 0)), pex)
+        if meta.get('lane0'):   # M1 (Jack 2026-11-24): only lane 0 of the warp runs: S2R SR_TID.X, then ISETP.NE P1 = (tid != 0), then @P1 EXIT, all before any load and any TTU instruction
+            pi = pex[0] if pex else -1; first_ttu = min([i for i, b in enumerate(body) if low12(b) in TTU] or [ex]); first_ld = min([i for i, b in enumerate(body) if low12(b) == 0x981] or [ex])
+            s2r_i = pi - 3   # the four instructions right before the exit: S2R SR_TID.X, NOP (wait all), ISETP.NE P1, Rtid, RZ, @P1 EXIT (the nvcc prologue has its own S2R SR_TID.X earlier)
+            ok('M1 lane mask: S2R SR_TID.X, a NOP waiting on all scoreboards, ISETP.NE P1, Rtid, RZ (the S2R register), then @P1 EXIT, all before the first load and the first TTU instruction',
+               len(pex) == 1 and pred(body[pi]) == (1, 0) and s2r_i > 0 and low12(body[s2r_i]) == 0x919 and ((W(body[s2r_i]) >> 72) & 0xff) == 0x21 and low12(body[pi - 1]) == 0x20c and fb(body[pi - 1], 24) == fb(body[s2r_i], 16)
+               and fb(body[pi - 1], 32) == 255 and ((W(body[pi - 1]) >> 81) & 7) == 1 and ((W(body[pi - 1]) >> 24) & 0xff) != 255 and low12(body[s2r_i + 1]) == 0x918 and ((W(body[s2r_i + 1][8:]) >> 52) & 0x3f) == 0x3f
+               and pi < first_ld and pi < first_ttu, (pex, s2r_i))
         rd_ = lambda b: fb(b, 16)
         init = [i for i, b in enumerate(body[:g]) if low12(b) == 0x810 and rd_(b) == 118 and fb(b, 24) == 255]
         dec_ = [i for i in range(g + GL, lb) if low12(body[i]) == 0x810 and rd_(body[i]) == 118 and fb(body[i], 24) == 118 and (W(body[i]) >> 32) & 0xffffffff == 0xffffffff]

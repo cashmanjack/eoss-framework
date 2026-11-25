@@ -11,3 +11,6 @@ Predictions:
 7. Another mechanism (an answer carrying a second candidate in words we do not read, e.g. the 0x310 or 0x380 words nonzero in diverging sessions): 0.3.
 8. No fault, no hang: 0.95.
 Fix to be proposed after reading the trace, with its own prediction, then stop for approval.
+
+## Addendum 2026-11-24 (before the run; Jack's change of design)
+The test is ONE warp with only lane 0 active, the 32 queries one after another as 32 launches of <<<1, 32>>> (lanes 1 to 31 leave before any load: check_seq rule M1), stage 0 with injected candidates first, then stage 1 once with the trace build. Not 32 warps. The same predictions as the proposal: all 32 queries exact 0.6; sessions equal OptiX candidates or + 1: 0.55; still inexact 0.4. The run also saves the GAS record table and OptiX's full candidate sequence per query, so a remaining mismatch can be traced to its first diverging session. If exact: lane interference in a shared session. If inexact: compare single lane sessions with R2's host rounds offline. No further TTU runs after this one.

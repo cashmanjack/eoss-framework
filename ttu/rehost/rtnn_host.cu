@@ -59,7 +59,7 @@ template <class T> static T *dalloc_lo32(size_t n)   // device buffer that does 
 int main(int argc, char **argv)
 {
     if (argc < 4) { fprintf(stderr, "usage: rtnn_host PTX WORDS OUT.json [options]\n"); return 2; }
-    std::string mode = "real"; int npts = 4096, warps = 1, blocks = 1, repeat = 1, orep = 0; unsigned seed = 7; float r = 0.08f; bool optix_only = false, stats_only = false, no_ttu = false, trace = false;
+    std::string mode = "real"; int npts = 4096, warps = 1, blocks = 1, repeat = 1, orep = 0; unsigned seed = 7; float r = 0.08f; bool optix_only = false, stats_only = false, no_ttu = false, trace = false, serial = false;
     for (int a = 4; a < argc; ++a) {
         if (!strcmp(argv[a], "--mode") && a + 1 < argc) mode = argv[++a];
         else if (!strcmp(argv[a], "--pts") && a + 1 < argc) npts = atoi(argv[++a]);
@@ -71,6 +71,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--optix-repeat") && a + 1 < argc) orep = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--optix-only")) optix_only = true;
         else if (!strcmp(argv[a], "--stats-only")) stats_only = true;
+        else if (!strcmp(argv[a], "--serial")) serial = true;   // for a build_rtnn.py --lane0 kernel: one launch of one warp per query, lane 0 of each warp is the only lane that runs
         else if (!strcmp(argv[a], "--trace")) trace = true;   // for a build_rtnn.py --trace kernel: per session answer words in a per lane trace area (64 sessions of 128 bytes) behind the out records
         else { fprintf(stderr, "unknown option %s\n", argv[a]); return 2; }
     }
@@ -114,12 +115,12 @@ int main(int argc, char **argv)
     OptixShaderBindingTable sbt{}; sbt.raygenRecord = drec; sbt.missRecordBase = drec + sizeof(Rec); sbt.missRecordStrideInBytes = sizeof(Rec); sbt.missRecordCount = 1;
     sbt.hitgroupRecordBase = drec + 2 * sizeof(Rec); sbt.hitgroupRecordStrideInBytes = sizeof(Rec); sbt.hitgroupRecordCount = 1;
     RParams prm{}; prm.q = dQ; prm.pts = dP; prm.r2 = r2; prm.n = TOTAL; prm.handle = h;
-    CK(cudaMalloc((void **)&prm.nbr, (size_t)TOTAL * 65 * 4)); CK(cudaMalloc((void **)&prm.ncand, (size_t)TOTAL * 4)); CK(cudaMalloc((void **)&prm.inst, 18 * 8));
+    CK(cudaMalloc((void **)&prm.candlog, (size_t)TOTAL * 256 * 4)); CK(cudaMemset(prm.candlog, 0, (size_t)TOTAL * 256 * 4)); CK(cudaMalloc((void **)&prm.nbr, (size_t)TOTAL * 65 * 4)); CK(cudaMalloc((void **)&prm.ncand, (size_t)TOTAL * 4)); CK(cudaMalloc((void **)&prm.inst, 18 * 8));
     CK(cudaMemset(prm.nbr, 0, (size_t)TOTAL * 65 * 4)); CK(cudaMemset(prm.ncand, 0, (size_t)TOTAL * 4)); CK(cudaMemset(prm.inst, 0, 18 * 8));
     CUdeviceptr dprm; CK(cudaMalloc((void **)&dprm, sizeof prm)); CK(cudaMemcpy((void *)dprm, &prm, sizeof prm, cudaMemcpyHostToDevice));
     OX(optixLaunch(pipe, 0, dprm, sizeof prm, &sbt, TOTAL, 1, 1)); CK(cudaDeviceSynchronize());
     std::vector<unsigned> onbr((size_t)TOTAL * 65), oncand(TOTAL); unsigned long long inst[18];
-    CK(cudaMemcpy(onbr.data(), prm.nbr, onbr.size() * 4, cudaMemcpyDeviceToHost)); CK(cudaMemcpy(oncand.data(), prm.ncand, TOTAL * 4, cudaMemcpyDeviceToHost)); CK(cudaMemcpy(inst, prm.inst, sizeof inst, cudaMemcpyDeviceToHost));
+    std::vector<unsigned> ocl((size_t)TOTAL * 256); CK(cudaMemcpy(ocl.data(), prm.candlog, ocl.size() * 4, cudaMemcpyDeviceToHost)); CK(cudaMemcpy(onbr.data(), prm.nbr, onbr.size() * 4, cudaMemcpyDeviceToHost)); CK(cudaMemcpy(oncand.data(), prm.ncand, TOTAL * 4, cudaMemcpyDeviceToHost)); CK(cudaMemcpy(inst, prm.inst, sizeof inst, cudaMemcpyDeviceToHost));
     std::vector<float> optix_ms;
     if (orep > 0) {
         cudaEvent_t a0, a1; CK(cudaEventCreate(&a0)); CK(cudaEventCreate(&a1));
@@ -190,7 +191,8 @@ int main(int argc, char **argv)
     for (int it = 0; it < repeat && e == cudaSuccess; ++it) {
         std::vector<unsigned> fill(IMG + TRW, 0x77777777u); CK(cudaMemcpy(dout, fill.data(), (IMG + TRW) * 4, cudaMemcpyHostToDevice));
         CK(cudaDeviceSynchronize()); CK(cudaEventRecord(e0));
-        ttu_one<<<blocks, LANES>>>(din, dout);
+        if (serial) { for (unsigned q = 0; q < TOTAL && e == cudaSuccess; ++q) { ttu_one<<<1, 32>>>(din + (size_t)q * N, dout + (size_t)q * N); e = cudaGetLastError(); if (e == cudaSuccess) e = cudaDeviceSynchronize(); } }
+        else ttu_one<<<blocks, LANES>>>(din, dout);
         CK(cudaEventRecord(e1)); e = cudaGetLastError(); if (e == cudaSuccess) e = cudaEventSynchronize(e1);
         if (e == cudaSuccess) { float ms; CK(cudaEventElapsedTime(&ms, e0, e1)); ttu_ms.push_back(ms); }
     }
@@ -246,6 +248,10 @@ int main(int argc, char **argv)
         }
         fprintf(jf, "]");
     }
+    { std::vector<unsigned> rt((size_t)npts * 2); CK(cudaMemcpy(rt.data(), (void *)(gas + rec_off), rt.size() * 4, cudaMemcpyDeviceToHost));   // the GAS record table (word 0 = primitive index) and OptiX's full candidate sequence per query
+      fprintf(jf, ",\n \"rec_prim\": ["); for (int k = 0; k < npts; ++k) fprintf(jf, "%s%u", k ? "," : "", rt[(size_t)k * 2]);
+      fprintf(jf, "],\n \"optix_cands\": ["); for (unsigned i = 0; i < std::min<unsigned>(TOTAL, 64); ++i) { fprintf(jf, "%s[", i ? "," : ""); for (unsigned k = 0; k < std::min<unsigned>(oncand[i], 256); ++k) fprintf(jf, "%s%u", k ? "," : "", ocl[(size_t)i * 256 + k]); fprintf(jf, "]"); }
+      fprintf(jf, "]"); }
     if (trace && e == cudaSuccess) {   // the answer registers of every session of the first 64 lanes: [R2,R3,R30,R31,R32,R33,R34,R35,R44,R45,R56..R63,R68,R69,R70,R71]
         fprintf(jf, ",\n \"trace\": [");
         for (unsigned i = 0; i < std::min<unsigned>(TOTAL, 64); ++i) {

@@ -39,7 +39,7 @@ def pred_bits(b, p, neg=0):
 TRACE_REGS = [2, 3, 30, 31, 32, 33, 34, 35, 44, 45, 56, 57, 58, 59, 60, 61, 62, 63, 68, 69, 70, 71]   # answer registers stored per session by --trace (R18:R19 = this lane's absolute trace address, 128 bytes per session)
 
 
-def build(stage, binpath, out, rounds, inline='full', debug=False, trace=False):
+def build(stage, binpath, out, rounds, inline='full', debug=False, trace=False, lane0=False):
     p = BinaryPatcher(binpath)
     sec = [s for s in p.sections if s[2].endswith('.ttu_one')]
     assert len(sec) == 1
@@ -56,6 +56,8 @@ def build(stage, binpath, out, rounds, inline='full', debug=False, trace=False):
 
     body = list(prologue)
     body.append(field(wide[0], 16, IN_PTR)); body.append(wide[1])                # in pointer -> R92:R93, out pointer -> R4:R5
+    if lane0:   # only lane 0 of the warp runs (R3 serial test): S2R SR_TID.X, wait, ISETP.NE P1 = tid != 0, @P1 EXIT; before any load and any TTU instruction
+        body += [ctrl.write_control(BP.s2r_sr(R_TMP, 0x21), stall=8), ctrl.write_control(ctrl.NOP_BYTES, wt_bar=0x3f, stall=2), BP.isetp_ne(1, R_TMP, 255, 13, 0), BP.exit_if(1, 7)]
     inputs = sorted(set(BP.INPUTS) | set(EXTRA_IN) | ({18, 19} if trace else set()))   # R18:R19 = the lane's trace offset (--trace)
     for r in inputs:
         body.append(field(field(ldg[r], 16, r), 24, IN_PTR))
@@ -125,7 +127,7 @@ def build(stage, binpath, out, rounds, inline='full', debug=False, trace=False):
     sha = hashlib.sha256(open(out, 'rb').read()).hexdigest()
     meta = {'stage': stage, 'remap': False, 'regmap': {}, 'top_reg': R_TMP, 'clk': [R_T0, R_T1], 'gt': [22, 24], 'twice': False, 'sibling': False, 'sm': 89, 'inputs': inputs,
             'outputs': sorted(set(s for s, _ in outs)), 'in_ptr': IN_PTR, 'section': sec[0][2], 'group_index': g, 'group_len': 19, 'groups': [g], 'sha256': sha, 'regs': 128,
-            'emit': True, 'rtnn': 1, 'rounds': rounds, 'inline': inline, 'trace': bool(trace), 'loop_top': top, 'loop_bra': loop_bra}
+            'emit': True, 'rtnn': 1, 'rounds': rounds, 'inline': inline, 'trace': bool(trace), 'lane0': bool(lane0), 'loop_top': top, 'loop_bra': loop_bra}
     json.dump(meta, open(out + '.layout.json', 'w'), indent=1)
     print('built %s stage %d: %d instructions of %d slots, group at %d, loop top %d, bra %d, sha256 %s' % (out, stage, loop_bra + 1 + len(outs) + 5, len(orig), g, top, loop_bra, sha))
     return out
@@ -134,6 +136,6 @@ def build(stage, binpath, out, rounds, inline='full', debug=False, trace=False):
 if __name__ == '__main__':
     a = argparse.ArgumentParser()
     a.add_argument('--stage', type=int, choices=[0, 1], required=True); a.add_argument('--bin', required=True); a.add_argument('--out', required=True)
-    a.add_argument('--rounds', type=int, default=100); a.add_argument('--debug', action='store_true'); a.add_argument('--trace', action='store_true'); a.add_argument('--inline', choices=['full', 'none', 'rec', 'pts', 'math'], default='full')
+    a.add_argument('--rounds', type=int, default=100); a.add_argument('--debug', action='store_true'); a.add_argument('--trace', action='store_true'); a.add_argument('--lane0', action='store_true'); a.add_argument('--inline', choices=['full', 'none', 'rec', 'pts', 'math'], default='full')
     x = a.parse_args()
-    build(x.stage, x.bin, x.out, x.rounds, x.inline, x.debug, x.trace)
+    build(x.stage, x.bin, x.out, x.rounds, x.inline, x.debug, x.trace, x.lane0)
