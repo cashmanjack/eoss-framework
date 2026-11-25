@@ -1,0 +1,107 @@
+{
+ "label": "DRY RUN",
+ "name": "u100000_v22",
+ "step": "predict",
+ "ts": "20261124T220112",
+ "data": "u100000.csv",
+ "data_sha256_12": "847eacd4769b",
+ "gpu": {
+  "index": 1,
+  "name": "NVIDIA GeForce RTX 4090",
+  "driver": "580.178.04",
+  "max_sm_mhz": "3105 MHz",
+  "mem": "24564 MiB",
+  "bus": "00000000:34:00.0",
+  "host": "tethys.ecn.purdue.edu"
+ },
+ "sm": 128,
+ "clk": 2500000000.0,
+ "repo_head": "2378059",
+ "rule_sha12": "b24b6a256cb4",
+ "frozen_files_checked": 8,
+ "tool_sha12": "f29eaf7e61e6",
+ "seeds": {
+  "rtnn_sample": 11,
+  "tk_sample": 21,
+  "ark_queries": 7,
+  "radius": 5
+ },
+ "N": 100000,
+ "calibration_file": "model/blind/dry_run_u100000_v22/calibration_20261124T220018.json",
+ "calibration_commit": "2378059",
+ "ks": [
+  50
+ ],
+ "mappings": [
+  "rtnn",
+  "trueknn",
+  "arkade"
+ ],
+ "version": "PRIMARY v1-S (+ secondary uncalibrated v1 for RTNN, + relative rows)",
+ "rtnn": {
+  "50": {
+   "radius": 0.0640416,
+   "d_S": 2.34514,
+   "primary_ms": 0.266338,
+   "thr_ms": 0.266338,
+   "chain_ms": 0.0328457,
+   "mean_q": 102.453,
+   "secondary_uncalibrated_ms": 0.191255
+  }
+ },
+ "trueknn": {
+  "primary_ms": 1.53578,
+  "rounds": [
+   {
+    "radius": 0.00437633,
+    "active": 100000,
+    "hits": 106756.0,
+    "callback_ms": 0.0214326,
+    "chain_ms": 0.00928
+   },
+   {
+    "radius": 0.00875266,
+    "active": 100000,
+    "hits": 153204.0,
+    "callback_ms": 0.0307577,
+    "chain_ms": 0.01624
+   },
+   {
+    "radius": 0.0175053,
+    "active": 100000,
+    "hits": 517364.0,
+    "callback_ms": 0.103867,
+    "chain_ms": 0.03712
+   },
+   {
+    "radius": 0.0350106,
+    "active": 100000,
+    "hits": 3359420.0,
+    "callback_ms": 0.674447,
+    "chain_ms": 0.14616
+   },
+   {
+    "radius": 0.0700213,
+    "active": 1763,
+    "hits": 223514.0,
+    "callback_ms": 0.0448733,
+    "chain_ms": 0.70528
+   }
+  ],
+  "cpc": 553.754,
+  "k": 16
+ },
+ "arkade": {
+  "primary_ms": 0.291225,
+  "A_ms": 0.291225,
+  "B_ms": 0.135551,
+  "radius": 0.0170893,
+  "mean_candidates": 127.594,
+  "R1_pinned_over_device": 5.53257,
+  "result_MB": 4.0
+ },
+ "relative": {
+  "R2_kNN_register_heap_speedup": 4.02,
+  "R1_pinned_over_device": 5.53257
+ }
+}
