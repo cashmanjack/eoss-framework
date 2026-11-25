@@ -241,13 +241,21 @@ def meas_ark(pts, N, pred):
             x = run([A.ark_probe, f, str(N), str(len(Q)), repr(R)], os.path.dirname(A.ark_probe), ex, 900); txt = strip(x); x.update(ark_parse(txt)); runs.append(x)
         out[name] = dict(runs=runs, median_ms=med([x['kernel_ms'] for x in runs if x['rc'] == 0]), full_clock=full_clock(runs))
     os.remove(f); return out
+def ncu_launch_ns(txt):
+    """Sum of gpu__time_duration over all optixLaunch kernels in an ncu --csv output (ns)."""
+    import csv, io
+    tot = 0.0; n = 0
+    for rec in csv.reader(io.StringIO(txt)):
+        if len(rec) > 5 and rec[-1].replace(',', '').replace('.', '').isdigit() and 'gpu__time_duration' in ''.join(rec): tot += float(rec[-1].replace(',', '')); n += 1
+    return dict(launch_sum_ms=tot / 1e6 if n else None, launches=n)
 def meas_knn(pts, N, pred):
-    r0 = json.load(open(latest('calibration_')))['trueknn']['r0'] if 'trueknn' in json.load(open(latest('calibration_'))) else r0_rule(cKDTree(pts[:, :3]), pts[:, :3]); out = {}
+    cal = json.load(open(latest('calibration_'))); r0 = cal['trueknn']['r0'] if 'trueknn' in cal else r0_rule(cKDTree(pts[:, :3]), pts[:, :3]); out = {}
     for name, d in (('original', A.knn_orig), ('register_heap', A.knn_reg)):
         runs = []
         for i in range(3):
-            x = run([d + '/knn_host', A.data, A.data, '16', repr(r0)], d, None, 900); txt = strip(x); x.update(knn_parse(txt)); runs.append(x)
-        out[name] = dict(runs=runs, median_ms=med([x['total_search_ms'] for x in runs if x['rc'] == 0]), full_clock=full_clock(runs))
+            x = run(['ncu', '--clock-control', 'none', '--cache-control', 'none', '--kernel-name', 'regex:optixLaunch', '--metrics', 'gpu__time_duration.sum', '--csv', '--print-units', 'base', d + '/knn_host', A.data, A.data, '16', repr(r0)],
+                    d, {'TMPDIR': HOME + '/ncutmp'}, 1800); txt = strip(x); x.update(ncu_launch_ns(txt)); runs.append(x)
+        out[name] = dict(runs=runs, median_ms=med([x['launch_sum_ms'] for x in runs if x['rc'] == 0]), full_clock=full_clock(runs))
     return out
 def do_measure():
     need_data(); bc.verify_frozen(); cf = latest('calibration_'); pf = latest('primary_predictions_')

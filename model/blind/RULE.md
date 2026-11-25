@@ -34,7 +34,7 @@ Per dataset and per K (the dataset list and the K list are fixed in `PASS.md` be
 | Arkade kernel, device output, float | PRIMARY v1-S | CP-ARK + reference launch + replay | `KERNEL queries` event ms, DEVOUT=1, recorder off, median of 3 |
 | RTNN search launch | SECONDARY v1 uncalibrated | replay only (`blind_predict.py`) | same as the RTNN primary row |
 | Arkade pinned over device kernel time | RELATIVE R1 | primary Arkade prediction + 0.33 ms per MB | pinned kernel ms / device kernel ms, same build, medians of 3 |
-| kNN register heap over original, total search time | RELATIVE R2 | 4.02 (F138) | `Total Search Time` ms, original / register heap, medians of 3 |
+| kNN register heap over original, launch time | RELATIVE R2 | 4.02 (F138) | sum of the GPU time of all `optixLaunch` kernels (ncu `gpu__time_duration`, clocks not locked), original / register heap, medians of 3 |
 
 Excluded and why (so no row can be added after the fact): RTNN sorted over unsorted queries and the other reordering speedups of F113 to F127 need the hardware structure replay,
 which needs a GPU dump of the BVH built on the full dataset (a full OptiX run of the program on new data). TrueKNN and Arkade have no frozen reordering predictor.
@@ -64,7 +64,9 @@ Reference launch (once per GPU session, before the first dataset): the same buil
 A = T_ref x F_d / F_ref. B = (largest value over warps of the largest per lane count, count = 1.10 x exact cube count of radius R_A, lanes in Q order, 32 per warp) x 21,000 / 2.5e9 x 1e3 x 0.09 ms. Prediction = max(A, B).
 
 **Relative.** R1 = predicted pinned over device = (P + 0.33 x MB) / P, P = the Arkade primary prediction (ms), MB = 10,000 x 50 x 8 / 1e6 = 4.0. Measured: the same probe build with the recorder off (`CB_OFF=1`), device
-output against stock pinned output, medians of 3. R2 = 4.02; measured with the original and the register heap PTX (`notes/q15/diffs/knn_anyhit_reg.diff` applied to the same source), the same host binary, K 16, start radius r0, queries = points, 3 runs each.
+output against stock pinned output, medians of 3. R2 = 4.02; measured with the original and the register heap PTX (`notes/q15/diffs/knn_anyhit_reg.diff` applied to the same source), the same host binary, K 16, start radius r0, queries = points, 3 runs each,
+under `ncu --clock-control none --kernel-name regex:optixLaunch --metrics gpu__time_duration.sum` (TMPDIR set to a private directory). Revision 2.1 (2026-11-24, after the dry run, before any new data): the first text measured the program's
+`Total Search Time`, which includes host work and gave 1.29 on the dry run; F138's 4.02 is a launch time ratio, so the measured quantity is the launch time. The sum is over all launches including the small last rounds (F138 summed rounds 1 to 4).
 
 ## Order of events (each step is a commit and a push before the next step)
 
