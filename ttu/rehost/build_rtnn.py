@@ -8,7 +8,7 @@ No dump and no OptiX code is read. Per lane (one query per lane; record = 96 wor
   loop: session; wait; clock; (inline test of the candidate: tag 0x50 and hit flag 1, record pointer x 8 -> primitive index (word 0) -> point
   (float4 table at R6:R7) -> d2 = fma(dz, dz, fma(dy, dy, dx*dx)) <= r2 (R8): count, store the primitive id); pending entries test; next query from the
   returned pending entries (halves swapped), constants reloaded from the record; branch back while pending entries remain and rounds are left.
-Results (slots of the lane's out record): 3, 32, 33, 44, 45, 56..61, 70, 71 last answer; 6 count of neighbours, 7 sessions, 8 sum of start clocks, 9 sum of end clocks
+Results (slots of the lane's out record): 80..92 last answer (R3, R32, R33, R44, R45, R56..R61, R70, R71; they were at slots equal to the register until F457, which overwrote neighbour ids 16, 17, 28, 29, 40..45, 54, 55); 6 count of neighbours, 7 sessions, 8 sum of start clocks, 9 sum of end clocks
 (session window: end - start), 10 first start clock, 11 end clock after the loop, 13 rounds left; 16..79 neighbour primitive ids (first 64).
 Registers: R4:R5 out pointer, R92:R93 in pointer, R6:R7 points, R8 r2 (bits), R9 count, R10 sessions, R96..R108 inline temps, R109 = 1.0f (unused), R110, R111 sums,
 R112:R113, R114:R115 clocks, R116:R117 neighbour cursor, R118 rounds left, R119 first clock, R120 temp. Highest R120 (declared 128).
@@ -128,7 +128,7 @@ def build(stage, binpath, out, rounds, inline='full', debug=False, trace=False, 
     body.append(BP.bra_back(4, 7, (top - (loop_bra + 1)) * 16))                  # @P4 BRA top
     body.append(ctrl.write_control(BP.cs2r_clock(R_T1), stall=8))
     body.append(ctrl.write_control(ctrl.NOP_BYTES, stall=6))
-    outs = [(s, s) for s in LAST_ANS] + [(6, R_CNT), (7, R_SES), (8, R_T0S), (9, R_T1S), (10, R_C0), (11, R_T1), (13, R_LEFT)]
+    outs = [(80 + k, r) for k, r in enumerate(LAST_ANS)] + [(6, R_CNT), (7, R_SES), (8, R_T0S), (9, R_T1S), (10, R_C0), (11, R_T1), (13, R_LEFT)]
     for slot, reg in outs:
         body.append(field(stg[slot], 32, reg))
     if debug:   # DEBUG ONLY (fails check_seq L4, never run on a TTU build): the inline temporaries to slots 20 ..

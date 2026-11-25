@@ -59,7 +59,7 @@ template <class T> static T *dalloc_lo32(size_t n)   // device buffer that does 
 int main(int argc, char **argv)
 {
     if (argc < 4) { fprintf(stderr, "usage: rtnn_host PTX WORDS OUT.json [options]\n"); return 2; }
-    std::string mode = "real"; int npts = 4096, warps = 1, blocks = 1, repeat = 1, orep = 0; unsigned seed = 7; float r = 0.08f; bool optix_only = false, stats_only = false, no_ttu = false, trace = false, serial = false; const char *gas_file = nullptr;
+    std::string mode = "real"; int npts = 4096, warps = 1, blocks = 1, repeat = 1, orep = 0; unsigned seed = 7; float r = 0.08f; bool optix_only = false, stats_only = false, no_ttu = false, trace = false, serial = false; const char *gas_file = nullptr; int inject_rounds = 1;
     for (int a = 4; a < argc; ++a) {
         if (!strcmp(argv[a], "--mode") && a + 1 < argc) mode = argv[++a];
         else if (!strcmp(argv[a], "--pts") && a + 1 < argc) npts = atoi(argv[++a]);
@@ -72,6 +72,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--optix-only")) optix_only = true;
         else if (!strcmp(argv[a], "--stats-only")) stats_only = true;
         else if (!strcmp(argv[a], "--dump-gas") && a + 1 < argc) gas_file = argv[++a];   // the whole GAS of this scene (private raw file)
+        else if (!strcmp(argv[a], "--inject-rounds") && a + 1 < argc) inject_rounds = atoi(argv[++a]);   // inject mode: the stage 0 build runs this many rounds; round 1 sees answer 1, rounds 2.. see answer 2 again
         else if (!strcmp(argv[a], "--serial")) serial = true;   // for a build_rtnn.py --lane0 kernel: one launch of one warp per query, lane 0 of each warp is the only lane that runs
         else if (!strcmp(argv[a], "--trace")) trace = true;   // for a build_rtnn.py --trace kernel: per session answer words in a per lane trace area (64 sessions of 128 bytes) behind the out records
         else { fprintf(stderr, "unknown option %s\n", argv[a]); return 2; }
@@ -172,11 +173,16 @@ int main(int argc, char **argv)
     const size_t TRW = trace ? (size_t)TOTAL * 2048 : 0;   // trace words (8 KB per lane)
     unsigned *dout = dalloc_lo32<unsigned>(IMG + TRW), *din; CK(cudaMalloc((void **)&din, IMG * 4));
     unsigned long long *drecs = nullptr; std::vector<unsigned> fake_prim(TOTAL, 0);
-    unsigned *dr = nullptr; if (mode == "inject") { dr = dalloc_lo32<unsigned>((size_t)TOTAL * 16); }   // 8 records of 2 words per lane
+    unsigned *dr = nullptr; if (mode == "inject") { dr = dalloc_lo32<unsigned>((size_t)TOTAL * 256); }   // 2 runs of up to 64 records (2 words each) per lane
     std::vector<unsigned> in(IMG, 0), outv(IMG + TRW, 0x77777777u);
     const unsigned long long st0 = root; const unsigned start_flags = 0x2484000u;
-    static const unsigned CNT[4] = {1, 2, 3, 8}; std::vector<std::vector<unsigned>> fake_run(TOTAL);   // inject: lane i gets an answer for CNT[i % 4] consecutive records
-    if (mode == "inject") { std::vector<unsigned> rv((size_t)TOTAL * 16, 0); std::mt19937 r2g(seed + 99); for (unsigned i = 0; i < TOTAL; ++i) for (unsigned j = 0; j < CNT[i % 4]; ++j) { const unsigned p = (unsigned)(r2g() % npts); fake_run[i].push_back(p); rv[(size_t)i * 16 + 2 * j] = p; } CK(cudaMemcpy(dr, rv.data(), rv.size() * 4, cudaMemcpyHostToDevice)); }
+    static const unsigned CNTS[7] = {1, 2, 3, 8, 17, 31, 63}; std::vector<std::vector<unsigned>> fake_run(TOTAL), fake_run2(TOTAL); std::vector<unsigned> cnt1(TOTAL, 0), cnt2(TOTAL, 0);
+    // inject: lane i gets answer 1 for CNTS[i % 7] records in round 1 and answer 2 (CNTS[(i / 7 + 3) % 7] records, the next consecutive run) in every later round
+    if (mode == "inject") { std::vector<unsigned> rv((size_t)TOTAL * 256, 0); std::mt19937 r2g(seed + 99);
+        for (unsigned i = 0; i < TOTAL; ++i) { cnt1[i] = CNTS[i % 7]; cnt2[i] = CNTS[(i / 7 + 3) % 7];
+            for (unsigned j = 0; j < cnt1[i]; ++j) { const unsigned p = (unsigned)(r2g() % npts); fake_run[i].push_back(p); rv[(size_t)i * 256 + 2 * j] = p; }
+            for (unsigned j = 0; j < cnt2[i]; ++j) { const unsigned p = (unsigned)(r2g() % npts); fake_run2[i].push_back(p); rv[(size_t)i * 256 + 128 + 2 * j] = p; } }
+        CK(cudaMemcpy(dr, rv.data(), rv.size() * 4, cudaMemcpyHostToDevice)); }
     for (unsigned i = 0; i < TOTAL; ++i) {
         unsigned *R = &in[(size_t)i * N]; const float4 q = Q[i];
         R[12] = fbits(q.z); R[13] = 0; R[82] = fbits(q.x); R[83] = fbits(q.y);   // 0x40: origin xy in R82:R83, z and tmin in R12:R13
@@ -188,7 +194,8 @@ int main(int argc, char **argv)
         // the trace address is absolute: the template's stores are [R.64] with a memory descriptor, not base + offset
         if (trace) { const unsigned long long tro = (unsigned long long)dout + (unsigned long long)IMG * 4 + (unsigned long long)i * 8192; R[18] = (unsigned)tro; R[19] = (unsigned)(tro >> 32); }
         R[90] = 0; R[6] = (unsigned)(unsigned long long)dP; R[7] = (unsigned)((unsigned long long)dP >> 32); R[8] = fbits(r2);
-        if (mode == "inject") { const unsigned long long ra = (unsigned long long)(dr + 16 * i) >> 3; R[33] = 0xa0000000u | CNT[i % 4]; R[3] = 1; R[44] = (unsigned)ra; R[45] = (unsigned)(ra >> 32); }
+        if (mode == "inject") { const unsigned long long ra = (unsigned long long)(dr + 256 * i) >> 3, rb = (unsigned long long)(dr + 256 * i + 128) >> 3; R[33] = 0xa0000000u | cnt1[i]; R[3] = 1; R[44] = (unsigned)ra; R[45] = (unsigned)(ra >> 32);
+            R[59] = 0xa0000000u | cnt2[i]; R[60] = (unsigned)rb; R[61] = (unsigned)(rb >> 32); }   // answer 2 reaches R33, R44:R45 through the swap (R33 <- R59, R44:R45 <- R60:R61), R3 <- R71
     }
     CK(cudaMemcpy(din, in.data(), IMG * 4, cudaMemcpyHostToDevice));
     // the kernel adds to the out pointer in 32 bits (neighbour cursor): refuse a window that crosses 4 GB
@@ -216,19 +223,21 @@ int main(int argc, char **argv)
         std::vector<unsigned> ox; for (unsigned k = 0; k < std::min<unsigned>(onbr[(size_t)i * 65], 64); ++k) ox.push_back(onbr[(size_t)i * 65 + 1 + k]);
         std::vector<unsigned> cpu;
         if (mode == "inject") {   // expected: the fake candidate's primitive, if within r (same expression)
-            for (unsigned pp : fake_run[i]) { const float4 p = P[pp], q = Q[i]; const float dx = p.x - q.x, dy = p.y - q.y, dz = p.z - q.z; if (fmaf(dz, dz, fmaf(dy, dy, dx * dx)) <= r2) cpu.push_back(pp); }
+            auto inside = [&](unsigned pp) { const float4 p = P[pp], q = Q[i]; const float dx = p.x - q.x, dy = p.y - q.y, dz = p.z - q.z; return fmaf(dz, dz, fmaf(dy, dy, dx * dx)) <= r2; };
+            for (unsigned pp : fake_run[i]) if (inside(pp)) cpu.push_back(pp);
+            for (int rr = 1; rr < inject_rounds; ++rr) for (unsigned pp : fake_run2[i]) if (inside(pp)) cpu.push_back(pp);
             ox = cpu;   // no OptiX reference in inject mode
-            if (O[7] != 1) ++unfinished;
+            if (O[7] != (unsigned)inject_rounds) ++unfinished;
         } else { cpu = cpu_nbrs(i, &ambiguous); }
         expv[i] = cpu;
         const bool ocap = onbr[(size_t)i * 65] > 64; capped += ocap; ++checked;
         std::vector<unsigned> a = ours, b = ox, c = cpu; std::sort(a.begin(), a.end()); std::sort(b.begin(), b.end()); std::sort(c.begin(), c.end());
         const bool eq_ob = mode == "inject" ? true : (cnt[i] == onbr[(size_t)i * 65] && a == b), eq_oc = (cnt[i] == cpu.size() || (ocap && cnt[i] > 64)) && (ocap || a == c), eq_xc = mode == "inject" ? true : (onbr[(size_t)i * 65] == cpu.size() && (ocap || b == c));
-        if (mode == "inject") { if (!(cnt[i] == cpu.size() && a == c)) { ++bad_ours_cpu; if (first_bad < 0) first_bad = i; if (bad_ours_cpu <= 12) printf("bad lane %u (warp %u, lane %u, count %u): ours cnt %u [%u %u %u ...] expect %zu\n", i, i / 32, i % 32, (i % 4 == 0 ? 1u : i % 4 == 1 ? 2u : i % 4 == 2 ? 3u : 8u), cnt[i], a.size() > 0 ? a[0] : 0u, a.size() > 1 ? a[1] : 0u, a.size() > 2 ? a[2] : 0u, cpu.size()); } continue; }
+        if (mode == "inject") { if (!(cnt[i] == cpu.size() && ours == std::vector<unsigned>(cpu.begin(), cpu.begin() + std::min<size_t>(cpu.size(), 64)))) { ++bad_ours_cpu; if (first_bad < 0) first_bad = i; if (bad_ours_cpu <= 12) printf("bad lane %u (warp %u, lane %u, count1 %u): ours cnt %u [%u %u %u ...] expect %zu\n", i, i / 32, i % 32, cnt1[i], cnt[i], a.size() > 0 ? a[0] : 0u, a.size() > 1 ? a[1] : 0u, a.size() > 2 ? a[2] : 0u, cpu.size()); } continue; }
         bad_ours_optix += !eq_ob; bad_ours_cpu += !eq_oc; bad_optix_cpu += !eq_xc; if ((!eq_ob || !eq_oc) && first_bad < 0) first_bad = i;
         same_order += (ours == ox);
         if (ses[i] == oncand[i]) ++ses_eq_cand; else if (ses[i] == oncand[i] + 1) ++ses_cand_p1; else ++ses_other;
-        unfinished += left[i] == 0 && (O[56] | O[57] | O[58] | O[59] | O[60] | O[61] | O[70] | O[71]) != 0;
+        unfinished += left[i] == 0 && (O[85] | O[86] | O[87] | O[88] | O[89] | O[90] | O[91] | O[92]) != 0;   // last answer's pending words (slots 80..92)
     }
     auto pct = [&](std::vector<unsigned> v, double f) { if (v.empty()) return 0u; std::sort(v.begin(), v.end()); return v[(size_t)(f * (v.size() - 1))]; };
     double sum_ses = 0, sum_eff_num = 0, sum_eff_den = 0, sum_cyc = 0, sum_sess = 0;
@@ -248,7 +257,7 @@ int main(int argc, char **argv)
             for (unsigned k = 0; k < std::min<unsigned>(cnt[i], 64); ++k) fprintf(jf, "%s%u", k ? "," : "", O[16 + k]);
             fprintf(jf, "], \"expect\": ["); for (size_t k = 0; k < expv[i].size() && k < 64; ++k) fprintf(jf, "%s%u", k ? "," : "", expv[i][k]);
             fprintf(jf, "], \"optix\": ["); for (unsigned k = 0; k < std::min<unsigned>(onbr[(size_t)i * 65], 64); ++k) fprintf(jf, "%s%u", k ? "," : "", onbr[(size_t)i * 65 + 1 + k]);
-            fprintf(jf, "], \"last\": [%u,\"%08x\",\"%08x\",\"%08x\",\"%08x\"], \"dbg\": [", O[3], O[32], O[33], O[44], O[45]);
+            fprintf(jf, "], \"last\": [%u,\"%08x\",\"%08x\",\"%08x\",\"%08x\"], \"dbg\": [", O[80], O[81], O[82], O[83], O[84]);
             for (int k = 20; k < 32; ++k) fprintf(jf, "%s\"%08x\"", k > 20 ? "," : "", O[k]);
             fprintf(jf, "]}");
         }
